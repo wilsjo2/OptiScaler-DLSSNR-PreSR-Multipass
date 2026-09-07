@@ -30,6 +30,7 @@ using PFN_VkInit = int(__cdecl*)(const wchar_t*, const wchar_t*, void*, void*, v
 using PFN_VkCreate = void*(__cdecl*)(void*, void*, unsigned int, unsigned int, int, float, int, float, float, float,
                                      int, int);
 using PFN_VkEvaluate = int(__cdecl*)(void*, void*, void*, void*, void*, void*, void*, unsigned int, unsigned int,
+                                     unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int,
                                      unsigned int, unsigned int, int, int, float, int, float, float, float, int, float,
                                      float);
 using PFN_VkRelease = void(__cdecl*)(void*);
@@ -602,8 +603,10 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
 
     const uint32_t width = colour->Resource.ImageViewInfo.Width;
     const uint32_t height = colour->Resource.ImageViewInfo.Height;
-    const uint32_t guideWidth = depth->Resource.ImageViewInfo.Width;
-    const uint32_t guideHeight = depth->Resource.ImageViewInfo.Height;
+    uint32_t guideWidth = depth->Resource.ImageViewInfo.Width;
+    uint32_t guideHeight = depth->Resource.ImageViewInfo.Height;
+    const uint32_t motionAllocationWidth = motion->Resource.ImageViewInfo.Width;
+    const uint32_t motionAllocationHeight = motion->Resource.ImageViewInfo.Height;
 
     if (width == 0 || height == 0)
         return;
@@ -801,6 +804,33 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
     const unsigned int createFlags = GameCreateFlags(params);
     const bool gameSaysHdr = (createFlags & NVSDK_NGX_DLSS_Feature_Flags_IsHDR) != 0;
     const bool depthInverted = (createFlags & NVSDK_NGX_DLSS_Feature_Flags_DepthInverted) != 0;
+    const bool lowResolutionMotion = (createFlags & NVSDK_NGX_DLSS_Feature_Flags_MVLowRes) != 0;
+
+    uint32_t renderWidth = guideWidth;
+    uint32_t renderHeight = guideHeight;
+    params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &renderWidth);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &renderHeight);
+
+    uint32_t depthBaseX = 0, depthBaseY = 0, motionBaseX = 0, motionBaseY = 0;
+    params->Get(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X, &depthBaseX);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y, &depthBaseY);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_X, &motionBaseX);
+    params->Get(NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_Y, &motionBaseY);
+
+    depthBaseX = std::min(depthBaseX, guideWidth);
+    depthBaseY = std::min(depthBaseY, guideHeight);
+    guideWidth = std::min(renderWidth, guideWidth - depthBaseX);
+    guideHeight = std::min(renderHeight, guideHeight - depthBaseY);
+    motionBaseX = std::min(motionBaseX, motionAllocationWidth);
+    motionBaseY = std::min(motionBaseY, motionAllocationHeight);
+    const uint32_t motionWidth = std::min(lowResolutionMotion ? renderWidth : width,
+                                          motionAllocationWidth - motionBaseX);
+    const uint32_t motionHeight = std::min(lowResolutionMotion ? renderHeight : height,
+                                           motionAllocationHeight - motionBaseY);
+
+    float mvScaleX = 1.0f, mvScaleY = 1.0f;
+    params->Get(NVSDK_NGX_Parameter_MV_Scale_X, &mvScaleX);
+    params->Get(NVSDK_NGX_Parameter_MV_Scale_Y, &mvScaleY);
 
     // The game asking the upscaler to forget its history -- a cut, a teleport, a load. Same omission
     // as the D3D12 path had: the model's history was only ever reset by things that happened to us,
@@ -1052,12 +1082,15 @@ void EvaluateAfterUpscaleVk(VkCommandBuffer cmdBuffer, NVSDK_NGX_Parameter* para
 
     Transition(cmdBuffer, g_vk.output, VK_IMAGE_LAYOUT_GENERAL);
 
+    const float mvToWorkX = width != 0 ? (float) workWidth / (float) width : 1.0f;
+    const float mvToWorkY = height != 0 ? (float) workHeight / (float) height : 1.0f;
     const int evaluated = g_vk.evaluate(
         (void*) cmdBuffer, g_vk.feature, g_vk.capabilityParams, &modelInput->ngx, depth, motion, &g_vk.output.ngx,
-        workWidth, workHeight, guideWidth, guideHeight, depthInverted ? 1 : 0, g_vk.reset ? 1 : 0,
-        cfg.DlssNrIntensity.value_or_default(), (int) cfg.DlssNrStyle.value_or_default(),
+        workWidth, workHeight, guideWidth, guideHeight, motionWidth, motionHeight, depthBaseX, depthBaseY,
+        motionBaseX, motionBaseY, depthInverted ? 1 : 0, g_vk.reset ? 1 : 0,        cfg.DlssNrIntensity.value_or_default(), (int) cfg.DlssNrStyle.value_or_default(),
         cfg.DlssNrLocalStructure.value_or_default(), cfg.DlssNrLocalTone.value_or_default(),
-        cfg.DlssNrSkinStructure.value_or_default(), cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, 1.0f, 1.0f);
+        cfg.DlssNrSkinStructure.value_or_default(), cfg.DlssNrAutoMask.value_or_default() ? 1 : 0,
+        mvScaleX * mvToWorkX, mvScaleY * mvToWorkY);
 
     g_vk.reset = false;
     g_vk.frames++;

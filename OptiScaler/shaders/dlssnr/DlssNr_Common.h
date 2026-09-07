@@ -109,6 +109,12 @@ struct DlssNrFrameInfo
     // available and is what gets used.
     unsigned int RenderSubrectWidth = 0;
     unsigned int RenderSubrectHeight = 0;
+    unsigned int DepthSubrectBaseX = 0;
+    unsigned int DepthSubrectBaseY = 0;
+    unsigned int MotionSubrectBaseX = 0;
+    unsigned int MotionSubrectBaseY = 0;
+
+    bool MotionVectorsLowResolution = false;
 };
 
 struct alignas(256) DlssNrConstants

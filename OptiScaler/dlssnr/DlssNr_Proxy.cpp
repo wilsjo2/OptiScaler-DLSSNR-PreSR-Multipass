@@ -147,8 +147,9 @@ void Release()
 unsigned int Run(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, ID3D12Resource* color,
                  ID3D12Resource* depth, ID3D12Resource* motion, ID3D12Resource* output,
                  unsigned int width, unsigned int height, unsigned int guideWidth,
-                 unsigned int guideHeight, bool depthInverted, bool reset, float mvScaleX,
-                 float mvScaleY)
+                 unsigned int guideHeight, unsigned int motionWidth, unsigned int motionHeight,
+                 unsigned int depthBaseX, unsigned int depthBaseY, unsigned int motionBaseX,
+                 unsigned int motionBaseY, bool depthInverted, bool reset, float mvScaleX, float mvScaleY)
 {
     if (g_proxy.failed || !Available())
         return 0;
@@ -266,14 +267,14 @@ unsigned int Run(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, ID3D1
     SetUInt(params, "DLSSNR.OutputSubrectBaseY", 0u);
     SetUInt(params, "DLSSNR.OutputSubrectWidth", width);
     SetUInt(params, "DLSSNR.OutputSubrectHeight", height);
-    SetUInt(params, "DLSSNR.DepthSubrectBaseX", 0u);
-    SetUInt(params, "DLSSNR.DepthSubrectBaseY", 0u);
+    SetUInt(params, "DLSSNR.DepthSubrectBaseX", depthBaseX);
+    SetUInt(params, "DLSSNR.DepthSubrectBaseY", depthBaseY);
     SetUInt(params, "DLSSNR.DepthSubrectWidth", guideWidth);
     SetUInt(params, "DLSSNR.DepthSubrectHeight", guideHeight);
-    SetUInt(params, "DLSSNR.MVecSubrectBaseX", 0u);
-    SetUInt(params, "DLSSNR.MVecSubrectBaseY", 0u);
-    SetUInt(params, "DLSSNR.MVecSubrectWidth", guideWidth);
-    SetUInt(params, "DLSSNR.MVecSubrectHeight", guideHeight);
+    SetUInt(params, "DLSSNR.MVecSubrectBaseX", motionBaseX);
+    SetUInt(params, "DLSSNR.MVecSubrectBaseY", motionBaseY);
+    SetUInt(params, "DLSSNR.MVecSubrectWidth", motionWidth);
+    SetUInt(params, "DLSSNR.MVecSubrectHeight", motionHeight);
 
     // The game's own encoding, passed through. Deriving this from the resolutions was a guess, and
     // at native resolution it came out as exactly 1.0 -- so a game using normalised vectors was
