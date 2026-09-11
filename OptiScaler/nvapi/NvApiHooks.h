@@ -18,6 +18,7 @@ class NvApiHooks
                                                           NV_GPU_ARCH_INFO* pGpuArchInfo);
     static NvAPI_Status __stdcall hkNvAPI_DRS_GetSetting(NvDRSSessionHandle hSession, NvDRSProfileHandle hProfile,
                                                          NvU32 settingId, NVDRS_SETTING* pSetting);
+    static NvAPI_Status __stdcall hkNvAPI_D3D12_SetFlipConfig(void* pCommandQueue, NvU32 dwFlags, void* pParams);
     static void* __stdcall hkNvAPI_QueryInterface(unsigned int InterfaceId);
     static void Hook(HMODULE nvapiModule);
     static void Unhook();

@@ -1863,9 +1863,22 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         Config::Instance()->CheckForUpdate.set_volatile_value(false);
 #endif
 
+        // Init Kernel proxies
+        NtdllProxy::Init();
+        KernelBaseProxy::Init();
+        Kernel32Proxy::Init();
+
+        // Check for Wine / Linux
+        spdlog::info("");
+        State::Instance().isRunningOnLinux = IsRunningOnWine();
+
+        const bool onLinux = State::Instance().isRunningOnLinux;
+        const bool ampereMfgUnlock = Config::Instance()->FGDLSSGAmpereMfgUnlock.value_or_default();
+        const int ampereMaxFrames = Config::Instance()->FGDLSSGAmpereMfgMaxFrames.value_or_default();
+        const bool ampereFallbackToFsrFg = AmpereMfgLoader::ShouldFallbackToFsrFg(ampereMaxFrames, onLinux, ampereMfgUnlock);
+
         // Initial state of FG
-        State::Instance().externalFrameGeneration = Config::Instance()->ExternalFrameGeneration.value_or_default() ||
-                                                    Config::Instance()->FGDLSSGAmpereMfgUnlock.value_or_default();
+        State::Instance().externalFrameGeneration = (Config::Instance()->ExternalFrameGeneration.value_or_default() || ampereMfgUnlock) && !ampereFallbackToFsrFg;
         if (State::Instance().externalFrameGeneration)
         {
             // Only runtime overrides: preserve the user's OptiFG configuration for the next
@@ -1880,11 +1893,17 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             cfg->FN_ForceReflex.set_volatile_value(ForceReflex::InGame);
             LOG_INFO("External frame generation: leaving Streamline/Reflex and MFG control to the game or unlocker; NR/SR remain available");
         }
-
-        // Init Kernel proxies
-        NtdllProxy::Init();
-        KernelBaseProxy::Init();
-        Kernel32Proxy::Init();
+        else if (ampereFallbackToFsrFg)
+        {
+            // On Linux / Proton with 1 generated frame, native DLSS-G fails or crashes in DXVK-NVAPI/Streamline.
+            // Automatically fall back to OptiScaler's internal FSR FG pipeline (DLSSG input -> FSR FG output).
+            auto* cfg = Config::Instance();
+            cfg->FGEnabled.set_volatile_value(true);
+            cfg->FGInput.set_volatile_value(FGInput::DLSSG);
+            cfg->FGOutput.set_volatile_value(FGOutput::FSRFG);
+            cfg->FGNvngxReplacement.set_volatile_value(FGNvngxReplacement::None);
+            LOG_INFO("AmpereMfgLoader: On Linux with 2X FG (MaxFrames=1), falling back to internal FSR FG (FGInput=DLSSG, FGOutput=FSRFG)");
+        }
 
         State::Instance().activeFgInput = Config::Instance()->FGInput.value_or_default();
         State::Instance().activeFgOutput = Config::Instance()->FGOutput.value_or_default();
@@ -1896,10 +1915,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
         if (State::Instance().activeFgInput == FGInput::NvngxFG)
             State::Instance().activeFgOutput = FGOutput::NoFG;
-
-        // Check for Wine
-        spdlog::info("");
-        State::Instance().isRunningOnLinux = IsRunningOnWine();
 
         // Not foolproof
         // calls LoadLibraryExW inside DllMain but seems mostly fine if we only call NvAPI_GetInterfaceVersionString

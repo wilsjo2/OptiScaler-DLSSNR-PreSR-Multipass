@@ -12,6 +12,7 @@ struct Status
     bool DllFound = false;    // dlssg_sm86.dll found in OptiScaler/dlssg_sm86/
     bool IniWritten = false;  // dlssg_sm86.ini generated and written
     bool DllLoaded = false;   // LoadLibrary succeeded
+    bool FsrFallbackActive = false; // 2X FG on Linux: internal FSR FG active
     std::string ErrorMessage; // Human-readable error if anything failed
 };
 
@@ -19,6 +20,53 @@ Status LastStatus();
 
 /// Called after DLL initialization, once GPU/environment information is available.
 void TrySetup();
+
+/// Resolves the companion INI MaxGeneratedFrames setting.
+/// MaxFrames is clamped to [1, 3] (preserving 1 for 2X FG, 2 for 3X FG, 3 for 4X FG).
+/// With NvAPI_D3D12_SetFlipConfig stubbed on Linux, both Windows and Linux cleanly
+/// support single-frame 2X FG (MaxGeneratedFrames = 1) without artificial elevation.
+inline int ResolveMaxGeneratedFrames(int configuredMaxFrames, bool /*onLinux*/ = false)
+{
+    if (configuredMaxFrames <= 0 || configuredMaxFrames > 3)
+        configuredMaxFrames = 3;
+
+    return configuredMaxFrames;
+}
+
+/// Returns true if single-frame 2X FG on Linux should fall back to OptiScaler's
+/// internal FSR FG pipeline (DLSSG input -> FSR FG output) instead of sideloading dlssg_sm86.
+inline bool ShouldFallbackToFsrFg(int configuredMaxFrames, bool onLinux, bool mfgUnlockEnabled)
+{
+    return onLinux && mfgUnlockEnabled && (configuredMaxFrames == 1);
+}
+
+constexpr uint32_t DRS_OVERRIDE_DLSSG_MULTI_FRAME_COUNT_ID = 0x104D6667;
+constexpr uint32_t DRS_OVERRIDE_MAX_DLSSG_DYNAMIC_MULTI_FRAME_COUNT_ID = 0x10562D0F;
+
+/// Evaluates whether a DRS query matches a DLSSG multi-frame setting and resolves
+/// the overridden value when running on Linux with Ampere MFG unlock enabled.
+inline bool TryResolveDrsMultiFrameSetting(uint32_t settingId, int configuredMaxFrames, bool onLinux, bool mfgUnlockEnabled, uint32_t& outValue)
+{
+    if (!onLinux || !mfgUnlockEnabled)
+        return false;
+
+    // Do not override maximum dynamic multi-frame count when configured for single-frame (<= 1),
+    // because Streamline requires dynamic max > 1 to enable Dynamic MFG.
+    if (settingId == DRS_OVERRIDE_MAX_DLSSG_DYNAMIC_MULTI_FRAME_COUNT_ID && configuredMaxFrames <= 1)
+        return false;
+
+    if (settingId == DRS_OVERRIDE_DLSSG_MULTI_FRAME_COUNT_ID ||
+        settingId == DRS_OVERRIDE_MAX_DLSSG_DYNAMIC_MULTI_FRAME_COUNT_ID)
+    {
+        int clamped = configuredMaxFrames;
+        if (clamped <= 0 || clamped > 3)
+            clamped = 3;
+        outValue = static_cast<uint32_t>(clamped);
+        return true;
+    }
+
+    return false;
+}
 
 /// Formats dlssg_sm86.ini content with Native 0.2.3 specification and strict clamping.
 inline std::string FormatIniContent(int maxFrames, const std::string& kernelImg, int hwBilinear = 0, const std::string& router = "SM86", int logLevel = 1)

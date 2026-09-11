@@ -132,6 +132,25 @@ HMODULE WINAPI KernelHooks::hk_K32_GetModuleHandleA(LPCSTR lpModuleName)
         {
             LOG_TRACE("Trying to get module handle of {}, caller: {}", lpModuleName,
                       Util::WhoIsTheCaller(_ReturnAddress()));
+
+            auto original = o_K32_GetModuleHandleA(lpModuleName);
+            if (original != nullptr)
+                return original;
+
+            // When external Frame Generation or native DLSSG is active, OptiScaler is not emulating nvngx_dlssg.dll.
+            // Avoid returning OptiScaler's dllModule, which would fail Streamline's ProductName verification.
+            if (State::Instance().externalFrameGeneration ||
+                State::Instance().activeFgNvngx == FGNvngxReplacement::None)
+            {
+                if (State::Instance().NVNGX_DLSSG_Path.has_value())
+                {
+                    original = LoadLibraryW(State::Instance().NVNGX_DLSSG_Path.value().c_str());
+                    if (original != nullptr)
+                        return original;
+                }
+                return nullptr;
+            }
+
             return dllModule;
         }
         else if (strcmp(lpModuleName, "amdxc64.dll") == 0)
@@ -166,7 +185,32 @@ HMODULE WINAPI KernelHooks::hk_K32_GetModuleHandleW(LPCWSTR lpModuleName)
 {
     if (lpModuleName != NULL)
     {
-        if (wcscmp(lpModuleName, L"amdxc64.dll") == 0)
+        if (wcscmp(lpModuleName, L"nvngx_dlssg.dll") == 0)
+        {
+            LOG_TRACE("Trying to get module handle of {}, caller: {}", wstring_to_string(lpModuleName),
+                      Util::WhoIsTheCaller(_ReturnAddress()));
+
+            auto original = o_K32_GetModuleHandleW(lpModuleName);
+            if (original != nullptr)
+                return original;
+
+            // When external Frame Generation or native DLSSG is active, OptiScaler is not emulating nvngx_dlssg.dll.
+            // Avoid returning OptiScaler's dllModule, which would fail Streamline's ProductName verification.
+            if (State::Instance().externalFrameGeneration ||
+                State::Instance().activeFgNvngx == FGNvngxReplacement::None)
+            {
+                if (State::Instance().NVNGX_DLSSG_Path.has_value())
+                {
+                    original = LoadLibraryW(State::Instance().NVNGX_DLSSG_Path.value().c_str());
+                    if (original != nullptr)
+                        return original;
+                }
+                return nullptr;
+            }
+
+            return dllModule;
+        }
+        else if (wcscmp(lpModuleName, L"amdxc64.dll") == 0)
         {
             LOG_TRACE("amdxc64.dll call");
 

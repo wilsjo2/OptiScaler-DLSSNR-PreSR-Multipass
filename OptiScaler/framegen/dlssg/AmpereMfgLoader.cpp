@@ -47,7 +47,15 @@ std::string ResolveRouter()
 std::string GenerateIniContent()
 {
     auto* cfg = Config::Instance();
-    int maxFrames = cfg->FGDLSSGAmpereMfgMaxFrames.value_or_default();
+    const auto& gpu = IdentifyGpu::getPrimaryGpu();
+    const bool onLinux = State::Instance().isRunningOnLinux || gpu.usesVkd3dProton;
+    const int configuredFrames = cfg->FGDLSSGAmpereMfgMaxFrames.value_or_default();
+    const int maxFrames = ResolveMaxGeneratedFrames(configuredFrames, onLinux);
+
+    if (onLinux && configuredFrames == 1)
+    {
+        LOG_INFO("AmpereMfgLoader: On Linux/Proton with 2X FG (configured max frames 1); SetFlipConfig is stubbed in NvApiHooks to enable clean native 2X FG");
+    }
 
     std::string kernelImg = cfg->FGDLSSGAmpereMfgKernelImage.value_or("Auto");
     if (kernelImg != "PTX" && kernelImg != "Cubin")
@@ -84,6 +92,19 @@ void TrySetup()
     if (!cfg->FGDLSSGAmpereMfgUnlock.value_or_default())
         return;
 
+    const auto& gpu = IdentifyGpu::getPrimaryGpu();
+    const bool onLinux = State::Instance().isRunningOnLinux || gpu.usesVkd3dProton;
+    const int configuredFrames = cfg->FGDLSSGAmpereMfgMaxFrames.value_or_default();
+
+    if (ShouldFallbackToFsrFg(configuredFrames, onLinux, true))
+    {
+        s_status.Enabled = true;
+        s_status.FsrFallbackActive = true;
+        s_status.ErrorMessage.clear();
+        LOG_INFO("AmpereMfgLoader: On Linux with 1 generated frame, falling back to OptiScaler internal FSR FG instead of sideloading dlssg_sm86");
+        return;
+    }
+
     s_status.Enabled = true;
 
     // Mutual exclusion: fail if Ada MFG unlock is also enabled
@@ -95,7 +116,6 @@ void TrySetup()
     }
 
     // GPU guard: verify Nvidia Turing or Ampere architecture
-    const auto& gpu = IdentifyGpu::getPrimaryGpu();
     if (gpu.vendorId != VendorId::Nvidia)
     {
         s_status.ErrorMessage = "SM86/SM75 MFG requires an NVIDIA GPU.";
