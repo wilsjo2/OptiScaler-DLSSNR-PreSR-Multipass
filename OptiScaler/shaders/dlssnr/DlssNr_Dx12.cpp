@@ -237,6 +237,12 @@ struct NrState
     ID3D12Resource* passScratch = nullptr;
     bool passScratchFailed = false;
 
+    // A pass's raw answer, saturated back into the proxy's valid range, before it becomes the next
+    // pass's input. Never a ping-pong destination itself -- passOutput still alternates between
+    // output and passScratch above; this is only the clamp step's landing spot.
+    ID3D12Resource* passClampScratch = nullptr;
+    bool passClampScratchFailed = false;
+
     // The frame as the upscaler wrote it. The resolve adds the model's edit to this rather than
     // reconstructing it by inverting the tone curve, which is what turned every light in the frame into
     // a string of coloured cells.
@@ -811,8 +817,8 @@ void ReleaseSurfacesIfFormatChanged(DXGI_FORMAT needed)
     }
 
     for (ID3D12Resource** r :
-         { &g_nr.output, &g_nr.passScratch, &g_nr.colorCopy, &g_nr.hdrCopy, &g_nr.colorSmall,
-           &g_nr.outputNative, &g_nr.activeColor, &g_nr.residualEdited,
+         { &g_nr.output, &g_nr.passScratch, &g_nr.passClampScratch, &g_nr.colorCopy, &g_nr.hdrCopy,
+           &g_nr.colorSmall, &g_nr.outputNative, &g_nr.activeColor, &g_nr.residualEdited,
            &g_nr.residualHistory[0], &g_nr.residualHistory[1],
            &g_nr.residualComposed })
         ParkNrResource(*r);
@@ -821,6 +827,7 @@ void ReleaseSurfacesIfFormatChanged(DXGI_FORMAT needed)
     g_nr.residualHistoryIndex = 0;
 
     g_nr.passScratchFailed = false;
+    g_nr.passClampScratchFailed = false;
 
     g_nr.reset = true;
 }
@@ -1900,6 +1907,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
             ParkNrResource(g_nr.output);
             ParkNrResource(g_nr.passScratch);
+            ParkNrResource(g_nr.passClampScratch);
             ParkNrResource(g_nr.colorCopy);
             ParkNrResource(g_nr.hdrCopy);
             ParkNrResource(g_nr.colorSmall);
@@ -1913,6 +1921,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             g_nr.residualHistoryIndex = 0;
             g_nr.residualHistoryPrimed = false;
             g_nr.passScratchFailed = false;
+            g_nr.passClampScratchFailed = false;
         }
     }
 
@@ -1972,6 +1981,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // allocation attempt; holding a failing allocation at two must not retry it every frame.
         ParkNrResource(g_nr.passScratch);
         g_nr.passScratchFailed = false;
+        ParkNrResource(g_nr.passClampScratch);
+        g_nr.passClampScratchFailed = false;
     }
     else if (g_nr.passScratch == nullptr && !g_nr.passScratchFailed)
     {
@@ -1980,6 +1991,15 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
         if (g_nr.passScratchFailed)
             LOG_ERROR("DLSS-NR: could not allocate the model-output ping-pong; extra passes are disabled");
+    }
+
+    if (requestedPasses > 1 && g_nr.passClampScratch == nullptr && !g_nr.passClampScratchFailed)
+    {
+        g_nr.passClampScratch = CreateScratch(device, desc.Format, workWidth, workHeight);
+        g_nr.passClampScratchFailed = g_nr.passClampScratch == nullptr;
+
+        if (g_nr.passClampScratchFailed)
+            LOG_ERROR("DLSS-NR: could not allocate the interpass clamp target; extra passes are disabled");
     }
 
     if (reduced && g_nr.colorSmall == nullptr)
@@ -2152,7 +2172,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // NGX feature creation records work on the supplied command list; evaluating that feature before
     // the list has been submitted is the creation-frame GPU hang that caused the old multi-pass path
     // to be removed. A new feature therefore gets an entire build-only frame and starts next time.
-    if (g_nr.passScratch != nullptr)
+    // Also gated on the clamp scratch: without it there is nowhere to land an intermediate pass's
+    // raw answer before handing it to the next pass, so no extra pass may become active.
+    if (g_nr.passScratch != nullptr && g_nr.passClampScratch != nullptr)
     {
         for (unsigned int pass = 1; pass < requestedPasses; ++pass)
         {
@@ -2607,7 +2629,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // falls back to reusing the main feature: that tells one temporal model several frames elapsed in
     // one game frame and makes its history fight the later layers.
     unsigned int effectivePasses = 1;
-    if (g_nr.passScratch != nullptr)
+    if (g_nr.passScratch != nullptr && g_nr.passClampScratch != nullptr)
     {
         for (unsigned int pass = 1; pass < requestedPasses; ++pass)
         {
@@ -2638,10 +2660,23 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     ID3D12Resource* finalAnswer = nullptr;
     bool outputReadable = false;
     bool scratchReadable = false;
+    bool clampReadable = false;
+
+    // g_nr.passClampScratch is a third participant in this same UAV/NPSR dance: an intermediate
+    // pass's raw answer lands there, saturated, and is read back as the next pass's input -- written
+    // and read again at most once per remaining intermediate boundary, exactly like output/passScratch.
+    const auto ReadableFlag = [&](ID3D12Resource* resource) -> bool&
+    {
+        if (resource == g_nr.output)
+            return outputReadable;
+        if (resource == g_nr.passClampScratch)
+            return clampReadable;
+        return scratchReadable;
+    };
 
     const auto MakeModelReadable = [&](ID3D12Resource* resource)
     {
-        bool& readable = resource == g_nr.output ? outputReadable : scratchReadable;
+        bool& readable = ReadableFlag(resource);
         if (!readable)
         {
             Barrier(cmdList, resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
@@ -2652,7 +2687,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     const auto MakeModelWritable = [&](ID3D12Resource* resource)
     {
-        bool& readable = resource == g_nr.output ? outputReadable : scratchReadable;
+        bool& readable = ReadableFlag(resource);
         if (readable)
         {
             Barrier(cmdList, resource, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
@@ -2692,7 +2727,29 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
         if (pass + 1 < effectivePasses)
         {
-            passInput = finalAnswer;
+            // The model's raw answer is not guaranteed to stay in the [0,1]-per-channel range the
+            // encode step promised it as an input (the once-per-frame resolve guard below exists for
+            // exactly this reason). Restore that range here too, so an out-of-range intermediate
+            // answer cannot compound across the remaining passes.
+            MakeModelWritable(g_nr.passClampScratch);
+            DlssNrConstants clampParams {};
+            clampParams.Mode = DlssNrMode_ClampProxy;
+            clampParams.Width = workWidth;
+            clampParams.Height = workHeight;
+            if (!DispatchPass(cmdList, clampParams, finalAnswer, nullptr, nullptr, nullptr, nullptr,
+                                g_nr.passClampScratch, nullptr))
+            {
+                static bool warnedClamp = false;
+                if (!warnedClamp)
+                {
+                    warnedClamp = true;
+                    LOG_WARN("DLSS-NR: interpass clamp dispatch failed; a later pass may see a stale "
+                             "or out-of-range input");
+                }
+            }
+            MakeModelReadable(g_nr.passClampScratch);
+
+            passInput = g_nr.passClampScratch;
             passOutput = passOutput == g_nr.output ? g_nr.passScratch : g_nr.output;
         }
     }
@@ -2947,6 +3004,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         MakeModelWritable(g_nr.output);
         if (g_nr.passScratch != nullptr)
             MakeModelWritable(g_nr.passScratch);
+        if (g_nr.passClampScratch != nullptr)
+            MakeModelWritable(g_nr.passClampScratch);
 
         if (superDownOk)
             Barrier(cmdList, g_nr.outputNative, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
@@ -2984,6 +3043,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     MakeModelWritable(g_nr.output);
     if (g_nr.passScratch != nullptr)
         MakeModelWritable(g_nr.passScratch);
+    if (g_nr.passClampScratch != nullptr)
+        MakeModelWritable(g_nr.passClampScratch);
 
     Barrier(cmdList, g_nr.hdrCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -3805,6 +3866,13 @@ void Shutdown()
         g_nr.passScratch = nullptr;
     }
     g_nr.passScratchFailed = false;
+
+    if (g_nr.passClampScratch != nullptr)
+    {
+        g_nr.passClampScratch->Release();
+        g_nr.passClampScratch = nullptr;
+    }
+    g_nr.passClampScratchFailed = false;
 
     if (g_nr.colorCopy != nullptr)
     {

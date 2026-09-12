@@ -536,6 +536,16 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         gTarget[id.xy] = 0;
         return;
     }
+    if (gMode == 12)
+    {
+        // An intermediate pass's raw answer, restored to the same [0,1]-per-channel range the
+        // encode step guarantees every pass's input, before it becomes the next pass's input.
+        // Not a re-run of the encode curve: the value is already in the encoded domain, so only
+        // the channel range needs restoring, not a second knee/Neutwo/Hybrid transform.
+        float4 raw = gSource.Load(int3(id.xy, 0));
+        gTarget[id.xy] = float4(saturate(SanitizeFinite3(raw.rgb, 0.5)), raw.a);
+        return;
+    }
     if (gMode == 8)
     {
         // The caller supplies raw-vector -> normalized active-image scale.

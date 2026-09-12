@@ -27,7 +27,8 @@ enum DlssNrMode : uint32_t
     DlssNrMode_NormalizeMotion = 8, // current-to-previous motion in normalized image coordinates
     DlssNrMode_ComposeMotion = 9, // compose two successive fields at the displaced coordinate
     DlssNrMode_ApplyInterpolatedResidual = 10, // t4: R8_UNORM NVIDIA suppression flag
-    DlssNrMode_ZeroMotion = 11 // private reset-only NR/SR guide, never passed to residual FG
+    DlssNrMode_ZeroMotion = 11, // private reset-only NR/SR guide, never passed to residual FG
+    DlssNrMode_ClampProxy = 12 // a pass's raw answer -> the same value saturated back into the proxy's valid range, before it becomes the next pass's input
 };
 
 // A successful sample may be reused only on the immediately following frame.
