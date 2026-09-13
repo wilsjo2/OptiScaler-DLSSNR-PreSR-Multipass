@@ -172,6 +172,7 @@ class MenuCommon
     static void RenderQuirksSettings(RenderMenuContext& ctx);
     static void RenderAdvancedSettings(RenderMenuContext& ctx);
     static void RenderLoggingSettings(RenderMenuContext& ctx);
+    static void RenderProfilesSettings(RenderMenuContext& ctx);
     static void RenderThemeSettings(RenderMenuContext& ctx);
     static void RenderFpsOverlaySettings(RenderMenuContext& ctx);
     static void RenderUpscalerInputsSettings(RenderMenuContext& ctx);

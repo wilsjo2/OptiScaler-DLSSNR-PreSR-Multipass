@@ -90,6 +90,25 @@ ShaderPass_Dx12 MakeDlssNrPass(DlssNr_Dx12& shader, ID3D12Device* device, ID3D12
     const auto states = DlssNr::ResolveInputStates_Dx12(interop);
     const bool supportedSubrects = HasSupportedNrSubrects(parameters, beforeUpscale);
 
+    // TEMPORARY DIAGNOSTIC (ADR-013 investigation): does this game supply a reactive/UI-bias mask
+    // at all? DlssNr_Proxy.cpp's SetCreationParameters currently always passes DLSSNR.ControlMask
+    // as null; every other upscaler backend in this codebase already reads this same standard NGX
+    // key for its own reactive-mask handling (FFXFeature_Dx12.cpp, FSR2Feature_Dx11/Dx12_212.cpp,
+    // XeSSFeature_*.cpp). One-shot log only -- no behavior change yet.
+    {
+        static bool logged = false;
+        if (!logged)
+        {
+            logged = true;
+            ID3D12Resource* reactive = nullptr;
+            const auto result =
+                parameters->Get(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, &reactive);
+            LOG_INFO("DLSS-NR diagnostic: game-supplied reactive/UI-bias mask (NVSDK_NGX_Parameter_"
+                     "DLSS_Input_Bias_Current_Color_Mask) result=0x{:X} resource={}",
+                     (uint32_t) result, reactive != nullptr ? "present" : "absent");
+        }
+    }
+
     DlssNrFrameInfo frame {};
     frame.BeforeUpscale = beforeUpscale;
     frame.PrivateColorCopy = beforeUpscale;
@@ -136,6 +155,18 @@ ShaderPass_Dx12 MakeDlssNrPass(DlssNr_Dx12& shader, ID3D12Device* device, ID3D12
     parameters->Get(NVSDK_NGX_Parameter_FrameTimeDeltaInMsec, &frame.FrameTimeMs);
     parameters->Get(NVSDK_NGX_Parameter_MV_Scale_X, &frame.MvScaleX);
     parameters->Get(NVSDK_NGX_Parameter_MV_Scale_Y, &frame.MvScaleY);
+    // NVIDIA's own reference helper treats an explicit 0.0f the same as "not set" here
+    // (nvsdk_ngx_helpers_d3d.h: "InMVScaleX == 0.0f ? 1.0f : InMVScaleX") - a game that reports a
+    // real 0.0 scale (a transient not-yet-computed value, an init-order race) would otherwise make
+    // every motion vector this pass reads collapse to zero, breaking MV-based reprojection (the
+    // RR residual accumulator, ADR-011/012, and the evaluation-cadence carry-forward, ADR-014)
+    // exactly the way it's designed to prevent. frame.MvScaleX/Y already default to 1.0f
+    // (DlssNr_Common.h) when the game never sets these keys at all; this closes the other case,
+    // an explicit zero.
+    if (frame.MvScaleX == 0.0f)
+        frame.MvScaleX = 1.0f;
+    if (frame.MvScaleY == 0.0f)
+        frame.MvScaleY = 1.0f;
     parameters->Get(NVSDK_NGX_Parameter_DLSS_Pre_Exposure, &frame.PreExposure);
     if (frame.PreExposure <= 1e-6f)
         frame.PreExposure = 1.0f;

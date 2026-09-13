@@ -28,10 +28,12 @@ auto DlssNr_Dx12::State::ReleaseSurfacesIfFormatChanged(DXGI_FORMAT needed) -> v
     modelRunning = false;
 
     for (ID3D12Resource** r : { &nr.output, &nr.passScratch, &nr.passClamp, &nr.colorCopy, &nr.hdrCopy, &nr.colorSmall,
-                                &nr.outputNative, &nr.activeColor })
+                                &nr.outputNative, &nr.activeColor, &nr.lastEffect })
         ParkNrResource(*r);
 
     nr.passScratchFailed = false;
+    nr.lastEffectFailed = false;
+    nr.lastEffectValid = false;
 
     nr.reset = true;
 }

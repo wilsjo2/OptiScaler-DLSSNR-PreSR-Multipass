@@ -272,6 +272,25 @@ class Config
     CustomOptional<bool> DlssNrResidualAcrossRr { false };
     // RR residual history blend before private upscaling; v0.7.7 default, clamped to 0.01..1.
     CustomOptional<float> DlssNrResidualAcrossRrBlend { 0.08f };
+    // Confidence-gate sensitivity for the above: length of this frame's edit-vs-history
+    // disagreement, in linear delta units, at which the blend rate reaches 1 (immediate replace).
+    // See dlssnr_residual.hlsl and ADR-011/012 for the full rationale.
+    CustomOptional<float> DlssNrResidualConfidenceSensitivity { 0.25f };
+    // TEMPORARY (ADR-013 control-mask experiment, remove after use): 0 = off (DLSSNR.ControlMask
+    // stays null, current behaviour). Nonzero = bind the motion-vectors resource as a stand-in probe
+    // for DLSSNR.ControlMask, to test whether Feature 18 responds to anything bound there at all.
+    CustomOptional<int> DlssNrControlMaskTestPattern { 0 };
+    // TEMPORARY (Phase 5 unexplored-inputs audit, remove after use): DLSSNR.BidirectionalDistortionField
+    // is a real, currently-unused optional input -- confirmed via strings/objdump on the deployed
+    // nvngx_dlssnr.dll, with the same subrect addressing as Color/Depth/MVec/ControlMask. Never
+    // referenced anywhere in this codebase before now. 0 = off (stays null, current behaviour).
+    // 1 = bind colour as a probe (high per-pixel structure, most likely to reveal any consumption).
+    CustomOptional<int> DlssNrBidirDistortionTestPattern { 0 };
+    // NR evaluation-cadence decoupling (ADR-014). 1 (default) = evaluate every frame, the existing
+    // behaviour, unchanged. N>1 = evaluate one frame in N; the other N-1 frames reproject the last
+    // real answer through that frame's own motion vectors instead of paying for a fresh NGX
+    // evaluate. See dlssnr_residual.hlsl's ReprojectOnly mode and DlssNr_Dx12_Run.cpp.
+    CustomOptional<uint32_t> DlssNrEvaluationCadence { 1u };
     // Toggles the pass in game. Unbound by default -- a key that does something unexpected is worse
     // than one that does nothing.
     CustomOptional<int> DlssNrToggleKey { UnboundKey };
@@ -597,6 +616,12 @@ class Config
     CustomOptional<float, NoDefault> MenuScale;
     CustomOptional<bool> OverlayMenu { true };
     CustomOptional<int> ShortcutKey { VK_INSERT };
+    // Require Ctrl/Alt held alongside ShortcutKey - a plain letter/digit key alone is prone to
+    // colliding with a game's own input or text entry (e.g. "O"); a modifier chord like Ctrl+Alt+O
+    // is far less likely to be bound to anything the game itself listens for. Both default false
+    // so every existing single-key ShortcutKey setup is completely unaffected.
+    CustomOptional<bool> ShortcutKeyRequireCtrl { false };
+    CustomOptional<bool> ShortcutKeyRequireAlt { false };
     CustomOptional<bool> ExtendedLimits { false };
     CustomOptional<bool> ShowFps { false };
     /// 0 Top Left, 1 Top Right, 2 Bottom Left, 3 Bottom Right
@@ -928,6 +953,14 @@ class Config
     bool LoadFromPath(const wchar_t* InPath);
     bool SaveIni();
     bool SaveXeFG();
+
+    // Per-game config profiles, saved under a "profiles" folder next to OptiScaler.ini. A profile
+    // is a full copy of the current live config (the same fields SaveIni writes), just parked
+    // under its own name instead of the active ini -- loading one applies its values immediately
+    // to the running config, exactly like switching to a different OptiScaler.ini would.
+    bool SaveProfile(const std::wstring& profileName);
+    bool LoadProfile(const std::wstring& profileName);
+    std::vector<std::string> ListProfiles();
 
     void CheckUpscalerFiles();
 

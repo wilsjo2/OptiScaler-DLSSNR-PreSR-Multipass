@@ -451,3 +451,8 @@ release
 
 # Local runtime experiments (not packaged)
 dlssg_for_sm86/
+
+# External research corpus (tools/research/fetch_sources.py) - large clones, not project source.
+# Anchored to repo root: without the leading slash this would also match tools/research/, hiding
+# the fetch script itself.
+/research/

@@ -23,6 +23,15 @@ struct ModelStateDx12
     bool passScratchFailed = false;
     ID3D12Resource* passClamp = nullptr; // bounded input for the next model pass
 
+    // NR evaluation-cadence decoupling (ADR-014): the last real model answer, at working
+    // resolution, kept around so a skipped frame can reproject it through that frame's own motion
+    // vectors instead of paying for a fresh NGX evaluate. Allocated lazily, only when
+    // DlssNrEvaluationCadence > 1. Rests in NON_PIXEL_SHADER_RESOURCE; only transiently COPY_DEST
+    // while a real evaluate's answer is being copied in.
+    ID3D12Resource* lastEffect = nullptr;
+    bool lastEffectFailed = false;
+    bool lastEffectValid = false;
+
     // The frame as the upscaler wrote it. The resolve adds the model's edit to this rather than
     // reconstructing it by inverting the tone curve, which is what turned every light in the frame into
     // a string of coloured cells.

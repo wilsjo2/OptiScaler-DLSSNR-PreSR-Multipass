@@ -4,6 +4,7 @@
 #include "DlssNr_NgxDiagnostics.h"
 #include "DlssNr_CompatibilityRuntime.h"
 
+#include <Config.h>
 #include <Logger.h>
 #include <proxies/NVNGX_Proxy.h>
 #include <vector>
@@ -237,6 +238,49 @@ unsigned int Context::Impl::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Device
     SetResource(params, "DLSSNR.MVec", motion);
     SetResource(params, "DLSSNR.Output", output);
 
+    // TEMPORARY EXPERIMENT (ADR-013 control-mask investigation, remove after use). DLSSNR.ControlMask
+    // is a real, currently-unused optional input -- confirmed via direct strings/objdump analysis of
+    // the deployed nvngx_dlssnr.dll, with full subrect addressing exactly like Color/Depth/MVec/Output.
+    // Its actual semantics are undocumented anywhere reachable from source (Streamline's own header
+    // says only "optional 4-channel control mask", nothing about format or population strategy).
+    // Cheapest possible experiment for the one question that matters first: does Feature 18 respond to
+    // *anything* bound here at all? Round 1 (motion as probe): EvaluateFeature result=0x1, no visible
+    // artifact -- inconclusive, motion vectors are likely near-uniform/low-magnitude in this scene,
+    // which would mask a real effect even if consumed. Round 2: reuse the colour buffer instead --
+    // high dynamic range, strong per-pixel structure, so any real consumption should be unmistakable.
+    // Deliberately the wrong format/content either way; a visible artifact or timing/behavior change
+    // versus the null baseline is itself the finding, independent of whether the content is
+    // semantically meaningful. Not a claim about what the mask should actually contain.
+    const auto controlMaskTestPattern = Config::Instance()->DlssNrControlMaskTestPattern.value_or_default();
+    ID3D12Resource* controlMaskProbe =
+        controlMaskTestPattern == 1 ? motion : controlMaskTestPattern == 2 ? color : nullptr;
+    const char* controlMaskProbeName =
+        controlMaskTestPattern == 1 ? "motion-as-mask" : controlMaskTestPattern == 2 ? "color-as-mask" : "null";
+    SetResource(params, "DLSSNR.ControlMask", controlMaskProbe);
+    SetUInt(params, "DLSSNR.ControlMaskSubrectBaseX", 0u);
+    SetUInt(params, "DLSSNR.ControlMaskSubrectBaseY", 0u);
+    SetUInt(params, "DLSSNR.ControlMaskSubrectWidth",
+            controlMaskProbe == nullptr ? 0u : controlMaskTestPattern == 1 ? motionWidth : width);
+    SetUInt(params, "DLSSNR.ControlMaskSubrectHeight",
+            controlMaskProbe == nullptr ? 0u : controlMaskTestPattern == 1 ? motionHeight : height);
+
+    // TEMPORARY EXPERIMENT (Phase 5 unexplored-inputs audit, remove after use). DLSSNR.
+    // BidirectionalDistortionField is a real, currently-unused optional input -- confirmed via direct
+    // strings/objdump analysis of the deployed nvngx_dlssnr.dll, with full subrect addressing exactly
+    // like Color/Depth/MVec/ControlMask. Never referenced anywhere in this codebase before now, and no
+    // source or public documentation explains its semantics -- the name suggests some form of per-pixel
+    // UV/lens correction, but that is a guess, not a finding. Same cheapest-possible test as the
+    // ControlMask experiment: does Feature 18 respond to anything bound here at all. Colour as probe
+    // (high dynamic range, strong per-pixel structure) rather than motion, since motion-as-probe was
+    // inconclusive for ControlMask.
+    const auto bidirDistortionTestPattern = Config::Instance()->DlssNrBidirDistortionTestPattern.value_or_default();
+    ID3D12Resource* bidirDistortionProbe = bidirDistortionTestPattern == 1 ? color : nullptr;
+    SetResource(params, "DLSSNR.BidirectionalDistortionField", bidirDistortionProbe);
+    SetUInt(params, "DLSSNR.BidirectionalDistortionFieldSubrectBaseX", 0u);
+    SetUInt(params, "DLSSNR.BidirectionalDistortionFieldSubrectBaseY", 0u);
+    SetUInt(params, "DLSSNR.BidirectionalDistortionFieldSubrectWidth", bidirDistortionProbe == nullptr ? 0u : width);
+    SetUInt(params, "DLSSNR.BidirectionalDistortionFieldSubrectHeight", bidirDistortionProbe == nullptr ? 0u : height);
+
     SetUInt(params, "DLSSNR.Enabled", 1u);
     SetUInt(params, "DLSSNR.Width", width);
     SetUInt(params, "DLSSNR.Height", height);
@@ -278,6 +322,30 @@ unsigned int Context::Impl::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Device
     lifetime.Record(cmdList);
     const auto result = state.compatibility ? state.compatibility->Evaluate(cmdList, state.feature, params)
                                            : NVNGXProxy::D3D12_EvaluateFeature()(cmdList, state.feature, params, nullptr);
+
+    // TEMPORARY EXPERIMENT (ADR-013, remove after use): one-shot log of whether binding something to
+    // ControlMask changes the EvaluateFeature result code at all versus the established null baseline.
+    if (controlMaskTestPattern != 0)
+    {
+        static bool logged = false;
+        if (!logged)
+        {
+            logged = true;
+            LOG_INFO("DLSS-NR ControlMask experiment: probe={} EvaluateFeature result=0x{:X}",
+                     controlMaskProbeName, (unsigned int) result);
+        }
+    }
+
+    if (bidirDistortionTestPattern != 0)
+    {
+        static bool logged = false;
+        if (!logged)
+        {
+            logged = true;
+            LOG_INFO("DLSS-NR BidirectionalDistortionField experiment: probe={} EvaluateFeature result=0x{:X}",
+                     bidirDistortionProbe == nullptr ? "null" : "color-as-probe", (unsigned int) result);
+        }
+    }
 
     if (result == NVSDK_NGX_Result_Success)
     {

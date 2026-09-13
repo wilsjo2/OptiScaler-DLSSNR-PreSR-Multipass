@@ -73,8 +73,9 @@ std::optional<LatestReleaseInfo> FetchLatestRelease()
         return std::nullopt;
     }
 
-    request = WinHttpOpenRequest(connection, L"GET", L"/repos/optiscaler/optiscaler/releases/latest", nullptr,
-                                 WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+    constexpr LPCWSTR latestReleasePath = L"/repos/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass/releases/latest";
+    request = WinHttpOpenRequest(connection, L"GET", latestReleasePath, nullptr, WINHTTP_NO_REFERER,
+                                 WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
     if (request == nullptr)
     {
         LOG_WARN("Version check failed to open request: {}", GetLastError());

@@ -87,6 +87,25 @@ void RenderBlend(Config* config, float menuResScale)
 
 void RenderInspect(Config* config, float menuResScale)
 {
+    // RunBeforeSR + FinishedPicture together take a "deferred" path (DlssNr_Dx12_DeferredSr.cpp)
+    // that refuses to run at all while Compare/DebugView/ShowSkinMask are active - there is no
+    // coherent way to defer NR's result to a later, finished frame while also showing a live
+    // inspect view of it this frame. That means turning on Compare or Debug view to check whether
+    // NR is working silently turns NR itself off for as long as they stay on, in this specific
+    // configuration - a real trap: the tool built to answer "is it doing anything" makes the
+    // answer "no" true. Warn here so nobody spends time chasing a phantom regression the inspect
+    // tools themselves caused.
+    if (config->DlssNrRunBeforeSr.value_or_default() && config->DlssNrFinishedPicture.value_or_default() &&
+        (config->DlssNrCompare.value_or_default() != 0 || config->DlssNrDebugView.value_or_default() != 0 ||
+         config->DlssNrShowSkinMask.value_or_default()))
+    {
+        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
+                           "Compare/Debug view/Skin mask disable NR entirely while RunBeforeSR + "
+                           "FinishedPicture are both on.");
+        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
+                           "Turn this off to see NR itself; the two cannot run at the same time.");
+    }
+
     bool held = config->DlssNrHoldFrame.value_or_default();
     if (ImGui::Checkbox("Hold frame", &held))
         config->DlssNrHoldFrame = held;

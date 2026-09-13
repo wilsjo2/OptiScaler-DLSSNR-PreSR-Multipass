@@ -4,6 +4,8 @@
 
 #include "Util.h"
 
+#include <algorithm>
+
 #include "nvapi/fakenvapi.h"
 #include <hooks/Streamline_Hooks.h>
 #include <misc/IdentifyGpu.h>
@@ -329,6 +331,11 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrPrivateUpscaler.set_from_config(readInt("DlssNr", "PrivateUpscaler"));
             DlssNrResidualAcrossRr.set_from_config(readBool("DlssNr", "ResidualAcrossRR"));
             DlssNrResidualAcrossRrBlend.set_from_config(readFloat("DlssNr", "ResidualAcrossRRBlend"));
+            DlssNrResidualConfidenceSensitivity.set_from_config(
+                readFloat("DlssNr", "ResidualConfidenceSensitivity"));
+            DlssNrControlMaskTestPattern.set_from_config(readInt("DlssNr", "ControlMaskTestPattern"));
+            DlssNrBidirDistortionTestPattern.set_from_config(readInt("DlssNr", "BidirDistortionTestPattern"));
+            DlssNrEvaluationCadence.set_from_config(readUInt("DlssNr", "EvaluationCadence"));
             DlssNrToggleKey.set_from_config(readInt("DlssNr", "ToggleKey"));
             DlssNrTransferStrength.set_from_config(readFloat("DlssNr", "TransferStrength"));
             DlssNrColourStrength.set_from_config(readFloat("DlssNr", "ColourStrength"));
@@ -552,6 +559,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             // Don't enable again if set false because of Linux issue
             OverlayMenu.set_from_config(readBool("Menu", "OverlayMenu"));
             ShortcutKey.set_from_config(readInt("Menu", "ShortcutKey"));
+            ShortcutKeyRequireCtrl.set_from_config(readBool("Menu", "ShortcutKeyRequireCtrl"));
+            ShortcutKeyRequireAlt.set_from_config(readBool("Menu", "ShortcutKeyRequireAlt"));
             ExtendedLimits.set_from_config(readBool("Menu", "ExtendedLimits"));
             ShowFps.set_from_config(readBool("Menu", "ShowFps"));
             UseHQFont.set_from_config(readBool("Menu", "UseHQFont"));
@@ -913,6 +922,77 @@ bool Config::LoadFromPath(const wchar_t* InPath)
     return false;
 }
 
+namespace
+{
+// Keeps a typed profile name inside the profiles folder -- strips path separators and the
+// parent-directory token so a name typed into the menu can never write or read outside it.
+std::wstring SanitizeProfileName(const std::wstring& name)
+{
+    std::wstring safe;
+    safe.reserve(name.size());
+    for (wchar_t c : name)
+    {
+        if (c == L'/' || c == L'\\' || c == L':')
+            continue;
+        safe += c;
+    }
+    while (safe.starts_with(L".."))
+        safe.erase(0, 2);
+    return safe;
+}
+} // namespace
+
+std::filesystem::path ProfilesDirectory()
+{
+    return Util::DllPath().parent_path() / "OptiScalerProfiles";
+}
+
+bool Config::SaveProfile(const std::wstring& profileName)
+{
+    auto safeName = SanitizeProfileName(profileName);
+    if (safeName.empty())
+        return false;
+
+    auto dir = ProfilesDirectory();
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+
+    auto original = absoluteFileName;
+    absoluteFileName = dir / (safeName + L".profile");
+    bool ok = SaveIni();
+    absoluteFileName = original;
+    return ok;
+}
+
+bool Config::LoadProfile(const std::wstring& profileName)
+{
+    auto safeName = SanitizeProfileName(profileName);
+    if (safeName.empty())
+        return false;
+
+    return Reload(ProfilesDirectory() / (safeName + L".profile"));
+}
+
+std::vector<std::string> Config::ListProfiles()
+{
+    std::vector<std::string> names;
+    std::error_code ec;
+    auto dir = ProfilesDirectory();
+    if (!std::filesystem::exists(dir, ec))
+        return names;
+
+    for (const auto& entry : std::filesystem::directory_iterator(dir, ec))
+    {
+        if (ec || !entry.is_regular_file())
+            continue;
+        if (entry.path().extension() != L".profile")
+            continue;
+        names.push_back(wstring_to_string(entry.path().stem().wstring()));
+    }
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
 std::string GetBoolValue(std::optional<bool> value)
 {
     if (!value.has_value())
@@ -1261,6 +1341,8 @@ bool Config::SaveIni()
                  GetBoolValue(Instance()->DlssNrResidualAcrossRr.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ResidualAcrossRRBlend",
                  GetFloatValue(Instance()->DlssNrResidualAcrossRrBlend.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "ResidualConfidenceSensitivity",
+                 GetFloatValue(Instance()->DlssNrResidualConfidenceSensitivity.value_for_config()).c_str());
     ini.Delete("DlssNr", "ResidualFG");
     ini.Delete("DlssNr", "ResidualFGApproxCamera");
     ini.Delete("DlssNr", "UseProxy");
@@ -1308,6 +1390,8 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "ScanInverted", GetBoolValue(Instance()->DlssNrScanInverted.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ScanMeter", GetBoolValue(Instance()->DlssNrScanMeter.value_for_config()).c_str());
     ini.SetValue("DlssNr", "Passes", GetIntValue(Instance()->DlssNrPasses.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "EvaluationCadence",
+                 GetIntValue(Instance()->DlssNrEvaluationCadence.value_for_config()).c_str());
     // ScanExposure is a developer override with no menu control; persist it so a set ini keeps it.
     ini.SetValue("DlssNr", "ScanExposure", GetBoolValue(Instance()->DlssNrScanExposure.value_for_config()).c_str());
     ini.SetValue("DlssNr", "WhitePointScale",
@@ -1473,6 +1557,10 @@ bool Config::SaveIni()
         auto setting = Instance()->ShortcutKey.value_for_config();
         ini.SetValue("Menu", "ShortcutKey",
                      GetIntValue(Instance()->ShortcutKey.value_for_config(), setting > 0).c_str());
+        ini.SetValue("Menu", "ShortcutKeyRequireCtrl",
+                     GetBoolValue(Instance()->ShortcutKeyRequireCtrl.value_for_config()).c_str());
+        ini.SetValue("Menu", "ShortcutKeyRequireAlt",
+                     GetBoolValue(Instance()->ShortcutKeyRequireAlt.value_for_config()).c_str());
 
         ini.SetValue("Menu", "ExtendedLimits", GetBoolValue(Instance()->ExtendedLimits.value_for_config()).c_str());
         ini.SetValue("Menu", "ShowFps", GetBoolValue(Instance()->ShowFps.value_for_config()).c_str());

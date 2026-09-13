@@ -168,6 +168,7 @@ static std::vector<std::string> splashText = { "Cope smarter, not harder",
                                                "Nitec's Bizarre Upscaling",
                                                "\"Framegen really attracts some strange clientelle\"",
                                                "How to remove those corny messages?!",
+                                               "Ferran was coding around",
                                                "<Your funny text goes here>" };
 
 static std::string updateNoticeTag;
@@ -266,12 +267,29 @@ void MenuCommon::UpdateManualInput(HWND targetHwnd)
 
     const auto config = Config::Instance();
 
-    auto CheckShortcut = [&](int vk, bool& inputFlag, const char* logMessage)
+    auto CheckShortcut = [&](int vk, bool& inputFlag, const char* logMessage, bool requireCtrl = false,
+                            bool requireAlt = false)
     {
         if (inputFlag)
             return;
 
         if (vk <= 0 || vk >= 256)
+            return;
+
+        // Checked before the release edge below, not folded into it: modifiers must still be held
+        // at the moment the trigger key is released, the same convention every OS shortcut chord
+        // uses (release the letter while the modifiers are down, not "were down at some point").
+        //
+        // Checks the generic code and both L/R-specific ones: raw keyboard input
+        // (NormalizeRawKeyboardVirtualKey, input_system_raw.cpp) rewrites VK_CONTROL/VK_MENU into
+        // VK_LCONTROL/VK_RCONTROL/VK_LMENU/VK_RMENU before this table is ever touched, so the
+        // plain generic code alone would never read as down on that path - checking only it would
+        // make this feature silently never fire depending on which input path is active.
+        if (requireCtrl && !OptiInput::IsKeyDown(VK_CONTROL) && !OptiInput::IsKeyDown(VK_LCONTROL) &&
+            !OptiInput::IsKeyDown(VK_RCONTROL))
+            return;
+        if (requireAlt && !OptiInput::IsKeyDown(VK_MENU) && !OptiInput::IsKeyDown(VK_LMENU) &&
+            !OptiInput::IsKeyDown(VK_RMENU))
             return;
 
         if (OptiInput::IsKeyReleased(vk))
@@ -288,7 +306,8 @@ void MenuCommon::UpdateManualInput(HWND targetHwnd)
 
     if (!capturingKey && canAcceptInputs)
     {
-        CheckShortcut(config->ShortcutKey.value_or_default(), inputMenu, "Menu key pressed, will be switching menu");
+        CheckShortcut(config->ShortcutKey.value_or_default(), inputMenu, "Menu key pressed, will be switching menu",
+                     config->ShortcutKeyRequireCtrl.value_or_default(), config->ShortcutKeyRequireAlt.value_or_default());
         CheckShortcut(config->FpsShortcutKey.value_or_default(), inputFps, "Menu key pressed, will be switching FPS");
         CheckShortcut(config->FGShortcutKey.value_or_default(), inputFG, "Menu key pressed, will be switching FG mode");
         CheckShortcut(config->FpsCycleShortcutKey.value_or_default(), inputFpsCycle,
@@ -405,7 +424,17 @@ class Keybind
         return "Unknown";
     }
 
-    void Render(CustomOptional<int>& configKey)
+    static std::string ShortcutLabel(int virtualKey, bool requireCtrl, bool requireAlt)
+    {
+        std::string label = KeyNameFromVirtualKeyCode(static_cast<USHORT>(virtualKey));
+        if (requireAlt)
+            label = "Alt+" + label;
+        if (requireCtrl)
+            label = "Ctrl+" + label;
+        return label;
+    }
+
+    void Render(CustomOptional<int>& configKey, bool requireCtrl = false, bool requireAlt = false)
     {
         ImGui::PushID(id);
         if (ImGui::Button(name.c_str()))
@@ -441,7 +470,7 @@ class Keybind
         }
 
         ImGui::SameLine();
-        ImGui::Text(KeyNameFromVirtualKeyCode(configKey.value_or_default()).c_str());
+        ImGui::Text(ShortcutLabel(configKey.value_or_default(), requireCtrl, requireAlt).c_str());
 
         ImGui::SameLine();
         ImGui::PushID(id);
@@ -1575,7 +1604,10 @@ void MenuCommon::UpdateVersionAndStartupNotifications(RenderMenuContext& ctx)
                 updateNotification.setTitle("OptiScaler Update available");
                 updateNotification.setContent(
                     "Press %s for more info",
-                    Keybind::KeyNameFromVirtualKeyCode(config->ShortcutKey.value_or_default()).c_str());
+                    Keybind::ShortcutLabel(config->ShortcutKey.value_or_default(),
+                                           config->ShortcutKeyRequireCtrl.value_or_default(),
+                                           config->ShortcutKeyRequireAlt.value_or_default())
+                        .c_str());
                 ImGui::InsertNotification(updateNotification);
                 return true;
             };
@@ -1711,7 +1743,10 @@ void MenuCommon::RenderSplashWindow(RenderMenuContext& ctx)
                     ImGui::SetWindowFontScale(splashScale);
 
                 ImGui::Text("OptiScaler - %s for menu",
-                            Keybind::KeyNameFromVirtualKeyCode(config->ShortcutKey.value_or_default()).c_str());
+                            Keybind::ShortcutLabel(config->ShortcutKey.value_or_default(),
+                                                   config->ShortcutKeyRequireCtrl.value_or_default(),
+                                                   config->ShortcutKeyRequireAlt.value_or_default())
+                                .c_str());
                 ImGui::TextColored(toneMapColor(ImVec4(1.0f, 1.0f, 1.0f, 0.7f)), splashMessage.c_str());
 
                 splashSize = ImGui::GetWindowSize();
@@ -6234,6 +6269,112 @@ void MenuCommon::RenderLoggingSettings(RenderMenuContext& ctx)
     }
 }
 
+void MenuCommon::RenderProfilesSettings(RenderMenuContext& ctx)
+{
+    auto config = ctx.config;
+
+    // PROFILES -----------------------------
+    ImGui::Spacing();
+    if (auto ch = ScopedCollapsingHeader("Profiles"); ch.IsHeaderOpen())
+    {
+        ScopedIndent indent {};
+        ImGui::Spacing();
+        ImGui::TextWrapped("Save the current settings under a name, or load a previously saved one. "
+                           "Different games can need very different tuning - keep one profile per game.");
+        ImGui::Spacing();
+
+        static char nameBuffer[128] = "";
+        static std::vector<std::string> profiles;
+        static bool profilesLoaded = false;
+        static int selectedProfile = -1;
+        static std::string statusMessage;
+        static bool statusIsError = false;
+
+        if (!profilesLoaded)
+        {
+            profiles = config->ListProfiles();
+            profilesLoaded = true;
+        }
+
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.6f);
+        ImGui::InputTextWithHint("##ProfileName", "Profile name (e.g. 007 First Light)", nameBuffer,
+                                 IM_ARRAYSIZE(nameBuffer));
+        ImGui::SameLine();
+        if (ImGui::Button("Save"))
+        {
+            std::string name(nameBuffer);
+            if (name.empty())
+            {
+                statusMessage = "Type a profile name first.";
+                statusIsError = true;
+            }
+            else if (config->SaveProfile(string_to_wstring(name)))
+            {
+                statusMessage = "Saved profile: " + name;
+                statusIsError = false;
+                profilesLoaded = false; // re-list next frame, the new name may not be in it yet
+            }
+            else
+            {
+                statusMessage = "Failed to save profile: " + name;
+                statusIsError = true;
+            }
+        }
+
+        ImGui::Spacing();
+
+        if (profiles.empty())
+        {
+            ImGui::TextDisabled("No saved profiles yet.");
+        }
+        else
+        {
+            if (selectedProfile >= (int) profiles.size())
+                selectedProfile = -1;
+
+            const char* previewLabel = selectedProfile >= 0 ? profiles[selectedProfile].c_str() : "Select a profile";
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.6f);
+            if (ImGui::BeginCombo("##ProfileList", previewLabel))
+            {
+                for (int i = 0; i < (int) profiles.size(); ++i)
+                {
+                    bool selected = (i == selectedProfile);
+                    if (ImGui::Selectable(profiles[i].c_str(), selected))
+                        selectedProfile = i;
+                    if (selected)
+                        ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Load"))
+            {
+                if (selectedProfile < 0)
+                {
+                    statusMessage = "Select a profile to load first.";
+                    statusIsError = true;
+                }
+                else if (config->LoadProfile(string_to_wstring(profiles[selectedProfile])))
+                {
+                    statusMessage = "Loaded profile: " + profiles[selectedProfile];
+                    statusIsError = false;
+                }
+                else
+                {
+                    statusMessage = "Failed to load profile: " + profiles[selectedProfile];
+                    statusIsError = true;
+                }
+            }
+        }
+
+        if (!statusMessage.empty())
+        {
+            const auto colour = statusIsError ? ImVec4(1.0f, 0.5f, 0.5f, 1.0f) : ImVec4(0.5f, 1.0f, 0.5f, 1.0f);
+            ImGui::TextColored(colour, "%s", statusMessage.c_str());
+        }
+    }
+}
+
 void MenuCommon::RenderThemeSettings(RenderMenuContext& ctx)
 {
     auto config = ctx.config;
@@ -7123,7 +7264,8 @@ void MenuCommon::RenderKeybindSettings(RenderMenuContext& ctx)
         static auto fgEnable = Keybind("Frame Generation", 13);
         static auto dlssNrToggle = Keybind("Neural Rendering", 14);
 
-        menu.Render(config->ShortcutKey);
+        menu.Render(config->ShortcutKey, config->ShortcutKeyRequireCtrl.value_or_default(),
+                    config->ShortcutKeyRequireAlt.value_or_default());
         fpsOverlay.Render(config->FpsShortcutKey);
         fpsOverlayCycle.Render(config->FpsCycleShortcutKey);
         fgEnable.Render(config->FGShortcutKey);
@@ -7158,6 +7300,7 @@ void MenuCommon::RenderMainMenuTable(RenderMenuContext& ctx)
         RenderQuirksSettings(ctx);
         RenderAdvancedSettings(ctx);
         RenderLoggingSettings(ctx);
+        RenderProfilesSettings(ctx);
         RenderThemeSettings(ctx);
         RenderFpsOverlaySettings(ctx);
         RenderUpscalerInputsSettings(ctx);

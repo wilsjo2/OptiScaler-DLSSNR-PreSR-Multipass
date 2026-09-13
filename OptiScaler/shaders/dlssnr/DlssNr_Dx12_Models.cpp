@@ -56,7 +56,10 @@ bool DlssNr_Dx12::State::PrepareRunModels(ID3D12GraphicsCommandList* cmdList, ID
             ParkNrResource(nr.colorSmall);
             ParkNrResource(nr.outputNative);
             ParkNrResource(nr.activeColor);
+            ParkNrResource(nr.lastEffect);
             nr.passScratchFailed = false;
+            nr.lastEffectFailed = false;
+            nr.lastEffectValid = false;
         }
     }
 
@@ -109,6 +112,28 @@ bool DlssNr_Dx12::State::PrepareRunModels(ID3D12GraphicsCommandList* cmdList, ID
 
     if (reduced && nr.colorSmall == nullptr)
         nr.colorSmall = CreateScratch(device, desc.Format, workWidth, workHeight);
+
+    // NR evaluation-cadence decoupling (ADR-014): only allocated when actually requested, so the
+    // default (cadence 1, every frame) costs nothing extra. Lazily retried once per resolution
+    // change if a previous attempt failed, same convention as the multipass scratch above.
+    if (cfg.DlssNrEvaluationCadence.value_or_default() > 1 && nr.lastEffect == nullptr && !nr.lastEffectFailed)
+    {
+        nr.lastEffect = CreateScratch(device, desc.Format, workWidth, workHeight);
+        nr.lastEffectFailed = nr.lastEffect == nullptr;
+        nr.lastEffectValid = false;
+
+        if (nr.lastEffectFailed)
+            LOG_ERROR("DLSS-NR: could not allocate the evaluation-cadence carry-forward texture; "
+                      "every frame will evaluate regardless of DlssNrEvaluationCadence");
+    }
+    else if (cfg.DlssNrEvaluationCadence.value_or_default() <= 1 && nr.lastEffect != nullptr)
+    {
+        // Cadence turned back off: reclaim the texture and clear the failure latch, same as
+        // Passes dropping back to 1 reclaims the multipass scratch above.
+        ParkNrResource(nr.lastEffect);
+        nr.lastEffectFailed = false;
+        nr.lastEffectValid = false;
+    }
 
     // The down-leg target is native (the answer is brought back to frame size before the resolve).
     if (workScale > 1.0f && nr.outputNative == nullptr)

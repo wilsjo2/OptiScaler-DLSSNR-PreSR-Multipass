@@ -240,14 +240,25 @@ struct alignas(256) DlssNrConstants
     uint32_t ResidualHistoryValid;
     uint32_t ResidualMotionBaseX;
     uint32_t ResidualMotionBaseY;
+
+    // ResidualAcrossRR v2 confidence gate (dlssnr_residual.hlsl). The length of the disagreement
+    // between this frame's freshly-computed edit and the reprojected history, in linear delta
+    // units, at which the blend rate has fully widened from ResidualBlend's stable floor to 1
+    // (immediate replace, no accumulation). Smaller values react to smaller disagreements. Adapted
+    // from NRD's history-confidence concept (research/nvidia/nrd/README.md, "HISTORY CONFIDENCE")
+    // to what this pass actually has: no re-traced radiance to diff against, only its own
+    // reprojected accumulation and this frame's edit -- see the shader's own header comment.
+    float ResidualConfidenceSensitivity;
 };
 static_assert(sizeof(DlssNrConstants) == 256);
 
 // Local mode numbering for dlssnr_residual.hlsl (a separate blob / PSO from the DlssNrMode shader).
 enum DlssNrResidualMode : uint32_t
 {
-    DlssNrResidualMode_Accumulate = 0, // (edited - original) blended into the reprojected history
-    DlssNrResidualMode_Apply = 1,      // base + delta * TransferStrength, after RR+SR
+    DlssNrResidualMode_Accumulate = 0,   // (edited - original) blended into the reprojected history
+    DlssNrResidualMode_Apply = 1,        // base + delta * TransferStrength, after RR+SR
+    DlssNrResidualMode_ReprojectOnly = 2, // carry the last real model answer through this frame's
+                                          // motion, no new evaluation -- NR evaluation-cadence decoupling
 };
 
 class DlssNr_Common

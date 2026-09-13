@@ -407,6 +407,9 @@ auto DlssNr_Dx12::State::DeferredSrContext::Before(ID3D12GraphicsCommandList* cm
             accum.Width = g.w; accum.Height = g.h;
             const float configuredBlend = cfg.DlssNrResidualAcrossRrBlend.value_or_default();
             accum.ResidualBlend = std::isfinite(configuredBlend) ? std::clamp(configuredBlend, .01f, 1.0f) : .08f;
+            const float configuredSensitivity = cfg.DlssNrResidualConfidenceSensitivity.value_or_default();
+            accum.ResidualConfidenceSensitivity =
+                std::isfinite(configuredSensitivity) && configuredSensitivity > 0.0f ? configuredSensitivity : 0.25f;
             accum.ResidualHistoryValid = g.accumulationValid && !frame.Reset;
             accum.GuideWidth = motionRegion.width; accum.GuideHeight = motionRegion.height;
             // v0.7.7 convention: convert the game's pixel displacement to input-frame UV displacement.

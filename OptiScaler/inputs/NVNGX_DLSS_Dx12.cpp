@@ -617,7 +617,10 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_DestroyParameters(NVSDK_NGX_Param
 
 #pragma region DLSS Feature Calls
 
-static Upscaler GetUpscalerBackend()
+// GetUpscalerBackend()'s auto-detection, without the [Upscalers] Dx12Upscaler override -- the
+// backend to fall back to when that override picks DLSSD but GameSuppliesRRInputs() below says
+// the game can't feed it.
+static Upscaler AutoDetectUpscalerBackend()
 {
     Upscaler upscaler = Upscaler::XeSS; // Default
 
@@ -629,10 +632,45 @@ static Upscaler GetUpscalerBackend()
     if (primaryGpu.fsr4Support != FSR4Support::None)
         upscaler = Upscaler::FFX;
 
+    return upscaler;
+}
+
+static Upscaler GetUpscalerBackend()
+{
+    Upscaler upscaler = AutoDetectUpscalerBackend();
+
     if (Config::Instance()->Dx12Upscaler.has_value())
         upscaler = Config::Instance()->Dx12Upscaler.value();
 
     return upscaler;
+}
+
+// [Upscalers] Dx12Upscaler=dlssd substitutes DLSSD (Ray Reconstruction) for the game's own
+// SuperSampling create call, regardless of which NGX feature the game actually requested (see
+// TryCreateOptiFeature below). RR's own NGX contract (nvsdk_ngx_defs.h) needs G-buffer inputs SR
+// does not -- a renderer that never intends to call the RR feature has no reason to ever populate
+// them. Checked, not guessed: forcing the substitution on 007 First Light produced
+// NVSDK_NGX_Result_FAIL_InvalidParameter at CreateFeature, silently downgrading the base upscaler
+// to FSR 2.1.2 (docs/LINUX-PROTON-RTX50.md, 2026-09-13). Requiring both of RR's two most
+// fundamental signals - a G-buffer normals channel and a roughness channel, the minimum a
+// ray/path-traced renderer's pipeline would ever expose - catches a renderer that structurally
+// cannot feed DLSSD before a real CreateFeature/Init/fail/fallback-to-FSR21 cycle is attempted.
+static bool GameSuppliesRRInputs(NVSDK_NGX_Parameter* params)
+{
+    if (params == nullptr)
+        return false;
+
+    ID3D12Resource* normals = nullptr;
+    ID3D12Resource* roughness = nullptr;
+
+    const bool hasNormals = params->Get(NVSDK_NGX_Parameter_GBuffer_Normals, &normals) ==
+                                 NVSDK_NGX_Result_Success &&
+                             normals != nullptr;
+    const bool hasRoughness = params->Get(NVSDK_NGX_Parameter_GBuffer_Roughness, &roughness) ==
+                                   NVSDK_NGX_Result_Success &&
+                               roughness != nullptr;
+
+    return hasNormals && hasRoughness;
 }
 
 static bool EnsureD3D12Device(ID3D12GraphicsCommandList* cmdList)
@@ -672,6 +710,17 @@ static NVSDK_NGX_Result TryCreateOptiFeature(ID3D12GraphicsCommandList* InCmdLis
     if (InFeatureID == NVSDK_NGX_Feature_SuperSampling)
     {
         upscalerBackend = GetUpscalerBackend();
+
+        if (upscalerBackend == Upscaler::DLSSD && !GameSuppliesRRInputs(InParameters))
+        {
+            LOG_WARN("Dx12Upscaler=dlssd forces Ray Reconstruction on this SuperSampling create "
+                     "call, but it carries neither GBuffer.Normals nor GBuffer.Roughness -- this "
+                     "renderer has given no sign it can feed DLSSD's own NGX contract. Refusing "
+                     "the substitution and using the auto-detected backend instead of a "
+                     "CreateFeature attempt already known to fail this way.");
+            upscalerBackend = AutoDetectUpscalerBackend();
+        }
+
         LOG_INFO("Creating {} upscaler feature", UpscalerDisplayName(upscalerBackend));
     }
     else

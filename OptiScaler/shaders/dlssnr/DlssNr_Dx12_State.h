@@ -1,5 +1,6 @@
 #pragma once
 #include "DlssNr_Dx12_ModelState.h"
+#include <gpu_time/Vitals.h>
 #include <dlssnr/DlssNr_Placement.h>
 #include <dlssnr/DlssNr_FinishedReady.h>
 #include <dlssnr/PassProfiles.h>
@@ -90,6 +91,11 @@ struct DlssNr_Dx12::State
     std::unique_ptr<DlssNrGpuTime> ngxTime;
     std::optional<double> lastNgxTime;
     std::optional<double> lastGpuTime;
+
+    // Rolling window behind the periodic split log below - see gpu_time/Vitals.h (project-wide,
+    // not DLSS-NR-specific) for why a single snapshot sample undersells what "every 600 frames"
+    // should actually be reporting.
+    OptiScaler::RollingVitals vitals;
 
     // Writes matched before/after frames on request, so comparisons stop depending on video.
     capture::FrameCapture captureFrames;
@@ -531,6 +537,23 @@ struct DlssNr_Dx12::State
     ExposureReport logged {};
     std::set<std::string> seen;
     unsigned long long resets = 0;
+
+    // ADR-014/017: cadence-decoupling counters, cumulative like `resets` above. Logged as
+    // per-window deltas (see the `last*AtLog` snapshots) so the vitals line never reads as a
+    // running total with no denominator - that ambiguity is what let ADR-014's cadence=2 GPU-cost
+    // measurement and ADR-016's ~99.98% reset-rate finding coexist unreconciled for a full session.
+    unsigned long long cadenceEvaluates = 0;         // real NGX evaluate actually ran this frame
+    unsigned long long cadenceSkips = 0;              // reproject-only carry-forward ran instead
+    unsigned long long cadenceSkipBlockedByReset = 0; // wanted to skip, but nr.reset was set
+    unsigned long long cadenceSkipBlockedByInvalidHistory = 0; // wanted to skip, no valid lastEffect
+    unsigned long long cadenceCarryForwardFailed = 0; // DispatchResidualPass itself failed
+    unsigned long long lastResetsAtLog = 0;
+    unsigned long long lastCadenceEvaluatesAtLog = 0;
+    unsigned long long lastCadenceSkipsAtLog = 0;
+    unsigned long long lastCadenceSkipBlockedByResetAtLog = 0;
+    unsigned long long lastCadenceSkipBlockedByInvalidHistoryAtLog = 0;
+    unsigned long long lastCadenceCarryForwardFailedAtLog = 0;
+
     bool reportedHdr = false;
     bool reportedHdrValue = false;
     bool reportedBefore = false;
