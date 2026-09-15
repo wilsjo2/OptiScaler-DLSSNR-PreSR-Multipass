@@ -498,11 +498,7 @@ std::optional<std::filesystem::path> Util::FindFilePath(const std::filesystem::p
     optiPath /= L"streamline";
     auto normalizedStreamlinePath = optiPath.lexically_normal();
 
-    // Residual-only FG needs the official FG runtime even with full-game FG off.
-    // Keep the existing exclusion for every other library/backend lookup.
-    const bool isDlssgOutput = State::Instance().activeFgOutput == FGOutput::DLSSG ||
-        (fileName == L"nvngx_dlssg.dll" && Config::Instance()->DlssNrEnabled.value_or_default() &&
-         Config::Instance()->DlssNrDeferredDlss.value_or_default() && Config::Instance()->DlssNrResidualFg.value_or_default());
+    const bool isDlssgOutput = State::Instance().activeFgOutput == FGOutput::DLSSG;
 
     // 1) Direct check in startDir
     std::filesystem::path candidate = startDir / fileName;

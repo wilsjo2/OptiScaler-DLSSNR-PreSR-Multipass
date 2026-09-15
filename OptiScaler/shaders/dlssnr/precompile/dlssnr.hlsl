@@ -509,17 +509,36 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         gTarget[id.xy] = float4(0.5 + 0.5 * d / (1.0 + abs(d)), 1.0);
         return;
     }
-    if (gMode == 6 || gMode == 10)
+    if (gMode == 6 || gMode == 10 || gMode == 12 || gMode == 13)
     {
         float4 base = gSource.Load(int3(id.xy, 0));
+        float3 encoded;
 #ifndef VK_MODE
-        if (gMode == 10 && gExposure.Load(int3(0, 0, 0)).r > 0.0)
+        if (gMode == 13 || ((gMode == 10 || gMode == 12) && gExposure.Load(int3(0, 0, 0)).r > 0.0))
         {
-            gTarget[id.xy] = base;
-            return;
+            if (gMode == 10)
+            {
+                gTarget[id.xy] = base;
+                return;
+            }
+            // Mode 12 does not consume NVIDIA's rejected output. Mode 13 always
+            // reprojects the preceding NR anchor directly onto the CURRENT clean
+            // raster, avoiding residual-FG interpolation and a one-frame raster
+            // delay. The caller never selects either path across a known cut/reset.
+            float4 motion = gMotion.SampleLevel(gLinear, uv, 0);
+            float2 historyUV = uv + motion.xy;
+            bool valid = motion.a > 0.999 && all(isfinite(motion.xy)) && all(abs(motion.xy) < 2.0) &&
+                         all(historyUV >= 0.0) && all(historyUV <= 1.0);
+            if (!valid)
+            {
+                gTarget[id.xy] = base;
+                return; // Never clamp offscreen history or reuse an invalid vector.
+            }
+            encoded = SanitizeFinite3(gOriginal.SampleLevel(gLinear, historyUV, 0).rgb, 0.5);
         }
+        else
 #endif
-        float3 encoded = SanitizeFinite3(gModel.Load(int3(id.xy, 0)).rgb, 0.5);
+            encoded = SanitizeFinite3(gModel.Load(int3(id.xy, 0)).rgb, 0.5);
         // Limit the inverse near its poles: DLSS can ring outside the carrier's [0,1] range.
         float3 signedEdit = clamp(2.0 * encoded - 1.0, -0.999, 0.999);
         float3 edit = signedEdit / (1.0 - abs(signedEdit)) * max(gExposurePreMul, 1e-4);

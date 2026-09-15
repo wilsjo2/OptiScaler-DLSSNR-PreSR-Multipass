@@ -143,6 +143,59 @@ int wmain(int argc, wchar_t** argv) try {
     result=run(); expect(same(result[0],carrierEdit[0]) && same(result[1],carrierEdit[1]),
                          "Allowed FG residual was not composed");
     std::puts("PASS: rejected FG output preserves the clean frame");
+    // A rejected midpoint must not alternate NR-on / NR-off in a static scene.
+    // t2 is the PREVIOUS NR anchor; t3 is midpoint -> previous-anchor motion,
+    // not current-anchor motion and not the composed two-frame field.
+    ComPtr<ID3D11Texture2D> fallbackTexture, fallbackMotion;
+    ComPtr<ID3D11ShaderResourceView> fallbackSrv, fallbackMotionSrv;
+    desc.BindFlags=D3D11_BIND_SHADER_RESOURCE; desc.Usage=D3D11_USAGE_DEFAULT; desc.CPUAccessFlags=0;
+    data.pSysMem=carrier.data(); data.SysMemPitch=sizeof(carrier);
+    check(device->CreateTexture2D(&desc,&data,&fallbackTexture));
+    check(device->CreateShaderResourceView(fallbackTexture.Get(),nullptr,&fallbackSrv));
+    const std::array<Pixel,2> stillMotion {{{0,0,0,1},{0,0,0,1}}};
+    data.pSysMem=stillMotion.data();
+    check(device->CreateTexture2D(&desc,&data,&fallbackMotion));
+    check(device->CreateShaderResourceView(fallbackMotion.Get(),nullptr,&fallbackMotionSrv));
+    ctx->CSSetShaderResources(2,1,fallbackSrv.GetAddressOf());
+    ctx->CSSetShaderResources(3,1,fallbackMotionSrv.GetAddressOf());
+    settings.Mode=DlssNrMode_ApplyResidualFgFallback;
+    for (unsigned i=0;i<16;++i) {
+        flag=(unsigned char)(i%2); ctx->UpdateSubresource(flagTexture.Get(),0,nullptr,&flag,1,0);
+        result=run();
+        expect(same(result[0],carrierEdit[0]) && same(result[1],carrierEdit[1]),
+               "FG rejection toggled the NR edit off in a static scene");
+    }
+    const std::array<Pixel,2> displacedMotion {{{0.5f,0,0,1},{0.5f,0,0,1}}};
+    ctx->UpdateSubresource(fallbackMotion.Get(),0,nullptr,displacedMotion.data(),sizeof(displacedMotion),0);
+    result=run();
+    const Pixel translated {carrierBase[0].r+carrierEdit[1].r-carrierBase[1].r,
+                           std::max(0.0f,carrierBase[0].g+carrierEdit[1].g-carrierBase[1].g),
+                           carrierBase[0].b+carrierEdit[1].b-carrierBase[1].b,carrierBase[0].a};
+    expect(same(result[0],translated) && same(result[1],carrierBase[1]),
+           "Rejected FG fallback used the wrong motion interval or clamped offscreen history");
+    for (float invalid : {NAN,INFINITY,65504.0f}) {
+        const std::array<Pixel,2> badMotion {{{invalid,0,0,1},{0,0,0,0}}};
+        ctx->UpdateSubresource(fallbackMotion.Get(),0,nullptr,badMotion.data(),sizeof(badMotion),0);
+        result=run();
+        expect(same(result[0],carrierBase[0]) && same(result[1],carrierBase[1]),
+               "Rejected FG fallback trusted invalid motion");
+    }
+    flag=0; ctx->UpdateSubresource(flagTexture.Get(),0,nullptr,&flag,1,0);
+    result=run();
+    expect(same(result[0],carrierEdit[0]) && same(result[1],carrierEdit[1]),
+           "Valid NVIDIA interpolation was replaced by the rejection fallback");
+    std::puts("PASS: FG rejection without static pulsing, midpoint reprojection, invalid/offscreen rejection, valid FG unchanged");
+    ctx->UpdateSubresource(fallbackMotion.Get(),0,nullptr,displacedMotion.data(),sizeof(displacedMotion),0);
+    settings.Mode=DlssNrMode_ApplyReprojectedResidual;
+    result=run();
+    expect(same(result[0],translated) && same(result[1],carrierBase[1]),
+           "Current-raster half-rate did not reproject the preceding NR edit");
+    const std::array<Pixel,2> invalidCurrentMotion {{{NAN,0,0,1},{0,0,0,0}}};
+    ctx->UpdateSubresource(fallbackMotion.Get(),0,nullptr,invalidCurrentMotion.data(),sizeof(invalidCurrentMotion),0);
+    result=run();
+    expect(same(result[0],carrierBase[0]) && same(result[1],carrierBase[1]),
+           "Current-raster half-rate trusted invalid motion");
+    std::puts("PASS: current-raster half-rate reprojection and invalid/offscreen clean fallback");
     DlssNrResidualHold hold;
     expect(!hold.CanReuse(0), "Uninitialized hold was reused");
     hold.SampleSucceeded(0);
