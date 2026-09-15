@@ -4,9 +4,9 @@
 // dxc produces materially different DXIL from the committed one (older compiler), and that shader
 // carries every NR path -- post-SR, pre-SR, RR, DeferredDLSS, ResidualFG. These two experimental
 // modes get their own tiny blob and a second compute PSO instead, so the battle-tested one is
-// never touched. The cbuffer and bindings mirror dlssnr.hlsl exactly so DlssNr_Dx12's existing
-// root signature and descriptor table are reused as-is; only gResidualBlend is appended, and it
-// fits inside DlssNrConstants' existing 256-byte alignment with no size change.
+// never touched. The cbuffer follows the shared DlssNrConstants scalar layout so DlssNr_Dx12's
+// existing root signature and descriptor table are reused as-is. Residual-only values are read here;
+// other shaders carry them as unused layout slots within the same 256-byte constant upload.
 //
 //   gMode == 0  Accumulate: (edited - original) blended into the MV-reprojected history layer.
 //               history_t = lerp( reproject(history_{t-1}), edited - original, blend )
@@ -57,6 +57,7 @@ cbuffer Params : register(b0)
     uint gResidualHistoryValid;
     uint gResidualMotionBaseX;
     uint gResidualMotionBaseY;
+    float gShadowFloor;
 };
 
 // Same registers and the same SPIR-V binding numbers as dlssnr.hlsl, including the slots these

@@ -840,17 +840,32 @@ void RenderMenu(Config* config, float menuResScale)
         HelpMarker("Brightness reference used to prepare HDR colour for NR. Higher values darken the model input; lower values brighten it.\nAdjust if NR loses detail or produces colour shifts.");
         }
 
-        // Highlight guard, directly under the white point / trim -- it bounds the model's edit and
-        // belongs with the exposure controls it works alongside.
+        // Highlight guard, directly under the white point / trim -- it bounds excessive brightening.
         float maxRatio = config->DlssNrMaxRatio.value_or_default();
-        if (ImGui::SliderFloat("Highlight guard", &maxRatio, 1.0f, unlockPasses ? (float) MaxPassCount : 8.0f, "%.1fx"))
+        if (ImGui::SliderFloat("Highlight guard", &maxRatio, 1.0f,
+                               unlockPasses ? (float) MaxPassCount : 8.0f, "%.1fx"))
             config->DlssNrMaxRatio = maxRatio;
 
         ImGui::SameLine();
         if (ImGui::SmallButton("Reset##guard"))
             config->DlssNrMaxRatio = 2.0f;
 
-        HelpMarker("Limit how much NR can brighten or darken a pixel. Lower values restrict highlight changes; higher values allow more.");
+        HelpMarker("Maximum NR brightening. With Shadow minimum at 0, its reciprocal remains the existing darkening limit.");
+
+        float shadowFloor =
+            std::clamp(config->DlssNrShadowFloor.value_or_default(), 0.0f, 1.0f);
+
+        if (ImGui::SliderFloat("Shadow minimum", &shadowFloor, 0.0f, 1.0f, "%.2fx"))
+            config->DlssNrShadowFloor = shadowFloor;
+
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Reset##shadowfloor"))
+            config->DlssNrShadowFloor = 0.0f;
+
+        HelpMarker(
+            "Minimum luminance NR may leave relative to the untouched frame. 0 uses the existing reciprocal Highlight guard. "
+            "0.80x = at most 20% darkening. 1.00x = no NR darkening. "
+            "0 = existing behaviour.");
 
         // Directly under the white point, because that is the number it moves and the number the
         // anchor captures. It used to sit under Inspect, a whole section away from the slider it

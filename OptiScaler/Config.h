@@ -346,6 +346,8 @@ class Config
     // The most the pass may multiply or divide a pixel by. A detail pass has no business restyling a
     // light source, whatever the model returns.
     CustomOptional<float> DlssNrMaxRatio { 2.0f };
+    // Minimum relative brightness NR may leave. 0 keeps the existing MaxRatio darkening behaviour.
+    CustomOptional<float> DlssNrShadowFloor { 0.0f };
 
     // How a model that worked below the frame's size is brought back. 0 classic, 1 matched
     // residual. Only has an effect when Model resolution is under 100%.
