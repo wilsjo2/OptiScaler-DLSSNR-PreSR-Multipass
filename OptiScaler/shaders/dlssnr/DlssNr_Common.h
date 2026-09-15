@@ -243,14 +243,16 @@ struct alignas(256) DlssNrConstants
     float EnvironmentDetail;
     float EnvironmentColour;
 
-    // ResidualAcrossRR v2 only (dlssnr_residual.hlsl). History blend rate for the MV-reprojected
-    // accumulator, 0..1. Read only by that separate shader; dlssnr.hlsl never declares it. Appended
-    // here rather than in a new struct so DispatchResidualPass reuses the existing constant upload --
-    // it lands inside the 256-byte alignas padding, so sizeof(DlssNrConstants) is unchanged.
+    // ResidualAcrossRR v2 fields. Kept in the shared append-only constant layout so every NR shader
+    // retains identical scalar offsets; shaders that do not use these values carry them as unused slots.
+    // The trailing fields remain within the existing 256-byte aligned constant upload.
     float ResidualBlend;
     uint32_t ResidualHistoryValid;
     uint32_t ResidualMotionBaseX;
     uint32_t ResidualMotionBaseY;
+
+    // Optional lower bound on NR darkening. 0 preserves the existing MaxRatio behaviour.
+    float ShadowFloor;
 };
 static_assert(sizeof(DlssNrConstants) == 256);
 

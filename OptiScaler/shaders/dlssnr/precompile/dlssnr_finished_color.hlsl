@@ -4,6 +4,32 @@ cbuffer Params : register(b0)
 {
     uint mode; float exposureScale; uint width; uint height;
     float sceneIsLinear; float unusedColour; uint unusedDebug; float maxRatio;
+    uint unusedPassthrough;
+    float unusedMvScaleX;
+    float unusedMvScaleY;
+    uint unusedGuideWidth;
+    uint unusedGuideHeight;
+    uint unusedCompareMode;
+    float unusedCompareSplit;
+    float unusedCompareZoom;
+    uint unusedCompareSwap;
+    uint unusedTransfer;
+    float unusedDebugScale;
+    uint unusedReversibleMode;
+    uint unusedApplyModel;
+    uint unusedUseGameExposure;
+    float unusedExposurePreMul;
+    uint unusedSkinProtection;
+    uint unusedShowSkinMask;
+    float unusedSkinDetail;
+    float unusedSkinColour;
+    float unusedEnvironmentDetail;
+    float unusedEnvironmentColour;
+    float unusedResidualBlend;
+    uint unusedResidualHistoryValid;
+    uint unusedResidualMotionBaseX;
+    uint unusedResidualMotionBaseY;
+    float shadowFloor;
 };
 Texture2D<float4> source : register(t0);
 Texture2D<float4> reference : register(t1);
@@ -52,6 +78,11 @@ void CSMain(uint3 id : SV_DispatchThreadID)
                                max(exposureScale, 1e-4) * 1e-4);
         float limit = clamp(maxRatio, 1.0, 8.0);
         float3 gain = clamp(1.0 + (edited - base) / max(base, floorValue), 1.0 / limit, limit);
+        if (shadowFloor > 0.0)
+        {
+            const float lowerGain = clamp(shadowFloor, 1.0 / limit, 1.0);
+            gain = clamp(1.0 + (edited - base) / max(base, floorValue), lowerGain, limit);
+        }
         target[id.xy] = float4(0.5 + log2(gain) / 8.0, 1.0);
         return;
     }
@@ -65,6 +96,11 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         { target[id.xy] = pixel; return; }
         float limit = clamp(maxRatio, 1.0, 8.0);
         float3 gain = exp2(clamp((carrier - 0.5) * 8.0, -log2(limit), log2(limit)));
+        if (shadowFloor > 0.0)
+        {
+            const float lowerGain = clamp(shadowFloor, 1.0 / limit, 1.0);
+            gain = exp2(clamp((carrier - 0.5) * 8.0, log2(lowerGain), log2(limit)));
+        }
         float3 light = mode == 2 ? pow(max(pixel.rgb, 0.0), 2.2) :
                        mode == 4 ? mul(to709, DecodePQ(pixel.rgb)) : pixel.rgb;
         light *= gain;

@@ -345,6 +345,7 @@ void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue
             apply.WhitePoint = slot.frame.PreExposure;
             apply.TransferStrength = slot.sceneLinear ? 1.0f : 0.0f;
             apply.MaxRatio = std::clamp(Config::Instance()->DlssNrMaxRatio.value_or_default(), 1.0f, 8.0f);
+            apply.ShadowFloor = std::clamp(Config::Instance()->DlssNrShadowFloor.value_or_default(), 0.0f, 1.0f);
             appliedResidual = g_compose->DispatchResidualPass(cmd, apply, color.Get(), nullptr,
                 slot.residual.Get(), nullptr, slot.encoded.Get(), true);
             if (appliedResidual)

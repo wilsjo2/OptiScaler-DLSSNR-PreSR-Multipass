@@ -35,6 +35,11 @@ cbuffer Params : register(b0)
     float gSkinColour;
     float gEnvironmentDetail;
     float gEnvironmentColour;
+    float gResidualBlend;
+    uint  gResidualHistoryValid;
+    uint  gResidualMotionBaseX;
+    uint  gResidualMotionBaseY;
+    float gShadowFloor;
 };
 
 // Bringing an impossible colour back into a possible one.
@@ -1041,6 +1046,12 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     // achromatic edit lands as a colour shift.
     const float guard = max(gMaxRatio, 1.0);
     float boundedRatio = clamp(amplified, 1.0 / guard, guard);
+
+    if (gShadowFloor > 0.0)
+    {
+        const float shadowFloor = clamp(gShadowFloor, 1.0 / guard, 1.0);
+        boundedRatio = clamp(amplified, shadowFloor, guard);
+    }
 
     // Exactly one while the ratio is already inside the guard, so a frame that never needed bounding
     // is untouched rather than rounded, and strength zero stays bit-identical.

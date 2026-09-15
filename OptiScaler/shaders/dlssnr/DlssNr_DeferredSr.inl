@@ -498,6 +498,7 @@ void Before(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source,
             encode.WhitePoint = frame.PreExposure;
             encode.TransferStrength = frame.ColourIsLinearHdr ? 1.0f : 0.0f;
             encode.MaxRatio = std::clamp(cfg.DlssNrMaxRatio.value_or_default(), 1.0f, 8.0f);
+            encode.ShadowFloor = std::clamp(cfg.DlssNrShadowFloor.value_or_default(), 0.0f, 1.0f);
             ok = g.codec->DispatchResidualPass(cmd, encode, color, g.edited, nullptr, nullptr, g.residualInput, true);
         }
         else
