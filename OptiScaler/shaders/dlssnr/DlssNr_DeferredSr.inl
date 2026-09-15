@@ -5,25 +5,18 @@ namespace DeferredSr
 constexpr unsigned MarkerCount = 16;
 struct HalfRate
 {
-    std::unique_ptr<ResidualFg> fg;
     ID3D12Resource *motion = nullptr, *previousMotion = nullptr, *anchorMotion = nullptr,
-                   *interpolated = nullptr, *suppression = nullptr, *suppressionTexture = nullptr,
-                   *zeroUpload = nullptr, *history[2] {};
+                   *previousResidual = nullptr;
     bool ready = false, failed = false, havePrevious = false, previousWasAnchor = false;
     bool motionReadable = false, previousReadable = false, anchorReadable = false;
-    bool historyReadable[2] {}, interpolationReadable = false;
-    bool suppressionReadable = false;
-    unsigned writeIndex = 0;
-    float historyScale[2] {1,1};
-    unsigned long long lastEpoch = 0, createEpoch = 0, anchorId = 0;
+    bool previousResidualReadable = false, activationLogged = false;
+    unsigned long long lastEpoch = 0;
     unsigned long long nrAnchors = 0, skippedNr = 0;
-    ResidualFgCamera camera;
+    unsigned long long continuityBreaks = 0;
     ~HalfRate()
     {
         // Generation's GPU completion markers protect all of these lifetimes.
-        fg.reset();
-        for (auto* r : { motion, previousMotion, anchorMotion, interpolated, suppression,
-                         suppressionTexture, zeroUpload, history[0], history[1] }) if (r) r->Release();
+        for (auto* r : { motion, previousMotion, anchorMotion, previousResidual }) if (r) r->Release();
     }
     void Reset() { havePrevious = false; previousWasAnchor = false; }
 };
@@ -46,7 +39,7 @@ struct Generation
     unsigned long long lastBeginEpoch = 0;
     bool began = false;
     std::unique_ptr<DlssNr_Dx12> codec;
-    bool halfRequested = false, approximateCamera = false;
+    bool halfRequested = false;
     std::string halfStatus;
     bool sampleAndHold = false;
     DlssNrResidualHold hold;
@@ -167,39 +160,15 @@ bool Allocate(Generation& g)
     return true;
 }
 
-bool CreateHalfRate(Generation& g, ID3D12GraphicsCommandList* cmd, unsigned long long epoch)
+bool CreateHalfRate(Generation& g)
 {
     g.half = std::make_unique<HalfRate>();
     auto& h = *g.half;
     h.motion = CreateScratch(g.device, DXGI_FORMAT_R32G32B32A32_FLOAT, g.w, g.h);
     h.previousMotion = CreateScratch(g.device, DXGI_FORMAT_R32G32B32A32_FLOAT, g.w, g.h);
     h.anchorMotion = CreateScratch(g.device, DXGI_FORMAT_R32G32B32A32_FLOAT, g.w, g.h);
-    h.interpolated = CreateScratch(g.device, DXGI_FORMAT_R16G16B16A16_FLOAT, g.outW, g.outH);
-    h.suppressionTexture = CreateScratch(g.device, DXGI_FORMAT_R8_UNORM, 1, 1);
-    for (auto& r : h.history) r = CreateScratch(g.device, g.outputFormat, g.outW, g.outH);
-    auto heap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
-    auto desc = CD3DX12_RESOURCE_DESC::Buffer(256, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-    if (FAILED(g.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-        D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&h.suppression)))) return false;
-    heap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
-    desc = CD3DX12_RESOURCE_DESC::Buffer(256);
-    if (FAILED(g.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&h.zeroUpload)))) return false;
-    void* zero = nullptr;
-    if (FAILED(h.zeroUpload->Map(0, nullptr, &zero))) return false;
-    std::memset(zero, 0, 256); h.zeroUpload->Unmap(0, nullptr);
-    if (!h.motion || !h.previousMotion || !h.anchorMotion || !h.interpolated ||
-        !h.suppressionTexture || !h.history[0] || !h.history[1]) return false;
-    ResidualFgApi api { NVNGXProxy::D3D12_GetCapabilityParameters(), NVNGXProxy::D3D12_AllocateParameters(),
-        NVNGXProxy::D3D12_DestroyParameters(), NVNGXProxy::D3D12_CreateFeature(),
-        [](ID3D12GraphicsCommandList* c, const NVSDK_NGX_Handle* f, NVSDK_NGX_Parameter* p,
-           PFN_NVSDK_NGX_ProgressCallback cb) { return NVNGXProxy::D3D12_EvaluateFeature()(c, f, p, cb); },
-        NVNGXProxy::D3D12_ReleaseFeature() };
-    h.fg = std::make_unique<ResidualFg>(api);
-    auto result = h.fg->Create(cmd, g.outW, g.outH, g.w, g.h);
-    if (result != NVSDK_NGX_Result_Success)
-    { g.halfStatus = "FG creation failed: " + std::to_string((unsigned)result); return false; }
-    h.createEpoch = epoch;
+    h.previousResidual = CreateScratch(g.device, DXGI_FORMAT_R16G16B16A16_FLOAT, g.outW, g.outH);
+    if (!h.motion || !h.previousMotion || !h.anchorMotion || !h.previousResidual) return false;
     h.ready = true;
     return true;
 }
@@ -211,21 +180,29 @@ bool PrepareHalfRate(Generation& g, ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Pa
     if (!(g.flags & NVSDK_NGX_DLSS_Feature_Flags_MVLowRes) ||
         (g.flags & NVSDK_NGX_DLSS_Feature_Flags_MVJittered))
     { g.halfStatus = "requires low-resolution, non-jittered motion"; return false; }
-    // This initial bridge integration explicitly requires opt-in approximate guides.
-    // Never mark invented matrices as game-supplied camera data.
-    if (!g.approximateCamera)
-    { g.halfStatus = "explicit approximate-camera opt-in required"; return false; }
     if (!g.half)
     {
-        g.halfStatus = "initializing NVIDIA FG";
-        if (!CreateHalfRate(g, cmd, submittedEpoch)) g.half->failed = true;
+        g.halfStatus = "initializing current-raster half-rate resources";
+        if (!CreateHalfRate(g))
+        {
+            g.half->failed = true;
+            g.halfStatus = "current-raster half-rate allocation failed";
+        }
         return false;
     }
     auto& h = *g.half;
-    if (!h.ready || h.failed || submittedEpoch == h.createEpoch) return false;
+    if (!h.ready || h.failed) return false;
+    if (h.havePrevious && epoch != h.lastEpoch + 1) ++h.continuityBreaks;
     if (g.reset || UInt(source, NVSDK_NGX_Parameter_Reset) || epoch != h.lastEpoch + 1) h.Reset();
     h.lastEpoch = epoch;
     auto desc = motion->GetDesc();
+    if (!h.activationLogged)
+    {
+        h.activationLogged = true;
+        LOG_INFO("DLSS-NR current-raster half-rate activation: flags 0x{:X}, motion {}x{} format {}, active guides {}x{}, "
+                 "output {}x{}, epoch {}, submitted epoch {}", g.flags, desc.Width, desc.Height,
+                 (unsigned) desc.Format, g.w, g.h, g.outW, g.outH, epoch, submittedEpoch);
+    }
     if (desc.Width < g.w || desc.Height < g.h || desc.MipLevels != 1 || desc.SampleDesc.Count != 1)
     { h.Reset(); g.halfStatus = "unsupported motion texture"; return false; }
     if (h.motionReadable) Barrier(cmd, h.motion, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -237,7 +214,9 @@ bool PrepareHalfRate(Generation& g, ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Pa
     Barrier(cmd, h.motion, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     h.motionReadable = true;
     if (!ok) { h.Reset(); g.halfStatus = "motion normalization failed"; return false; }
-    if (h.havePrevious)
+    // Skipped frames only need their normalized one-frame field saved for the
+    // next anchor. Composing two-frame motion here would never be consumed.
+    if (h.havePrevious && !h.previousWasAnchor)
     {
         if (h.anchorReadable) Barrier(cmd, h.anchorMotion, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         normalize.Mode = DlssNrMode_ComposeMotion;
@@ -246,22 +225,6 @@ bool PrepareHalfRate(Generation& g, ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Pa
         h.anchorReadable = true;
         if (!ok) { h.Reset(); g.halfStatus = "motion composition failed"; return false; }
     }
-    using namespace DirectX;
-    const auto& cfg = *Config::Instance();
-    float nearPlane = cfg.FsrCameraNear.value_or_default(), farPlane = cfg.FsrCameraFar.value_or_default();
-    float fov = cfg.FsrVerticalFov.value_or_default() * XM_PI / 180.0f;
-    if (!(nearPlane > 0 && farPlane > nearPlane && fov > 0.01f && fov < XM_PI - 0.01f))
-    { h.Reset(); g.halfStatus = "invalid approximate camera parameters"; return false; }
-    if (g.flags & NVSDK_NGX_DLSS_Feature_Flags_DepthInverted) std::swap(nearPlane, farPlane);
-    auto projection = XMMatrixPerspectiveFovRH(fov, (float)g.outW/g.outH, nearPlane, farPlane);
-    XMFLOAT4X4 temp;
-    XMStoreFloat4x4(&temp, projection); std::memcpy(h.camera.viewToClip, &temp, sizeof(temp));
-    XMStoreFloat4x4(&temp, XMMatrixInverse(nullptr, projection)); std::memcpy(h.camera.clipToView, &temp, sizeof(temp));
-    XMStoreFloat4x4(&temp, XMMatrixIdentity());
-    std::memcpy(h.camera.clipToPrevious, &temp, sizeof(temp)); std::memcpy(h.camera.previousToClip, &temp, sizeof(temp));
-    h.camera.up[1] = h.camera.right[0] = 1; h.camera.forward[2] = -1;
-    h.camera.nearPlane = nearPlane; h.camera.farPlane = farPlane;
-    h.camera.fov = fov; h.camera.aspect = (float)g.outW/g.outH; h.camera.valid = true;
     g.halfStatus.clear();
     return true;
 }
@@ -311,6 +274,17 @@ void Before(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source,
     auto* motion = GetResource(source, NVSDK_NGX_Parameter_MotionVectors, "DLSSD.MotionVectors");
     const bool wantsHalf = cfg.DlssNrResidualFg.value_or_default() && !privateJob &&
                            !cfg.DlssNrFinishedPicture.value_or_default();
+    if (cfg.DlssNrResidualFg.value_or_default() && !wantsHalf)
+    {
+        static int lastBlock = -1;
+        const int block = privateJob ? 1 : (cfg.DlssNrFinishedPicture.value_or_default() ? 2 : 0);
+        if (block != lastBlock)
+        {
+            lastBlock = block;
+            LOG_WARN("DLSS-NR half-rate requested but blocked before activation: {}",
+                     privateJob ? "private bridge job" : "finished-picture mode is enabled");
+        }
+    }
     const bool sampleAndHold = wantsHalf && motion == nullptr;
     if (!color || !output || !depth || (!motion && !sampleAndHold) || color == output)
     {
@@ -355,8 +329,7 @@ void Before(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source,
         current->h != active->height || current->outW != outDesc.Width || current->outH != outDesc.Height ||
         current->inputFormat != inDesc.Format || current->outputFormat != outDesc.Format || current->flags != flags ||
         current->halfRequested != wantsHalf ||
-        current->sampleAndHold != sampleAndHold ||
-        current->approximateCamera != cfg.DlssNrResidualFgApproxCamera.value_or_default()))
+        current->sampleAndHold != sampleAndHold))
         retired.push_back(std::move(current));
     if (!current)
     {
@@ -370,7 +343,6 @@ void Before(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source,
         current->inputFormat = inDesc.Format; current->outputFormat = outDesc.Format; current->flags = flags;
         current->halfRequested = wantsHalf;
         current->sampleAndHold = sampleAndHold;
-        current->approximateCamera = cfg.DlssNrResidualFgApproxCamera.value_or_default();
         if (!Allocate(*current)) { current->failed = true; Say("allocation failed; clean SR frame retained"); return; }
     }
     else device->Release();
@@ -605,75 +577,28 @@ void After(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source, unsigned
 
     Barrier(cmd, g.residualOutput, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     bool half = pair.half && g.half && !g.half->failed;
-    if (half && !pair.skipNr)
-    {
-        auto& h = *g.half;
-        Barrier(cmd, h.suppression, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
-        cmd->CopyBufferRegion(h.suppression, 0, h.zeroUpload, 0, 256);
-        Barrier(cmd, h.suppression, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        if (h.interpolationReadable)
-            Barrier(cmd, h.interpolated, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        const auto result = h.fg->Evaluate(cmd, g.residualOutput,
-            GetResource(source, NVSDK_NGX_Parameter_Depth, "DLSSD.Depth"),
-            h.havePrevious ? h.anchorMotion : h.motion, h.interpolated, h.suppression, h.camera,
-            (g.flags & NVSDK_NGX_DLSS_Feature_Flags_DepthInverted) != 0, !h.havePrevious, h.anchorId++);
-        Barrier(cmd, h.interpolated, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        h.interpolationReadable = true;
-        if (result != NVSDK_NGX_Result_Success)
-        {
-            h.failed = true; h.Reset(); half = false;
-            g.halfStatus = "FG evaluate failed: " + std::to_string((unsigned)result);
-        }
-        else
-        {
-            // NVIDIA writes a boolean to the first buffer byte. Copy it to R8_UNORM
-            // for the shader: avoids CPU waiting and changing the game's predication.
-            Barrier(cmd, h.suppression, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
-            Barrier(cmd, h.suppressionTexture, h.suppressionReadable ? D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE :
-                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
-            D3D12_TEXTURE_COPY_LOCATION from {}, to {};
-            from.pResource = h.suppression; from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-            from.PlacedFootprint.Footprint = { DXGI_FORMAT_R8_UNORM, 1, 1, 1, 256 };
-            to.pResource = h.suppressionTexture; to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-            cmd->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
-            Barrier(cmd, h.suppressionTexture, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-            Barrier(cmd, h.suppression, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            h.suppressionReadable = true;
-        }
-    }
     const auto arrival = cfg.OutputResourceBarrier.has_value() ?
         (D3D12_RESOURCE_STATES)cfg.OutputResourceBarrier.value() : D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     Barrier(cmd, pair.output, arrival, D3D12_RESOURCE_STATE_COPY_SOURCE);
     Barrier(cmd, g.clean, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
     cmd->CopyResource(g.clean, pair.output);
     Barrier(cmd, g.clean, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    ID3D12Resource* base = g.clean;
     ID3D12Resource* residual = g.residualOutput;
-    ID3D12Resource* suppression = nullptr;
+    ID3D12Resource* fallbackResidual = nullptr;
+    ID3D12Resource* fallbackMotion = nullptr;
     DlssNrConstants apply {}; apply.Mode = DlssNrMode_ApplyResidual;
     apply.Width = g.outW; apply.Height = g.outH; apply.ExposurePreMul = pair.scale;
-    if (half)
+    if (half && pair.skipNr)
     {
         auto& h = *g.half;
-        if (h.havePrevious)
-        {
-            const unsigned previous = 1 - h.writeIndex;
-            base = h.history[previous]; apply.ExposurePreMul = h.historyScale[previous];
-            if (!pair.skipNr)
-            {
-                residual = h.interpolated; suppression = h.suppressionTexture;
-                apply.Mode = DlssNrMode_ApplyInterpolatedResidual;
-            }
-        }
-        Barrier(cmd, g.clean, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        Barrier(cmd, h.history[h.writeIndex], h.historyReadable[h.writeIndex] ? D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE :
-                D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
-        cmd->CopyResource(h.history[h.writeIndex], g.clean);
-        Barrier(cmd, h.history[h.writeIndex], D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        Barrier(cmd, g.clean, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        h.historyReadable[h.writeIndex] = true; h.historyScale[h.writeIndex] = pair.scale;
+        // Keep the game's raster current. Only the previous NR edit is brought
+        // forward by the skipped frame's current-to-previous motion field.
+        apply.Mode = DlssNrMode_ApplyReprojectedResidual;
+        fallbackResidual = h.previousResidual;
+        fallbackMotion = h.motion;
     }
-    const bool ok = g.codec->DispatchPass(cmd, apply, base, residual, nullptr, nullptr, suppression, g.composed, nullptr);
+    const bool ok = g.codec->DispatchPass(cmd, apply, g.clean, residual, fallbackResidual, fallbackMotion,
+                                         nullptr, g.composed, nullptr);
     if (ok)
     {
         Barrier(cmd, g.composed, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -681,14 +606,27 @@ void After(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source, unsigned
         cmd->CopyResource(pair.output, g.composed);
         Barrier(cmd, pair.output, D3D12_RESOURCE_STATE_COPY_DEST, arrival);
         Barrier(cmd, g.composed, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        Say(g.sampleAndHold ? "running: sample-and-hold (motion unavailable); each NR residual applied to 2 current frames; no residual FG or SR delay" :
-            half ? "running: NR every second frame + NVIDIA residual FG; SR delayed 1 frame; APPROXIMATE camera guides" :
+        Say(g.sampleAndHold ? "running: sample-and-hold (motion unavailable); each NR residual applied to 2 current frames; no raster delay" :
+            half ? "running: NR every second frame; previous NR reprojected onto CURRENT clean raster; no raster delay" :
             "running: " + std::to_string(g.w) + "x" + std::to_string(g.h) + " contribution -> private DLSS -> " +
             std::to_string(g.outW) + "x" + std::to_string(g.outH) + "; applied after SR" +
-            (g.halfRequested ? "; residual FG inactive: " + g.halfStatus : ""));
+            (g.halfRequested ? "; half-rate inactive: " + g.halfStatus : ""));
     }
     else { Barrier(cmd, pair.output, D3D12_RESOURCE_STATE_COPY_SOURCE, arrival); Say("composition failed; clean frame retained"); }
     Barrier(cmd, g.clean, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    if (half && ok && !pair.skipNr)
+    {
+        auto& h = *g.half;
+        // Preserve this anchor only AFTER the previous anchor has been consumed
+        // by the midpoint fallback. Known cuts reset havePrevious before use.
+        Barrier(cmd, g.residualOutput, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        Barrier(cmd, h.previousResidual, h.previousResidualReadable ? D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE :
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
+        cmd->CopyResource(h.previousResidual, g.residualOutput);
+        Barrier(cmd, h.previousResidual, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        Barrier(cmd, g.residualOutput, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        h.previousResidualReadable = true;
+    }
     Barrier(cmd, g.residualOutput, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     if (g.sampleAndHold)
     {
@@ -705,11 +643,17 @@ void After(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source, unsigned
         Barrier(cmd, h.previousMotion, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         Barrier(cmd, h.motion, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         h.previousReadable = true; h.havePrevious = ok; h.previousWasAnchor = !pair.skipNr;
-        if (pair.skipNr) ++h.skippedNr; else ++h.nrAnchors;
+        if (ok) { if (pair.skipNr) ++h.skippedNr; else ++h.nrAnchors; }
+        // Independent of FG readback or a first successful skip: the old cadence
+        // message never fired in the broken 313-anchor / zero-skip sequence.
+        if (ok && (h.nrAnchors + h.skippedNr) % 240 == 0)
+            LOG_INFO("Current-raster half-rate cadence: {} NR anchors, {} NR skips, {} render-epoch gaps; "
+                     "render epoch {}, current Present counter {}", h.nrAnchors, h.skippedNr,
+                     h.continuityBreaks, pair.epoch,
+                     State::Instance().frameCount);
         if (h.skippedNr == 8 && pair.skipNr)
-            LOG_INFO("Residual FG cadence: {} NR anchor frames, {} skipped NR frames; matching clean history active",
+            LOG_INFO("Current-raster half-rate cadence: {} NR anchor frames, {} skipped NR frames; motion reprojection active",
                      h.nrAnchors, h.skippedNr);
-        h.writeIndex = 1 - h.writeIndex;
         if (!ok) { h.Reset(); g.reset = true; }
     }
 }
@@ -730,10 +674,27 @@ std::string SynchronousDeferredDlssStatus()
 {
     std::lock_guard<std::recursive_mutex> lock(g_nrMutex);
     auto result = DeferredSr::status;
-    if (DeferredSr::current && DeferredSr::current->half && DeferredSr::current->half->havePrevious)
+    const auto& cfg = *Config::Instance();
+    if (cfg.DlssNrResidualFg.value_or_default())
     {
-        const auto& h = *DeferredSr::current->half;
-        result += " (NR frames " + std::to_string(h.nrAnchors) + ", skipped " + std::to_string(h.skippedNr) + ")";
+        if (cfg.DlssNrFinishedPicture.value_or_default())
+            result += " (half-rate BLOCKED: finished-picture mode is enabled)";
+        else if (!DeferredSr::current)
+            result += " (half-rate requested; waiting for deferred SR)";
+        else if (DeferredSr::current->sampleAndHold)
+            result += " (sample-and-hold; motion reprojection unavailable)";
+        else if (!DeferredSr::current->half)
+            result += " (half-rate requested; " + (DeferredSr::current->halfStatus.empty() ?
+                      std::string("waiting for half-rate resources") : DeferredSr::current->halfStatus) + ")";
+        else
+        {
+            const auto& h = *DeferredSr::current->half;
+            result += " (NR frames " + std::to_string(h.nrAnchors) + ", reprojected skips " +
+                      std::to_string(h.skippedNr);
+            if (!DeferredSr::current->halfStatus.empty())
+                result += "; " + DeferredSr::current->halfStatus;
+            result += ")";
+        }
     }
     return result;
 }
