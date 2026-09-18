@@ -83,6 +83,12 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
                   ID3D12CommandQueue* timingQueue = nullptr);
 
     bool CreateBufferResource(ID3D12Device* device, ID3D12Resource* source, D3D12_RESOURCE_STATES state);
+    // Tracks an externally-owned, already-UAV-capable resource as our working buffer instead of
+    // allocating a private committed copy -- matches OptiScaler 0.7.7's behaviour for the common
+    // case (no WorkingScale supersampling, no multi-pass layering). Takes its own AddRef on
+    // `source`; the caller's own reference/lifetime is untouched. The previous buffer, if any, is
+    // parked for deferred release exactly as CreateBufferResource does when replacing it.
+    bool AdoptExternalBuffer(ID3D12Resource* source, D3D12_RESOURCE_STATES state);
     void SetBufferState(ID3D12GraphicsCommandList* cmdList, D3D12_RESOURCE_STATES state);
     ID3D12Resource* Buffer();
     bool CanRender() const;

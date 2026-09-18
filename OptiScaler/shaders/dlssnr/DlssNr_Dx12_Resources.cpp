@@ -59,6 +59,22 @@ auto DlssNr_Dx12::State::CreateScratch(ID3D12Device* device, DXGI_FORMAT format,
     return res;
 }
 
+auto DlssNr_Dx12::State::CopyMip0(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* dst, ID3D12Resource* src)
+    -> void
+{
+    if (cmdList == nullptr || dst == nullptr || src == nullptr)
+        return;
+    D3D12_TEXTURE_COPY_LOCATION dstLoc {};
+    dstLoc.pResource = dst;
+    dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dstLoc.SubresourceIndex = 0;
+    D3D12_TEXTURE_COPY_LOCATION srcLoc {};
+    srcLoc.pResource = src;
+    srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    srcLoc.SubresourceIndex = 0;
+    cmdList->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, nullptr);
+}
+
 auto DlssNr_Dx12::State::Barrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* res, D3D12_RESOURCE_STATES from,
                  D3D12_RESOURCE_STATES to) -> void
 {

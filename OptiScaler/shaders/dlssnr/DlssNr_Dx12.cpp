@@ -397,6 +397,29 @@ bool DlssNr_Dx12::CreateBufferResource(ID3D12Device* device, ID3D12Resource* sou
     return true;
 }
 
+bool DlssNr_Dx12::AdoptExternalBuffer(ID3D12Resource* source, D3D12_RESOURCE_STATES state)
+{
+    std::lock_guard ownersLock(nrOwnersMutex);
+    std::lock_guard stateLock(_state->mutex);
+    if (source == nullptr)
+        return false;
+    if (_state->buffer == source)
+    {
+        // Already tracking this exact resource (e.g. the pipeline handed us the same swapchain-
+        // adjacent buffer two frames running); nothing to do.
+        return true;
+    }
+    if (_state->buffer != nullptr)
+        _state->ParkNrResource(_state->buffer);
+    // We're taking our own reference here, separate from whatever the caller/pipeline holds --
+    // _state->buffer is unconditionally released later (SAFE_RELEASE / ParkNrResource), so it must
+    // always be balanced by exactly one AddRef of our own, same as after CreateCommittedResource.
+    source->AddRef();
+    _state->buffer = source;
+    _state->bufferState = state;
+    return true;
+}
+
 void DlssNr_Dx12::SetBufferState(ID3D12GraphicsCommandList* cmdList, D3D12_RESOURCE_STATES state)
 {
     std::lock_guard ownersLock(nrOwnersMutex);

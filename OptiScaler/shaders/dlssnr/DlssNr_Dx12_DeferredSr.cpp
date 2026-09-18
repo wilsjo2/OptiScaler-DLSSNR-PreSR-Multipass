@@ -145,8 +145,13 @@ auto DlssNr_Dx12::State::DeferredSrContext::Before(ID3D12GraphicsCommandList* cm
     const auto active =
         DlssNr::PreSrColorExtent(inDesc, UInt(source, NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width),
                                  UInt(source, NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height));
+    // outDesc.MipLevels/ArraySize is no longer required to be exactly 1: the two CopyResource
+    // calls onto/from `output` below were replaced with CopyMip0 (CopyTextureRegion targeting
+    // subresource 0), which works regardless of how many extra mips/slices the real output
+    // resource carries (e.g. a shared HDR buffer with a bloom/SSR mip chain). `color`'s own
+    // layout is unrelated to that and is left as-is.
     if (!active || !DlssNr::PreSrColorExtent(outDesc, 0, 0) || inDesc.MipLevels != 1 ||
-        outDesc.MipLevels != 1 || active->width > outDesc.Width || active->height > outDesc.Height)
+        active->width > outDesc.Width || active->height > outDesc.Height)
     {
         Say("inactive: unsupported active input/output dimensions");
         return;
@@ -573,7 +578,7 @@ auto DlssNr_Dx12::State::DeferredSrContext::After(ID3D12GraphicsCommandList* cmd
                              : D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     owner.Barrier(cmd, pair.output, arrival, D3D12_RESOURCE_STATE_COPY_SOURCE);
     owner.Barrier(cmd, g.clean, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
-    cmd->CopyResource(g.clean, pair.output);
+    owner.CopyMip0(cmd, g.clean, pair.output);
     owner.Barrier(cmd, g.clean, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     DlssNrConstants apply {};
     apply.Mode = DlssNrMode_ApplyResidual;
@@ -586,7 +591,7 @@ auto DlssNr_Dx12::State::DeferredSrContext::After(ID3D12GraphicsCommandList* cmd
     {
         owner.Barrier(cmd, g.composed, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
         owner.Barrier(cmd, pair.output, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
-        cmd->CopyResource(pair.output, g.composed);
+        owner.CopyMip0(cmd, pair.output, g.composed);
         owner.Barrier(cmd, pair.output, D3D12_RESOURCE_STATE_COPY_DEST, arrival);
         owner.Barrier(cmd, g.composed, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         Say("running: " + std::to_string(g.w) + "x" + std::to_string(g.h) +

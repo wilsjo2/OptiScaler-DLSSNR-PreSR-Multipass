@@ -197,6 +197,16 @@ struct DlssNr_Dx12::State
 
     ID3D12Resource* CreateScratch(ID3D12Device* device, DXGI_FORMAT format, unsigned int width, unsigned int height);
 
+    // Copies just mip 0 / array slice 0 of `src` into `dst` (both directions), using
+    // CopyTextureRegion instead of CopyResource. CreateScratch() always allocates single-mip,
+    // single-slice buffers, but real game targets this composites against (the finished frame,
+    // the game's own colour buffer) commonly aren't -- they may carry a full mip chain shared
+    // with other post-processing (bloom/SSR/TAA) or be a texture array. CopyResource requires an
+    // exact structural match between source and destination and silently corrupts or fails
+    // otherwise; CopyTextureRegion targeting subresource 0 on both sides works regardless of how
+    // many extra mips/slices the real target has, as long as mip 0's width/height/format match.
+    static void CopyMip0(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* dst, ID3D12Resource* src);
+
     void Barrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* res, D3D12_RESOURCE_STATES from,
                  D3D12_RESOURCE_STATES to);
 

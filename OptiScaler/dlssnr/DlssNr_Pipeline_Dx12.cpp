@@ -155,6 +155,27 @@ ShaderPass_Dx12 MakeDlssNrPass(DlssNr_Dx12& shader, ID3D12Device* device, ID3D12
                 return nullptr;
             if (beforeUpscale)
                 return color;
+            // Matches OptiScaler 0.7.7's behaviour: when the destination already supports UAV
+            // and no private working buffer is actually needed (no supersampling via
+            // WorkingScale, no multi-pass layering via Passes), dispatch directly onto it
+            // instead of allocating a dedicated committed resource and copying into it. 0.7.7
+            // never allocated anything here (`target = output`) for exactly this common case.
+            // The dedicated buffer path below is only needed for the newer WorkingScale/Passes
+            // features 0.7.7 didn't have, and allocating it unconditionally rejected -- or, once
+            // "fixed" to accept arbitrary source layouts, could hang the driver on -- output
+            // textures that aren't a plain single-mip/single-slice resource (this game's is a
+            // shared 12-mip HDR buffer).
+            const auto nextOutputDesc = nextOutput->GetDesc();
+            const bool nextOutputSupportsUav =
+                (nextOutputDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0;
+            const bool needsPrivateBuffer = Config::Instance()->DlssNrWorkingScale.value_or_default() != 1.0f ||
+                                            Config::Instance()->DlssNrPasses.value_or_default() > 1;
+            if (!needsPrivateBuffer && nextOutputSupportsUav)
+            {
+                if (!shader.AdoptExternalBuffer(nextOutput, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
+                    return nullptr;
+                return shader.Buffer();
+            }
             if (!shader.CreateBufferResource(device, nextOutput, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
                 return nullptr;
             shader.SetBufferState(commandList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
