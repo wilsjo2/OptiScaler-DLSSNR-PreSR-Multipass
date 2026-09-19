@@ -183,6 +183,7 @@ struct DlssNr_Dx12::State
     void CopyCalibrationToReadback(ID3D12GraphicsCommandList* cmdList);
 
     void CopyMeterToReadback(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, bool exposureBound);
+    void CopyAutoExposureToReadback(ID3D12GraphicsCommandList* cmdList, float preExposure);
 
     // Consume texel zero from the delayed readback ring, retaining the last plausible exposure.
     void ConsumeCalibrationReadback();
@@ -194,6 +195,7 @@ struct DlssNr_Dx12::State
 
     // Resolve the encode divisor from game exposure or the configured manual fallback.
     float ResolveWhitePoint(const Config& cfg, bool isHdrBuffer);
+    void FillExposureTrimConstants(DlssNrConstants& params, const Config& cfg, uint32_t source);
 
     ID3D12Resource* CreateScratch(ID3D12Device* device, DXGI_FORMAT format, unsigned int width, unsigned int height);
 
@@ -463,6 +465,8 @@ struct DlssNr_Dx12::State
         bool targetSupportsUav;
         float whitePoint = 1.0f, exposurePreMul = 0.0f;
         unsigned int useGameExposure = 0;
+        uint32_t whitePointSource = 0;
+        bool usingAutoExposure = false;
         ID3D12Resource* exposureTex = nullptr;
         ID3D12Resource* modelInput = nullptr;
     };

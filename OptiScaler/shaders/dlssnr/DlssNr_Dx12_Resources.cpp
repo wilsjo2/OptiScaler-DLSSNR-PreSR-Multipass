@@ -278,6 +278,13 @@ auto DlssNr_Dx12::State::ReleaseResources() -> void
     {
         ParkNrResource(nr.meter);
     }
+    if (nr.autoExposure != nullptr)
+        ParkNrResource(nr.autoExposure);
+    nr.autoExposureReadable = false;
+    nr.autoExposureValue = 0.0f;
+    nr.autoExposurePreExposure = 1.0f;
+    nr.autoExposureFrames = 0;
+    nr.exposureReadbackSource = 0;
 
     if (nr.calib != nullptr)
     {
@@ -312,8 +319,8 @@ auto DlssNr_Dx12::State::ReleaseResources() -> void
     // transition within the same scene, and dropping to the slider for a few frames would be the
     // flicker the held value exists to prevent. The user switching the option off is the case where
     // the held value has to go, and that is handled at the edge in Dispatch.
-    for (bool& valid : nr.meterExposureValid)
-        valid = false;
+    for (uint32_t& kind : nr.meterExposureKind)
+        kind = 0u;
 
     nr.meterFrames = 0;
 

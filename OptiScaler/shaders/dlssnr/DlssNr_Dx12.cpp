@@ -229,9 +229,14 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
     InCmdList->SetComputeRootDescriptorTable(0, currentHeap.GetTableGPUStart());
 
     // Sized from the constants rather than from a resource, because the pass that shrinks the proxy
-    // writes fewer pixels than its source has.
-    const UINT dispatchWidth = (InConstants.Width + _numThreadsX - 1) / _numThreadsX;
-    const UINT dispatchHeight = (InConstants.Height + _numThreadsY - 1) / _numThreadsY;
+    // writes fewer pixels than its source has. Automatic-exposure metering is the one exception:
+    // its shader uses one full 8x8 thread group per meter tile, so dispatch one group for each tile.
+    const bool parallelExposureMeter =
+        InConstants.Mode == DlssNrMode_Meter && InConstants.MeterCopiesExposure == 0;
+    const UINT dispatchWidth =
+        parallelExposureMeter ? InConstants.Width : (InConstants.Width + _numThreadsX - 1) / _numThreadsX;
+    const UINT dispatchHeight =
+        parallelExposureMeter ? InConstants.Height : (InConstants.Height + _numThreadsY - 1) / _numThreadsY;
     InCmdList->Dispatch(dispatchWidth, dispatchHeight, 1);
 
     return true;

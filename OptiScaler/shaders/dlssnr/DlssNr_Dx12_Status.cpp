@@ -58,6 +58,8 @@ auto DlssNr_Dx12::State::Publish() -> void
           lastGpuTime,
           frames,
           { nr.exposureFrames, nr.exposureOfferedNow, nr.exposureEverOffered, nr.gameExposure, nr.gamePreExposure },
+          { nr.autoExposureFrames, nr.autoExposureReadable, nr.autoExposureFrames != 0,
+            nr.autoExposureValue, nr.autoExposurePreExposure },
           captureFrames.isActive() });
 }
 

@@ -59,6 +59,12 @@ struct ModelStateDx12
     // The exposure readback ring contains the game's own exposure sample in texel zero.
     ID3D12Resource* meter = nullptr;
     ID3D12Resource* meterReadback[4] = {};
+    ID3D12Resource* autoExposure = nullptr;
+    bool autoExposureReadable = false;
+    float autoExposureValue = 0.0f;
+    float autoExposurePreExposure = 1.0f;
+    unsigned long long autoExposureFrames = 0;
+    uint32_t exposureReadbackSource = 0;
 
     // The calibration grid: what scale the game's buffer is on, measured from the untouched copy.
     // Its own surface and ring rather than sharing the meter's, because the two run at different
@@ -80,7 +86,8 @@ struct ModelStateDx12
     bool calibPassthrough = false;
 
     // Validity travels with the readback slot: an unbound exposure slot contains fallback image data.
-    bool meterExposureValid[4] = {};
+    uint32_t meterExposureKind[4] = {}; // 0 none, 1 game, 2 automatic
+    float meterExposurePreExposure[4] = {};
     unsigned int meterSlot = 0;
     unsigned long long meterFrames = 0;
 

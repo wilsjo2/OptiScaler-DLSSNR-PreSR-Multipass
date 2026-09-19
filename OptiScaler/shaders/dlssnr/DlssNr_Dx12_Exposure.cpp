@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "DlssNr_Dx12_State.h"
+#include <vector>
 
 auto DlssNr_Dx12::State::WhitePointForMean(float meanLuma) -> float
 {
@@ -56,7 +57,8 @@ auto DlssNr_Dx12::State::CopyMeterToReadback(ID3D12GraphicsCommandList* cmdList,
         return;
 
     // Travels with the grid: read back three frames from now, alongside the tiles it describes.
-    nr.meterExposureValid[slot] = exposureBound;
+    nr.meterExposureKind[slot] = exposureBound ? 1u : 0u;
+    nr.meterExposurePreExposure[slot] = nr.gamePreExposure;
 
     D3D12_TEXTURE_COPY_LOCATION src {};
     src.pResource = nr.meter;
@@ -78,6 +80,44 @@ auto DlssNr_Dx12::State::CopyMeterToReadback(ID3D12GraphicsCommandList* cmdList,
     Barrier(cmdList, nr.meter, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     nr.meterFrames++;
+}
+
+auto DlssNr_Dx12::State::CopyAutoExposureToReadback(ID3D12GraphicsCommandList* cmdList, float preExposure) -> void
+{
+    if (nr.autoExposure == nullptr)
+        return;
+    const unsigned int slot = (unsigned int) (nr.meterFrames % 4);
+    ID3D12Resource* buffer = nr.meterReadback[slot];
+    if (buffer == nullptr)
+        return;
+
+    nr.meterExposureKind[slot] = 2u;
+    nr.meterExposurePreExposure[slot] =
+        std::isfinite(preExposure) && preExposure > 1e-6f ? preExposure : 1.0f;
+
+    D3D12_TEXTURE_COPY_LOCATION src {};
+    src.pResource = nr.autoExposure;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    src.SubresourceIndex = 0;
+
+    D3D12_TEXTURE_COPY_LOCATION dst {};
+    dst.pResource = buffer;
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint.Offset = 0;
+    dst.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R32_FLOAT;
+    dst.PlacedFootprint.Footprint.Width = 1;
+    dst.PlacedFootprint.Footprint.Height = 1;
+    dst.PlacedFootprint.Footprint.Depth = 1;
+    dst.PlacedFootprint.Footprint.RowPitch = kMeterRowBytes;
+
+    Barrier(cmdList, nr.autoExposure, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            D3D12_RESOURCE_STATE_COPY_SOURCE);
+    cmdList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    Barrier(cmdList, nr.autoExposure, D3D12_RESOURCE_STATE_COPY_SOURCE,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    nr.meterFrames++;
+    nr.autoExposureFrames++;
 }
 
 auto DlssNr_Dx12::State::ConsumeCalibrationReadback() -> void
@@ -204,8 +244,13 @@ auto DlssNr_Dx12::State::ConsumeMeterReadback() -> void
     //
     // When it is not believed gameExposure keeps its last good value, or stays 0 and lets
     // ResolveWhitePoint fall back to the slider, which is what a game supplying none should get.
-    if (nr.meterExposureValid[slot] && std::isfinite(src[0]) && src[0] > 0.0f)
+    if (nr.meterExposureKind[slot] == 1u && std::isfinite(src[0]) && src[0] > 0.0f)
         nr.gameExposure = src[0];
+    else if (nr.meterExposureKind[slot] == 2u && std::isfinite(src[0]) && src[0] > 0.0f)
+    {
+        nr.autoExposureValue = src[0];
+        nr.autoExposurePreExposure = nr.meterExposurePreExposure[slot];
+    }
 
     D3D12_RANGE nothingWritten { 0, 0 };
     buffer->Unmap(0, &nothingWritten);
@@ -214,13 +259,97 @@ auto DlssNr_Dx12::State::ConsumeMeterReadback() -> void
 auto DlssNr_Dx12::State::InvalidateExposureMeter() -> void
 {
     nr.gameExposure = 0.0f;
+    nr.autoExposureValue = 0.0f;
+    nr.autoExposurePreExposure = 1.0f;
 
-    for (bool& valid : nr.meterExposureValid)
-        valid = false;
+    for (uint32_t& kind : nr.meterExposureKind)
+        kind = 0u;
 
     // Re-arms the `< 4` guard in ConsumeMeterReadback, so nothing is read back until four frames
     // have genuinely been queued since this point.
     nr.meterFrames = 0;
+}
+
+namespace
+{
+struct TrimAnchorRuntime
+{
+    float key = 0.0f;
+    float trim = 1.0f;
+};
+
+std::vector<TrimAnchorRuntime> ParseTrimAnchors(const std::string& text)
+{
+    std::vector<TrimAnchorRuntime> out;
+    size_t pos = 0;
+    while (pos < text.size() && out.size() < 8)
+    {
+        const size_t semi = text.find(';', pos);
+        const std::string token = text.substr(pos, semi == std::string::npos ? std::string::npos : semi - pos);
+        pos = semi == std::string::npos ? text.size() : semi + 1;
+        const size_t colon = token.find(':');
+        if (colon == std::string::npos)
+            continue;
+        try
+        {
+            const float key = std::stof(token.substr(0, colon));
+            const float trim = std::stof(token.substr(colon + 1));
+            if (std::isfinite(key) && key > 1e-8f && std::isfinite(trim) && trim > 0.0f)
+                out.push_back({ key, std::clamp(trim, 0.25f, 50.0f) });
+        }
+        catch (...) {}
+    }
+    std::sort(out.begin(), out.end(), [](const TrimAnchorRuntime& a, const TrimAnchorRuntime& b) { return a.key < b.key; });
+    return out;
+}
+
+float TrimForKey(float key, float fallback, const std::vector<TrimAnchorRuntime>& anchors, bool preview)
+{
+    fallback = std::clamp(fallback, 0.25f, 50.0f);
+    if (preview || anchors.empty() || !(std::isfinite(key) && key > 1e-8f))
+        return fallback;
+    if (anchors.size() == 1)
+        return anchors[0].trim;
+    if (key <= anchors.front().key)
+        return anchors.front().trim;
+    if (key >= anchors.back().key)
+        return anchors.back().trim;
+    for (size_t i = 0; i + 1 < anchors.size(); ++i)
+    {
+        const auto& a = anchors[i];
+        const auto& b = anchors[i + 1];
+        if (key >= a.key && key <= b.key && b.key > a.key * 1.000001f)
+        {
+            const float t = (std::log(key) - std::log(a.key)) / (std::log(b.key) - std::log(a.key));
+            return std::clamp(std::exp(std::log(a.trim) + t * (std::log(b.trim) - std::log(a.trim))),
+                              0.25f, 50.0f);
+        }
+    }
+    return anchors.back().trim;
+}
+}
+
+void DlssNr_Dx12::State::FillExposureTrimConstants(DlssNrConstants& params, const Config& cfg, uint32_t source)
+{
+    const bool automatic = source == 3;
+    const float fallback = automatic ? cfg.DlssNrAutoExposureTrim.value_or_default()
+                                     : cfg.DlssNrWhitePointTrim.value_or_default();
+    const bool preview = automatic ? cfg.DlssNrAutoExposureTrimPreview.value_or_default()
+                                   : cfg.DlssNrGameExposureTrimPreview.value_or_default();
+    const auto anchors = ParseTrimAnchors(automatic ? cfg.DlssNrAutoExposureTrimAnchors.value_or_default()
+                                                   : cfg.DlssNrGameExposureTrimAnchors.value_or_default());
+
+    params.ExposureTrim = std::clamp(fallback, 0.25f, 50.0f);
+    params.ExposureTrimPreview = preview ? 1u : 0u;
+    params.ExposureTrimAnchorCount = (uint32_t) std::min<size_t>(anchors.size(), 8);
+    float* pairs = &params.ExposureTrimAnchorExposure0;
+    for (size_t i = 0; i < params.ExposureTrimAnchorCount; ++i)
+    {
+        pairs[i * 2 + 0] = anchors[i].key;
+        pairs[i * 2 + 1] = anchors[i].trim;
+    }
+    params.AutoExposureShadowProtection =
+        std::clamp(cfg.DlssNrAutoExposureShadowProtection.value_or_default(), 0.0f, 100.0f);
 }
 
 auto DlssNr_Dx12::State::ResolveWhitePoint(const Config& cfg, bool isHdrBuffer) -> float
@@ -283,9 +412,20 @@ auto DlssNr_Dx12::State::ResolveWhitePoint(const Config& cfg, bool isHdrBuffer) 
         //
         // Their value is left in the config untouched, so switching back to manual restores the
         // number they arrived at. It is only what this path consumes that is limited.
-        const float trim = std::clamp(cfg.DlssNrWhitePointTrim.value_or_default(), 0.25f, 4.0f);
+        const float baseWhitePoint = nr.gamePreExposure / nr.gameExposure;
+        const auto anchors = ParseTrimAnchors(cfg.DlssNrGameExposureTrimAnchors.value_or_default());
+        const float trim = TrimForKey(baseWhitePoint, cfg.DlssNrWhitePointTrim.value_or_default(), anchors,
+                                      cfg.DlssNrGameExposureTrimPreview.value_or_default());
+        return std::clamp(baseWhitePoint * trim, 0.01f, 4096.0f);
+    }
 
-        return std::clamp(nr.gamePreExposure / nr.gameExposure * trim, 0.01f, 4096.0f);
+    if (cfg.DlssNrWhitePointSource.value_or_default() == 3 && nr.autoExposureValue > 1e-8f)
+    {
+        const float baseWhitePoint = nr.autoExposurePreExposure / nr.autoExposureValue;
+        const auto anchors = ParseTrimAnchors(cfg.DlssNrAutoExposureTrimAnchors.value_or_default());
+        const float trim = TrimForKey(baseWhitePoint, cfg.DlssNrAutoExposureTrim.value_or_default(), anchors,
+                                      cfg.DlssNrAutoExposureTrimPreview.value_or_default());
+        return std::clamp(baseWhitePoint * trim, 0.01f, 4096.0f);
     }
 
     // Otherwise the slider, and only the slider.

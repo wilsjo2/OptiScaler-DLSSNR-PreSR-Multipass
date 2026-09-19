@@ -24,6 +24,87 @@
 
 namespace DlssNr
 {
+namespace
+{
+struct VkTrimAnchor
+{
+    float key = 0.0f;
+    float trim = 1.0f;
+};
+
+std::vector<VkTrimAnchor> ParseVkTrimAnchors(const std::string& text)
+{
+    std::vector<VkTrimAnchor> out;
+    size_t pos = 0;
+    while (pos < text.size() && out.size() < 8)
+    {
+        const size_t semi = text.find(';', pos);
+        const std::string token = text.substr(pos, semi == std::string::npos ? std::string::npos : semi - pos);
+        pos = semi == std::string::npos ? text.size() : semi + 1;
+        const size_t colon = token.find(':');
+        if (colon == std::string::npos)
+            continue;
+        try
+        {
+            const float key = std::stof(token.substr(0, colon));
+            const float trim = std::stof(token.substr(colon + 1));
+            if (std::isfinite(key) && key > 1e-8f && std::isfinite(trim) && trim > 0.0f)
+                out.push_back({ key, std::clamp(trim, 0.25f, 50.0f) });
+        }
+        catch (...) {}
+    }
+    std::sort(out.begin(), out.end(), [](const VkTrimAnchor& a, const VkTrimAnchor& b) { return a.key < b.key; });
+    return out;
+}
+
+float VkTrimForKey(float key, float fallback, const std::vector<VkTrimAnchor>& anchors, bool preview)
+{
+    fallback = std::clamp(fallback, 0.25f, 50.0f);
+    if (preview || anchors.empty() || !(std::isfinite(key) && key > 1e-8f))
+        return fallback;
+    if (anchors.size() == 1)
+        return anchors[0].trim;
+    if (key <= anchors.front().key)
+        return anchors.front().trim;
+    if (key >= anchors.back().key)
+        return anchors.back().trim;
+    for (size_t i = 0; i + 1 < anchors.size(); ++i)
+    {
+        const auto& a = anchors[i];
+        const auto& b = anchors[i + 1];
+        if (key >= a.key && key <= b.key && b.key > a.key * 1.000001f)
+        {
+            const float t = (std::log(key) - std::log(a.key)) / (std::log(b.key) - std::log(a.key));
+            return std::clamp(std::exp(std::log(a.trim) + t * (std::log(b.trim) - std::log(a.trim))),
+                              0.25f, 50.0f);
+        }
+    }
+    return anchors.back().trim;
+}
+
+void FillVkTrimConstants(DlssNrConstants& params, const Config& cfg, uint32_t source)
+{
+    const bool automatic = source == 3;
+    const float fallback = automatic ? cfg.DlssNrAutoExposureTrim.value_or_default()
+                                     : cfg.DlssNrWhitePointTrim.value_or_default();
+    const bool preview = automatic ? cfg.DlssNrAutoExposureTrimPreview.value_or_default()
+                                   : cfg.DlssNrGameExposureTrimPreview.value_or_default();
+    const auto anchors = ParseVkTrimAnchors(automatic ? cfg.DlssNrAutoExposureTrimAnchors.value_or_default()
+                                                      : cfg.DlssNrGameExposureTrimAnchors.value_or_default());
+    params.ExposureTrim = std::clamp(fallback, 0.25f, 50.0f);
+    params.ExposureTrimPreview = preview ? 1u : 0u;
+    params.ExposureTrimAnchorCount = (uint32_t) std::min<size_t>(anchors.size(), 8);
+    float* pairs = &params.ExposureTrimAnchorExposure0;
+    for (size_t i = 0; i < params.ExposureTrimAnchorCount; ++i)
+    {
+        pairs[i * 2 + 0] = anchors[i].key;
+        pairs[i * 2 + 1] = anchors[i].trim;
+    }
+    params.AutoExposureShadowProtection =
+        std::clamp(cfg.DlssNrAutoExposureShadowProtection.value_or_default(), 0.0f, 100.0f);
+}
+}
+
 
 bool ModelVk::Impl::Evaluate(VkCommandBuffer cmdBuffer, const VkImageInfo& colourInfo, const VkImageInfo& depthInfo,
               const VkImageInfo& motionInfo, const VkImageInfo& target, const DlssNrFrameInfo_Vk& frame,
@@ -75,9 +156,15 @@ bool ModelVk::Impl::Evaluate(VkCommandBuffer cmdBuffer, const VkImageInfo& colou
             exposure.offeredNow = exposure.everOffered = state.exposureOffered;
             exposure.exposure = state.gameExposure;
             exposure.preExposure = state.gamePreExposure;
+            ExposureStatus automatic {};
+            automatic.seenFrames = state.autoExposureFrames;
+            automatic.offeredNow = state.autoExposureActive;
+            automatic.everOffered = state.autoExposureFrames != 0;
+            automatic.exposure = state.autoExposureValue;
+            automatic.preExposure = state.autoExposurePreExposure;
             PublishStatus(owner, Backend::Vulkan,
                           { state.models[0].feature != nullptr && !state.failed, state.reason, state.lastGpuTime,
-                            state.frames, exposure, false });
+                            state.frames, exposure, automatic, false });
         }
     } report { this };
     const auto requests = ReadControlRequests();
@@ -145,8 +232,17 @@ bool ModelVk::Impl::Evaluate(VkCommandBuffer cmdBuffer, const VkImageInfo& colou
             // Believed only if it could be an exposure. A texel read through a layout the game did
             // not leave it in, or a slot the game stopped filling, fails here and the last good
             // value stands.
+            const auto slot = state.meterFrames % kMeterSlots;
             if (std::isfinite(measured) && measured > 0.0f)
-                state.gameExposure = measured;
+            {
+                if (state.meterExposureKind[slot] == 1u)
+                    state.gameExposure = measured;
+                else if (state.meterExposureKind[slot] == 2u)
+                {
+                    state.autoExposureValue = measured;
+                    state.autoExposurePreExposure = state.meterExposurePreExposure[slot];
+                }
+            }
         }
     }
 
@@ -242,10 +338,30 @@ bool ModelVk::Impl::Evaluate(VkCommandBuffer cmdBuffer, const VkImageInfo& colou
     // Undo game pre-exposure/exposure with a bounded trim. Preserve the manual setting for switching back.
     float whitePoint = cfg.DlssNrWhitePointScale.value_or_default();
 
-    if (cfg.DlssNrWhitePointSource.value_or_default() == 1 && state.gameExposure > 1e-6f)
+    const uint32_t requestedWhitePointSource = cfg.DlssNrWhitePointSource.value_or_default();
+    if (requestedWhitePointSource != state.exposureReadbackSource)
     {
-        const float trim = std::clamp(cfg.DlssNrWhitePointTrim.value_or_default(), 0.25f, 4.0f);
-        whitePoint = std::clamp(state.gamePreExposure / state.gameExposure * trim, 0.01f, 4096.0f);
+        state.exposureReadbackSource = requestedWhitePointSource;
+        state.meterFrames = 0;
+        state.gameExposure = 0.0f;
+        state.autoExposureValue = 0.0f;
+        for (auto& kind : state.meterExposureKind) kind = 0u;
+    }
+    if (requestedWhitePointSource == 1 && state.gameExposure > 1e-6f)
+    {
+        const float baseWhitePoint = state.gamePreExposure / state.gameExposure;
+        const auto anchors = ParseVkTrimAnchors(cfg.DlssNrGameExposureTrimAnchors.value_or_default());
+        const float trim = VkTrimForKey(baseWhitePoint, cfg.DlssNrWhitePointTrim.value_or_default(), anchors,
+                                       cfg.DlssNrGameExposureTrimPreview.value_or_default());
+        whitePoint = std::clamp(baseWhitePoint * trim, 0.01f, 4096.0f);
+    }
+    else if (requestedWhitePointSource == 3 && state.autoExposureValue > 1e-6f)
+    {
+        const float baseWhitePoint = state.autoExposurePreExposure / state.autoExposureValue;
+        const auto anchors = ParseVkTrimAnchors(cfg.DlssNrAutoExposureTrimAnchors.value_or_default());
+        const float trim = VkTrimForKey(baseWhitePoint, cfg.DlssNrAutoExposureTrim.value_or_default(), anchors,
+                                       cfg.DlssNrAutoExposureTrimPreview.value_or_default());
+        whitePoint = std::clamp(baseWhitePoint * trim, 0.01f, 4096.0f);
     }
 
     if (!saidEncoding)
@@ -259,9 +375,76 @@ bool ModelVk::Impl::Evaluate(VkCommandBuffer cmdBuffer, const VkImageInfo& colou
     if (frame.WhitePointOverride > 0.0f)
         whitePoint = frame.WhitePointOverride;
 
+    state.autoExposureActive = false;
+    if (requestedWhitePointSource == 3 && !frame.FinishedPicture && linearHdr &&
+        state.meter.Valid() && state.autoExposure.Valid())
+    {
+        DlssNrConstants meter {};
+        meter.Mode = DlssNrMode_Meter;
+        meter.Width = kMeterSide;
+        meter.Height = kMeterSide;
+        meter.MeterCopiesExposure = 0;
+        Transition(cmdBuffer, state.meter, VK_IMAGE_LAYOUT_GENERAL);
+        if (state.pass->Dispatch(cmdBuffer, meter, kMeterSide, kMeterSide,
+                                 colour->Resource.ImageViewInfo.ImageView, VK_NULL_HANDLE, VK_NULL_HANDLE,
+                                 VK_NULL_HANDLE, state.meter.view, VK_NULL_HANDLE, inputLayout))
+        {
+            Transition(cmdBuffer, state.meter, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            Transition(cmdBuffer, state.autoExposure, VK_IMAGE_LAYOUT_GENERAL);
+
+            DlssNrConstants reduce {};
+            reduce.Mode = DlssNrMode_AutoExposure;
+            reduce.Width = 1;
+            reduce.Height = 1;
+            reduce.PreExposure = frame.PreExposure;
+            reduce.ExposureSourceWidth = width;
+            reduce.ExposureSourceHeight = height;
+            reduce.AutoExposureShadowProtection =
+                std::clamp(cfg.DlssNrAutoExposureShadowProtection.value_or_default(), 0.0f, 100.0f);
+
+            if (state.pass->Dispatch(cmdBuffer, reduce, 1, 1, state.meter.view, VK_NULL_HANDLE, VK_NULL_HANDLE,
+                                     VK_NULL_HANDLE, state.autoExposure.view, VK_NULL_HANDLE,
+                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
+            {
+                Transition(cmdBuffer, state.autoExposure, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                state.autoExposureActive = true;
+
+                const unsigned long long slot = state.meterFrames % kMeterSlots;
+                if (state.meterReadback[slot] != VK_NULL_HANDLE)
+                {
+                    state.meterExposureKind[slot] = 2u;
+                    state.meterExposurePreExposure[slot] =
+                        std::isfinite(frame.PreExposure) && frame.PreExposure > 1e-6f ? frame.PreExposure : 1.0f;
+                    Transition(cmdBuffer, state.autoExposure, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+                    VkBufferImageCopy region {};
+                    region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+                    region.imageExtent = { 1, 1, 1 };
+                    vkCmdCopyImageToBuffer(cmdBuffer, state.autoExposure.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                           state.meterReadback[slot], 1, &region);
+                    VkBufferMemoryBarrier toHost {};
+                    toHost.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+                    toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                    toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+                    toHost.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    toHost.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    toHost.buffer = state.meterReadback[slot];
+                    toHost.size = sizeof(float);
+                    vkCmdPipelineBarrier(cmdBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0,
+                                         0, nullptr, 1, &toHost, 0, nullptr);
+                    Transition(cmdBuffer, state.autoExposure, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                    state.meterFrames++;
+                    state.autoExposureFrames++;
+                }
+            }
+        }
+    }
+
     auto encode = DlssNr_Common::MakeConstants(DlssNrMode_Encode, width, height, whitePoint, linearHdr, cfg);
     encode.GuideWidth = guideWidth;
     encode.GuideHeight = guideHeight;
+    encode.PreExposure = frame.PreExposure;
+    encode.UseExposureWhitePoint = state.autoExposureActive ? 1u : 0u;
+    FillVkTrimConstants(encode, cfg, requestedWhitePointSource);
 
     const VkImageSubresourceRange colourRange = colour->Resource.ImageViewInfo.SubresourceRange;
 
@@ -282,8 +465,11 @@ bool ModelVk::Impl::Evaluate(VkCommandBuffer cmdBuffer, const VkImageInfo& colou
 
     // Read the caller's actual input layout; the resolve restores it after writing.
     if (!state.pass->Dispatch(cmdBuffer, encode, width, height, colour->Resource.ImageViewInfo.ImageView,
-                              VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, state.proxy.view, state.keep.view,
-                              inputLayout))
+                              VK_NULL_HANDLE, VK_NULL_HANDLE,
+                              state.autoExposureActive ? state.autoExposure.view : VK_NULL_HANDLE,
+                              state.proxy.view, state.keep.view, inputLayout,
+                              state.autoExposureActive ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                                       : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
     {
         Fail("the encode dispatch failed");
         return false;
@@ -381,6 +567,7 @@ bool ModelVk::Impl::Evaluate(VkCommandBuffer cmdBuffer, const VkImageInfo& colou
             meter.Mode = DlssNrMode_Meter;
             meter.Width = kMeterSide;
             meter.Height = kMeterSide;
+            meter.MeterCopiesExposure = 1;
 
             Transition(cmdBuffer, state.meter, VK_IMAGE_LAYOUT_GENERAL);
 
@@ -416,6 +603,8 @@ bool ModelVk::Impl::Evaluate(VkCommandBuffer cmdBuffer, const VkImageInfo& colou
                 vkCmdPipelineBarrier(cmdBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0,
                                      nullptr, 1, &toHost, 0, nullptr);
 
+                state.meterExposureKind[slot] = 1u;
+                state.meterExposurePreExposure[slot] = state.gamePreExposure;
                 state.meterFrames++;
             }
         }
@@ -438,7 +627,8 @@ bool ModelVk::Impl::Evaluate(VkCommandBuffer cmdBuffer, const VkImageInfo& colou
     {
         Transition(cmdBuffer, *input, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         Transition(cmdBuffer, *answer, VK_IMAGE_LAYOUT_GENERAL);
-        evaluated = EvaluateModel(cmdBuffer, pass, &input->ngx, depth, motion, &answer->ngx,
+        NVSDK_NGX_Resource_VK* modelExposure = state.autoExposureActive ? &state.autoExposure.ngx : nullptr;
+        evaluated = EvaluateModel(cmdBuffer, pass, &input->ngx, depth, motion, modelExposure, &answer->ngx,
                                   workWidth, workHeight, guides, depthInverted, mvX, mvY, cfg);
         if (evaluated != NVSDK_NGX_Result_Success)
             break;
@@ -479,6 +669,9 @@ bool ModelVk::Impl::Evaluate(VkCommandBuffer cmdBuffer, const VkImageInfo& colou
 
     DlssNrConstants resolve = encode;
     resolve.Mode = DlssNrMode_Resolve;
+    resolve.PreExposure = frame.PreExposure;
+    resolve.UseExposureWhitePoint = state.autoExposureActive ? 1u : 0u;
+    FillVkTrimConstants(resolve, cfg, requestedWhitePointSource);
 
     // Downsample the model answer to native before composition.
     OwnedImage* resolveProxy = modelInput;
@@ -504,8 +697,12 @@ bool ModelVk::Impl::Evaluate(VkCommandBuffer cmdBuffer, const VkImageInfo& colou
     Transition(cmdBuffer, state.keep, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     if (!state.pass->Dispatch(cmdBuffer, resolve, width, height, resolveProxy->view, resolveAnswer->view,
-                              state.keep.view, VK_NULL_HANDLE, target.ImageView, VK_NULL_HANDLE,
-                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
+                              state.keep.view,
+                              state.autoExposureActive ? state.autoExposure.view : VK_NULL_HANDLE,
+                              target.ImageView, VK_NULL_HANDLE,
+                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                              state.autoExposureActive ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                                       : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL))
     {
         Fail("the resolve dispatch failed");
         return false;

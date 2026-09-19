@@ -341,8 +341,9 @@ auto DlssNr_Dx12::State::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
     {
         MakeModelWritable(passOutput);
         bool evaluated = false;
+        ID3D12Resource* modelExposure = encoded.usingAutoExposure ? encoded.exposureTex : nullptr;
         result = static_cast<int>(nr.models[pass].Run(
-            cmdList, device, passInput, depthIn, motionIn, passOutput, workWidth, workHeight, guideWidth,
+            cmdList, device, passInput, depthIn, motionIn, modelExposure, passOutput, workWidth, workHeight, guideWidth,
             guideHeight, motionWidth, motionHeight, depthBaseX, depthBaseY, motionBaseX, motionBaseY,
             nr.guideDepthInverted, nr.reset, nr.guideMvScaleX * mvToWorkX, nr.guideMvScaleY * mvToWorkY,
             ModelSettings(cfg, pass), frame.SubmissionEpoch, &evaluated));

@@ -13,6 +13,8 @@ void DlssNr_Dx12::State::EncodeInput(EncodeContext& context)
     auto& exposureTex = context.exposureTex;
     auto& useGameExposure = context.useGameExposure;
     auto& exposurePreMul = context.exposurePreMul;
+    auto& whitePointSource = context.whitePointSource;
+    auto& usingAutoExposure = context.usingAutoExposure;
     auto& modelInput = context.modelInput;
     const auto width = nr.width, height = nr.height;
     const auto workWidth = nr.workWidth, workHeight = nr.workHeight;
@@ -35,7 +37,13 @@ void DlssNr_Dx12::State::EncodeInput(EncodeContext& context)
     // Gated on the source the menu actually writes. This read the retired WhitePointFromExposure
     // flag while consumption keyed on WhitePointSource == 1, so choosing "the game's own exposure"
     // never dispatched the meter and the white point silently fell back to the slider.
-    const bool exposureSettingOn = cfg.DlssNrWhitePointSource.value_or_default() == 1;
+    whitePointSource = cfg.DlssNrWhitePointSource.value_or_default();
+    if (whitePointSource != nr.exposureReadbackSource)
+    {
+        InvalidateExposureMeter();
+        nr.exposureReadbackSource = whitePointSource;
+    }
+    const bool exposureSettingOn = whitePointSource == 1;
 
     // Nothing held from before the option was switched off may survive switching it back on. See
     // InvalidateExposureMeter for what froze and why it read as a colour cast.
@@ -58,6 +66,7 @@ void DlssNr_Dx12::State::EncodeInput(EncodeContext& context)
         // dead code the dispatch simply never reaches.
         meterParams.Width = 1;
         meterParams.Height = 1;
+        meterParams.MeterCopiesExposure = 1;
 
         const D3D12_RESOURCE_STATES priorTargetState = targetState;
         TransitionTarget(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -66,6 +75,51 @@ void DlssNr_Dx12::State::EncodeInput(EncodeContext& context)
         TransitionTarget(priorTargetState);
 
         CopyMeterToReadback(cmdList, device, true);
+        ConsumeMeterReadback();
+    }
+
+    if (whitePointSource == 3 && !frame.FinishedPicture && isHdrBuffer &&
+        nr.meter != nullptr && nr.autoExposure != nullptr)
+    {
+        DlssNrConstants meterParams {};
+        meterParams.Mode = DlssNrMode_Meter;
+        meterParams.Width = kDlssNrMeterGrid;
+        meterParams.Height = kDlssNrMeterGrid;
+        meterParams.MeterCopiesExposure = 0;
+
+        const D3D12_RESOURCE_STATES priorTargetState = targetState;
+        TransitionTarget(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        shader.DispatchPass(cmdList, meterParams, target, nullptr, nullptr, nullptr, nullptr, nr.meter, nullptr);
+        TransitionTarget(priorTargetState);
+
+        Barrier(cmdList, nr.meter, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        if (nr.autoExposureReadable)
+            Barrier(cmdList, nr.autoExposure, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        DlssNrConstants autoParams {};
+        autoParams.Mode = DlssNrMode_AutoExposure;
+        autoParams.Width = 1;
+        autoParams.Height = 1;
+        autoParams.PreExposure = frame.PreExposure;
+        autoParams.ExposureSourceWidth = width;
+        autoParams.ExposureSourceHeight = height;
+        autoParams.AutoExposureShadowProtection =
+            std::clamp(cfg.DlssNrAutoExposureShadowProtection.value_or_default(), 0.0f, 100.0f);
+
+        shader.DispatchPass(cmdList, autoParams, nr.meter, nullptr, nullptr, nullptr, nullptr,
+                            nr.autoExposure, nullptr);
+
+        Barrier(cmdList, nr.meter, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        Barrier(cmdList, nr.autoExposure, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        nr.autoExposureReadable = true;
+        usingAutoExposure = true;
+        exposureTex = nr.autoExposure;
+
+        CopyAutoExposureToReadback(cmdList, frame.PreExposure);
         ConsumeMeterReadback();
     }
 
@@ -81,12 +135,11 @@ void DlssNr_Dx12::State::EncodeInput(EncodeContext& context)
 
 
 
-    if (cfg.DlssNrWhitePointSource.value_or_default() == 1 && frame.ExposureTexture != nullptr)
+    if (whitePointSource == 1 && frame.ExposureTexture != nullptr)
     {
         exposureTex = (ID3D12Resource*) frame.ExposureTexture;
         useGameExposure = 1;
-        const float trim = std::clamp(cfg.DlssNrWhitePointTrim.value_or_default(), 0.25f, 4.0f);
-        exposurePreMul = nr.gamePreExposure * trim;
+        exposurePreMul = nr.gamePreExposure;
     }
 
     // Frame hold. Freeze the encode's input so a live setting change re-renders the same frame. This
@@ -168,6 +221,9 @@ void DlssNr_Dx12::State::EncodeInput(EncodeContext& context)
     encodeParams.WhitePoint = whitePoint;
     encodeParams.UseGameExposure = useGameExposure;
     encodeParams.ExposurePreMul = exposurePreMul;
+    encodeParams.PreExposure = frame.PreExposure;
+    encodeParams.UseExposureWhitePoint = usingAutoExposure ? 1u : 0u;
+    FillExposureTrimConstants(encodeParams, cfg, whitePointSource);
     encodeParams.ReversibleMode = cfg.DlssNrReversibleMode.value_or_default();
     // Match only takes effect once a fit exists; until then the table is empty and the shader would
     // read a curve of zeros, so it falls back to the plain proxy.
@@ -279,6 +335,9 @@ DlssNrConstants DlssNr_Dx12::State::MakeResolveConstants(const EncodeContext& co
     resolveParams.WhitePoint = whitePoint;
     resolveParams.UseGameExposure = useGameExposure;
     resolveParams.ExposurePreMul = exposurePreMul;
+    resolveParams.PreExposure = context.frame.PreExposure;
+    resolveParams.UseExposureWhitePoint = context.usingAutoExposure ? 1u : 0u;
+    FillExposureTrimConstants(resolveParams, cfg, context.whitePointSource);
     resolveParams.Width = width;
     resolveParams.Height = height;
     resolveParams.TransferStrength = cfg.DlssNrTransferStrength.value_or_default();

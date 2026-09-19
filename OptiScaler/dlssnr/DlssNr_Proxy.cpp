@@ -101,7 +101,8 @@ struct Context::Impl
                          unsigned int height, const Settings& settings, uint64_t submissionEpoch, bool* ready);
     void Release();
     unsigned int Run(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, ID3D12Resource* color,
-                     ID3D12Resource* depth, ID3D12Resource* motion, ID3D12Resource* output, unsigned int width,
+                     ID3D12Resource* depth, ID3D12Resource* motion, ID3D12Resource* exposure,
+                     ID3D12Resource* output, unsigned int width,
                      unsigned int height, unsigned int guideWidth, unsigned int guideHeight, unsigned int motionWidth,
                      unsigned int motionHeight, unsigned int depthBaseX, unsigned int depthBaseY,
                      unsigned int motionBaseX, unsigned int motionBaseY, bool depthInverted, bool reset, float mvScaleX,
@@ -215,7 +216,8 @@ unsigned int Context::Impl::Prepare(ID3D12GraphicsCommandList* cmdList, ID3D12De
 }
 
 unsigned int Context::Impl::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, ID3D12Resource* color,
-                                ID3D12Resource* depth, ID3D12Resource* motion, ID3D12Resource* output,
+                                ID3D12Resource* depth, ID3D12Resource* motion, ID3D12Resource* exposure,
+                                ID3D12Resource* output,
                                 unsigned int width, unsigned int height, unsigned int guideWidth,
                                 unsigned int guideHeight, unsigned int motionWidth, unsigned int motionHeight,
                                 unsigned int depthBaseX, unsigned int depthBaseY, unsigned int motionBaseX,
@@ -236,6 +238,7 @@ unsigned int Context::Impl::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Device
     SetResource(params, "DLSSNR.Color", color);
     SetResource(params, "DLSSNR.Depth", depth);
     SetResource(params, "DLSSNR.MVec", motion);
+    SetResource(params, "DLSSNR.ExposureTexture", exposure);
     SetResource(params, "DLSSNR.Output", output);
 
     SetUInt(params, "DLSSNR.Enabled", 1u);
@@ -316,14 +319,15 @@ bool Context::Ready(uint64_t epoch) const
 void Context::AdvanceEpoch(uint64_t epoch) { _impl->TickRetired(epoch); }
 
 unsigned int Context::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, ID3D12Resource* color,
-                          ID3D12Resource* depth, ID3D12Resource* motion, ID3D12Resource* output, unsigned int width,
+                          ID3D12Resource* depth, ID3D12Resource* motion, ID3D12Resource* exposure,
+                          ID3D12Resource* output, unsigned int width,
                           unsigned int height, unsigned int guideWidth, unsigned int guideHeight,
                           unsigned int motionWidth, unsigned int motionHeight, unsigned int depthBaseX,
                           unsigned int depthBaseY, unsigned int motionBaseX, unsigned int motionBaseY,
                           bool depthInverted, bool reset, float mvScaleX, float mvScaleY, const Settings& settings,
                           uint64_t submissionEpoch, bool* evaluated)
 {
-    return _impl->Run(cmdList, device, color, depth, motion, output, width, height, guideWidth, guideHeight,
+    return _impl->Run(cmdList, device, color, depth, motion, exposure, output, width, height, guideWidth, guideHeight,
                       motionWidth, motionHeight, depthBaseX, depthBaseY, motionBaseX, motionBaseY, depthInverted, reset,
                       mvScaleX, mvScaleY, settings, submissionEpoch, evaluated);
 }

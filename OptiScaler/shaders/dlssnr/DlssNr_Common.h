@@ -28,7 +28,8 @@ enum DlssNrMode : uint32_t
     DlssNrMode_UnitExposure = 7,   // constant exposure for the private DLSS feature
     DlssNrMode_ClampProxy = 8,     // restore the encoded RGB range between model passes
     DlssNrMode_EncodeProxyResidual = 9,
-    DlssNrMode_ResizePrivateGuides = 10
+    DlssNrMode_ResizePrivateGuides = 10,
+    DlssNrMode_AutoExposure = 11
 };
 
 // The meter's grid. 64 x 64 tiles over the whole frame, whatever its size.
@@ -240,6 +241,33 @@ struct alignas(256) DlssNrConstants
     uint32_t ResidualHistoryValid;
     uint32_t ResidualMotionBaseX;
     uint32_t ResidualMotionBaseY;
+
+    // Automatic exposure / exposure-dependent Trim calibration.
+    float PreExposure;
+    uint32_t ExposureSourceWidth;
+    uint32_t ExposureSourceHeight;
+    uint32_t MeterCopiesExposure;
+    float ExposureTrim;
+    uint32_t UseExposureWhitePoint;
+    uint32_t ExposureTrimAnchorCount;
+    uint32_t ExposureTrimPreview;
+    float ExposureTrimAnchorExposure0;
+    float ExposureTrimAnchorTrim0;
+    float ExposureTrimAnchorExposure1;
+    float ExposureTrimAnchorTrim1;
+    float ExposureTrimAnchorExposure2;
+    float ExposureTrimAnchorTrim2;
+    float ExposureTrimAnchorExposure3;
+    float ExposureTrimAnchorTrim3;
+    float ExposureTrimAnchorExposure4;
+    float ExposureTrimAnchorTrim4;
+    float ExposureTrimAnchorExposure5;
+    float ExposureTrimAnchorTrim5;
+    float ExposureTrimAnchorExposure6;
+    float ExposureTrimAnchorTrim6;
+    float ExposureTrimAnchorExposure7;
+    float ExposureTrimAnchorTrim7;
+    float AutoExposureShadowProtection;
 };
 static_assert(sizeof(DlssNrConstants) == 256);
 

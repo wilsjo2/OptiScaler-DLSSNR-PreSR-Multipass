@@ -136,7 +136,8 @@ bool ModelVk::Impl::CreateModel(VkCommandBuffer commandBuffer, unsigned int pass
 
 NVSDK_NGX_Result ModelVk::Impl::EvaluateModel(VkCommandBuffer commandBuffer, unsigned int passIndex,
                               NVSDK_NGX_Resource_VK* colour, NVSDK_NGX_Resource_VK* depth,
-                              NVSDK_NGX_Resource_VK* motion, NVSDK_NGX_Resource_VK* output,
+                              NVSDK_NGX_Resource_VK* motion, NVSDK_NGX_Resource_VK* exposure,
+                              NVSDK_NGX_Resource_VK* output,
                               unsigned int width, unsigned int height, const GuideRegions& guides,
                               bool depthInverted, float mvX, float mvY, const Config& config)
 {
@@ -146,6 +147,7 @@ NVSDK_NGX_Result ModelVk::Impl::EvaluateModel(VkCommandBuffer commandBuffer, uns
     parameters->Set("DLSSNR.Color", static_cast<void*>(colour));
     parameters->Set("DLSSNR.Depth", static_cast<void*>(depth));
     parameters->Set("DLSSNR.MVec", static_cast<void*>(motion));
+    parameters->Set("DLSSNR.ExposureTexture", static_cast<void*>(exposure));
     parameters->Set("DLSSNR.Output", static_cast<void*>(output));
     parameters->Set("DLSSNR.Enabled", 1u);
     parameters->Set("DLSSNR.Width", width);
@@ -212,6 +214,7 @@ void ModelVk::Impl::Shutdown()
     DestroyImage(state.outputNative);
     DestroyImage(state.keep);
     DestroyImage(state.meter);
+    DestroyImage(state.autoExposure);
     DestroyMeterReadback();
 
     state.superUp.reset();
@@ -318,10 +321,11 @@ bool ModelVk::Impl::PrepareModels(VkCommandBuffer cmdBuffer, const DlssNrFrameIn
         // built alongside the rest so that a failure here is caught by the same check.
         const bool meterReady =
             (state.meter.Valid() || CreateImage(state.meter, kMeterSide, kMeterSide, VK_FORMAT_R32_SFLOAT, true)) &&
+            (state.autoExposure.Valid() || CreateImage(state.autoExposure, 1, 1, VK_FORMAT_R32_SFLOAT, false)) &&
             CreateMeterReadback();
 
         if (!meterReady)
-            LOG_WARN("DLSS-NR Vulkan: no exposure meter; the white point stays on the slider");
+            LOG_WARN("DLSS-NR Vulkan: no exposure meter; automatic exposure is unavailable");
 
         DestroyImage(state.proxySmall);
         DestroyImage(state.outputNative);

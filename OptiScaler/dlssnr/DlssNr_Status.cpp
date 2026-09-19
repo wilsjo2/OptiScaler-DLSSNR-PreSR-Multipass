@@ -76,9 +76,12 @@ const char* FailureReasonVk()
 }
 
 ExposureStatus GameExposureStatus() { return ReadStatus(Backend::Dx12).exposure; }
+ExposureStatus AutoExposureStatus() { return ReadStatus(Backend::Dx12).autoExposure; }
 std::optional<double> LastGpuTime() { return ReadStatus(Backend::Dx12).gpuTime; }
 std::optional<double> LastGpuTimeVk() { return ReadStatus(Backend::Vulkan).gpuTime; }
 unsigned long long FramesVk() { return ReadStatus(Backend::Vulkan).frames; }
 bool ExposureOfferedVk() { return ReadStatus(Backend::Vulkan).exposure.offeredNow; }
+ExposureStatus GameExposureStatusVk() { return ReadStatus(Backend::Vulkan).exposure; }
+ExposureStatus AutoExposureStatusVk() { return ReadStatus(Backend::Vulkan).autoExposure; }
 bool CaptureInProgress() { return ReadStatus(Backend::Dx12).captureInProgress; }
 } // namespace DlssNr

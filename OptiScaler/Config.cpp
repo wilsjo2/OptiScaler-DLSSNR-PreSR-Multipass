@@ -351,6 +351,10 @@ bool Config::Reload(std::filesystem::path iniPath)
                 DlssNrScalingDownscaler.reset();
             DlssNrScanExposure.set_from_config(readBool("DlssNr", "ScanExposure"));
             DlssNrWhitePointSource.set_from_config(readUInt("DlssNr", "WhitePointSource"));
+            DlssNrAutoExposureTrim.set_from_config(readFloat("DlssNr", "AutoExposureTrim"));
+            DlssNrAutoExposureShadowProtection.set_from_config(readFloat("DlssNr", "AutoExposureShadowProtection"));
+            DlssNrGameExposureTrimAnchors.set_from_config(readString("DlssNr", "GameExposureTrimAnchors"));
+            DlssNrAutoExposureTrimAnchors.set_from_config(readString("DlssNr", "AutoExposureTrimAnchors"));
 
             // Migrate the retired flag only when the new key was genuinely absent, which is why this
             // has to run AFTER the read above -- set_from_config assigns only into an empty optional,
@@ -1301,6 +1305,13 @@ bool Config::SaveIni()
     // reset to default on the next run.
     ini.SetValue("DlssNr", "WhitePointSource", GetIntValue(Instance()->DlssNrWhitePointSource.value_for_config()).c_str());
     ini.SetValue("DlssNr", "WhitePointTrim", GetFloatValue(Instance()->DlssNrWhitePointTrim.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "AutoExposureTrim", GetFloatValue(Instance()->DlssNrAutoExposureTrim.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "AutoExposureShadowProtection",
+                 GetFloatValue(Instance()->DlssNrAutoExposureShadowProtection.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "GameExposureTrimAnchors",
+                 Instance()->DlssNrGameExposureTrimAnchors.value_for_config_or("").c_str());
+    ini.SetValue("DlssNr", "AutoExposureTrimAnchors",
+                 Instance()->DlssNrAutoExposureTrimAnchors.value_for_config_or("").c_str());
     ini.SetValue("DlssNr", "ScanTrim", GetFloatValue(Instance()->DlssNrScanTrim.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ScanAnchorValue", GetFloatValue(Instance()->DlssNrScanAnchorValue.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ScanAnchorWhitePoint", GetFloatValue(Instance()->DlssNrScanAnchorWhitePoint.value_for_config()).c_str());

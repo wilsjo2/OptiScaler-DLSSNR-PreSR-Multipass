@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "SysUtils.h"
 #include "State.h"
@@ -431,6 +431,7 @@ class Config
     //   0  the paper white slider, and nothing else
     //   1  the exposure the game hands the upscaler
     //   2  a buffer the scan found, anchored to a white point the user chose once
+    //   3  OptiScaler automatic exposure calculated from the original linear-HDR frame
     //
     // This replaces two independent checkboxes that could both be on. They were made exclusive by
     // greying, which deadlocked -- each disabled the other, so once both were set the only way out
@@ -438,6 +439,20 @@ class Config
     // setting the user had made. Both were attempts to stop an illegal state being REACHED. A single
     // choice cannot reach it: there is nothing to keep consistent, because there is only one value.
     CustomOptional<uint32_t> DlssNrWhitePointSource { 1 };
+
+    // OptiScaler-owned automatic exposure controls. When active, automatic exposure uses the
+    // linear-HDR NR input. Finished-picture mode bypasses this calculation and keeps its own
+    // display white-point override.
+    CustomOptional<float> DlssNrAutoExposureTrim { 5.0f };
+    CustomOptional<float> DlssNrAutoExposureShadowProtection { 100.0f };
+
+    // Base-white-point-dependent Trim calibration tables, serialized as baseWhitePoint:trim pairs.
+    CustomOptional<std::string> DlssNrGameExposureTrimAnchors { std::string() };
+    CustomOptional<std::string> DlssNrAutoExposureTrimAnchors { std::string() };
+
+    // Calibration preview only; deliberately not persisted.
+    CustomOptional<bool> DlssNrGameExposureTrimPreview { false };
+    CustomOptional<bool> DlssNrAutoExposureTrimPreview { false };
 
     CustomOptional<bool> DlssNrScanMeter { false };
 

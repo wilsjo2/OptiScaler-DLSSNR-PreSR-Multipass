@@ -8,9 +8,170 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <string>
+#include <vector>
 
 namespace DlssNr::MenuSections
 {
+
+struct ExposureTrimAnchorUi
+{
+    float key = 0.0f;
+    float trim = 1.0f;
+};
+
+static std::vector<ExposureTrimAnchorUi> ParseExposureTrimAnchorsUi(const std::string& text)
+{
+    std::vector<ExposureTrimAnchorUi> out;
+    size_t pos = 0;
+    while (pos < text.size() && out.size() < 8)
+    {
+        const size_t semi = text.find(';', pos);
+        const std::string token = text.substr(pos, semi == std::string::npos ? std::string::npos : semi - pos);
+        pos = semi == std::string::npos ? text.size() : semi + 1;
+        const size_t colon = token.find(':');
+        if (colon == std::string::npos)
+            continue;
+        try
+        {
+            const float key = std::stof(token.substr(0, colon));
+            const float trim = std::stof(token.substr(colon + 1));
+            if (std::isfinite(key) && key > 1e-8f && std::isfinite(trim) && trim > 0.0f)
+                out.push_back({ key, std::clamp(trim, 0.25f, 50.0f) });
+        }
+        catch (...) {}
+    }
+    std::sort(out.begin(), out.end(),
+              [](const ExposureTrimAnchorUi& a, const ExposureTrimAnchorUi& b) { return a.key < b.key; });
+    return out;
+}
+
+static std::string SerializeExposureTrimAnchorsUi(const std::vector<ExposureTrimAnchorUi>& anchors)
+{
+    std::string out;
+    char buf[64];
+    for (const auto& p : anchors)
+    {
+        snprintf(buf, sizeof(buf), "%.7g:%.7g;", p.key, p.trim);
+        out += buf;
+    }
+    return out;
+}
+
+static bool UpsertExposureTrimAnchorUi(std::vector<ExposureTrimAnchorUi>& anchors, float key, float trim)
+{
+    if (!(std::isfinite(key) && key > 1e-8f))
+        return false;
+    trim = std::clamp(trim, 0.25f, 50.0f);
+    for (auto& p : anchors)
+    {
+        if (key > p.key * 0.98f && key < p.key * 1.02f)
+        {
+            p = { key, trim };
+            std::sort(anchors.begin(), anchors.end(),
+                      [](const ExposureTrimAnchorUi& a, const ExposureTrimAnchorUi& b) { return a.key < b.key; });
+            return true;
+        }
+    }
+    if (anchors.size() >= 8)
+        return false;
+    anchors.push_back({ key, trim });
+    std::sort(anchors.begin(), anchors.end(),
+              [](const ExposureTrimAnchorUi& a, const ExposureTrimAnchorUi& b) { return a.key < b.key; });
+    return true;
+}
+
+static float ExposureTrimForUi(float key, float fallback,
+                               const std::vector<ExposureTrimAnchorUi>& anchors, bool preview)
+{
+    fallback = std::clamp(fallback, 0.25f, 50.0f);
+    if (preview || anchors.empty() || !(std::isfinite(key) && key > 1e-8f))
+        return fallback;
+    if (anchors.size() == 1)
+        return anchors[0].trim;
+    if (key <= anchors.front().key)
+        return anchors.front().trim;
+    if (key >= anchors.back().key)
+        return anchors.back().trim;
+    for (size_t i = 0; i + 1 < anchors.size(); ++i)
+    {
+        const auto& a = anchors[i];
+        const auto& b = anchors[i + 1];
+        if (key >= a.key && key <= b.key && b.key > a.key * 1.000001f)
+        {
+            const float t = (std::log(key) - std::log(a.key)) / (std::log(b.key) - std::log(a.key));
+            return std::clamp(std::exp(std::log(a.trim) + t * (std::log(b.trim) - std::log(a.trim))),
+                              0.25f, 50.0f);
+        }
+    }
+    return anchors.back().trim;
+}
+
+static void RenderExposureTrimAnchorControls(CustomOptional<std::string>& storedAnchors,
+                                             CustomOptional<bool>& previewSetting, float baseWhitePoint,
+                                             float sliderTrim, const char* idSuffix)
+{
+    auto anchors = ParseExposureTrimAnchorsUi(storedAnchors.value_or_default());
+    const bool haveKey = std::isfinite(baseWhitePoint) && baseWhitePoint > 1e-8f;
+    const std::string addLabel = std::string("Add Anchor point##") + idSuffix;
+    ImGui::BeginDisabled(!haveKey);
+    if (ImGui::Button(addLabel.c_str()))
+    {
+        if (UpsertExposureTrimAnchorUi(anchors, baseWhitePoint, sliderTrim))
+            storedAnchors = SerializeExposureTrimAnchorsUi(anchors);
+    }
+    ImGui::EndDisabled();
+
+    ImGui::SameLine();
+    bool preview = previewSetting.value_or_default();
+    const std::string previewLabel = std::string("Preview Trim value for actual scene##") + idSuffix;
+    if (ImGui::Checkbox(previewLabel.c_str(), &preview))
+        previewSetting = preview;
+
+    HelpMarker("When enabled, Anchor points are temporarily ignored and the Trim slider is applied"
+               "\ndirectly. Tune the current scene, then press Add Anchor point."
+               "\nThe calibration axis is Base White Point = PreExposure / Exposure."
+               "\nThe preview switch is intentionally not saved across restarts.");
+
+    if (!haveKey)
+        ImGui::TextDisabled("Waiting for a valid base white point before an Anchor point can be added.");
+    else
+    {
+        const float effective = ExposureTrimForUi(baseWhitePoint, sliderTrim, anchors, preview);
+        ImGui::TextDisabled("Current base white point %.5f -> effective Trim %.2fx%s",
+                            baseWhitePoint, effective, preview ? " (preview)" : "");
+    }
+
+    if (anchors.empty())
+    {
+        ImGui::TextDisabled("No Trim Anchor points: the Trim slider is used for every base white point.");
+        return;
+    }
+
+    if (anchors.size() == 1)
+        ImGui::TextDisabled("1 Trim Anchor point: its Trim is used for every base white point.");
+    else
+        ImGui::TextDisabled("%u Trim Anchor points: Trim is interpolated between base white-point values.",
+                            (unsigned int) anchors.size());
+
+    ImGui::PushID(idSuffix);
+    for (size_t i = 0; i < anchors.size(); ++i)
+    {
+        ImGui::PushID((int) i);
+        if (ImGui::SmallButton("x"))
+        {
+            anchors.erase(anchors.begin() + i);
+            storedAnchors = SerializeExposureTrimAnchorsUi(anchors);
+            ImGui::PopID();
+            --i;
+            continue;
+        }
+        ImGui::SameLine();
+        ImGui::Text("Base white point %.5f -> Trim %.2fx", anchors[i].key, anchors[i].trim);
+        ImGui::PopID();
+    }
+    ImGui::PopID();
+}
 
 void RenderInput(Config* config, float menuResScale)
 {
@@ -75,17 +236,19 @@ void RenderInput(Config* config, float menuResScale)
         {
             const auto ex = DlssNr::GameExposureStatus();
             const bool vk = DlssNr::IsRunningVk();
+            const auto autoEx = vk ? DlssNr::AutoExposureStatusVk() : DlssNr::AutoExposureStatus();
             const bool haveExposure = vk ? DlssNr::ExposureOfferedVk() : ex.everOffered;
 
             const float anchorNow = DlssNr::ExposureScan::BestValue();
             const bool haveAnchor = !DlssNr::ExposureScan::Anchors().empty();
 
             static const char* sourceNames[] = { "Manual paper white", "Game exposure",
-                                                 "Scanned exposure (experimental)" };
+                                                 "Scanned exposure (experimental)",
+                                                 "Automatic exposure from HDR frame" };
 
             int source = (int) config->DlssNrWhitePointSource.value_or_default();
 
-            if (source < 0 || source > 2)
+            if (source < 0 || source > 3)
                 source = 0;
 
             if (ImGui::Combo("White point source", &source, sourceNames, IM_ARRAYSIZE(sourceNames)))
@@ -104,9 +267,14 @@ void RenderInput(Config* config, float menuResScale)
                     ImGui::TextDisabled("Using game exposure.");
                 else if (ex.exposure > 1e-6f)
                 {
-                    const float trim = std::clamp(config->DlssNrWhitePointTrim.value_or_default(), 0.25f, 4.0f);
+                    const float baseWhitePoint = ex.preExposure / ex.exposure;
+                    const auto anchors =
+                        ParseExposureTrimAnchorsUi(config->DlssNrGameExposureTrimAnchors.value_or_default());
+                    const float trim = ExposureTrimForUi(
+                        baseWhitePoint, config->DlssNrWhitePointTrim.value_or_default(), anchors,
+                        config->DlssNrGameExposureTrimPreview.value_or_default());
                     ImGui::TextDisabled("Game exposure %.4f  ->  white point %.2f%s", ex.exposure,
-                                        ex.preExposure / ex.exposure * trim,
+                                        baseWhitePoint * trim,
                                         ex.offeredNow ? "" : "  (held: absent this frame)");
                 }
                 else
@@ -126,6 +294,24 @@ void RenderInput(Config* config, float menuResScale)
                 }
                 else if (!haveAnchor)
                     ImGui::TextDisabled("Exposure candidate found.");
+            }
+            else if (source == 3)
+            {
+                if (autoEx.exposure > 1e-8f)
+                {
+                    const float baseWhitePoint = autoEx.preExposure / autoEx.exposure;
+                    const auto anchors = ParseExposureTrimAnchorsUi(
+                        config->DlssNrAutoExposureTrimAnchors.value_or_default());
+                    const float trim = ExposureTrimForUi(
+                        baseWhitePoint, config->DlssNrAutoExposureTrim.value_or_default(), anchors,
+                        config->DlssNrAutoExposureTrimPreview.value_or_default());
+                    ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f),
+                                       "Automatic exposure %.4f  ->  white point %.2f", autoEx.exposure,
+                                       baseWhitePoint * trim);
+                    ImGui::TextDisabled("Exposure calculated automatically from a linear HDR frame");
+                }
+                else
+                    ImGui::TextDisabled("Calculating automatic exposure...");
             }
             else if (haveExposure)
             {
@@ -198,30 +384,66 @@ void RenderInput(Config* config, float menuResScale)
         }
         else if (wpSource == 1)
         {
-            const bool ofScan = false;
-
-            float trim =
-                ofScan ? config->DlssNrScanTrim.value_or_default() : config->DlssNrWhitePointTrim.value_or_default();
-
-            if (ImGui::SliderFloat(ofScan ? "Trim (x the scan)" : "Trim (x the game's exposure)", &trim, 0.25f, 4.0f,
-                                   "%.2fx", ImGuiSliderFlags_Logarithmic))
-            {
-                if (ofScan)
-                    config->DlssNrScanTrim = std::clamp(trim, 0.25f, 4.0f);
-                else
-                    config->DlssNrWhitePointTrim = std::clamp(trim, 0.25f, 4.0f);
-            }
+            float gameTrim = config->DlssNrWhitePointTrim.value_or_default();
+            if (ImGui::SliderFloat("Trim (x the game's exposure)", &gameTrim, 0.25f, 50.0f, "%.2fx",
+                                   ImGuiSliderFlags_Logarithmic))
+                config->DlssNrWhitePointTrim = std::clamp(gameTrim, 0.25f, 50.0f);
 
             ImGui::SameLine();
             if (ImGui::SmallButton("Reset##wptrim"))
             {
-                if (ofScan)
-                    config->DlssNrScanTrim = 1.0f;
-                else
-                    config->DlssNrWhitePointTrim = 1.0f;
+                config->DlssNrWhitePointTrim = 1.0f;
+                gameTrim = 1.0f;
             }
 
             HelpMarker("Exposure multiplier. 1 = unchanged.");
+
+            const auto gameStatus = DlssNr::IsRunningVk() ? DlssNr::GameExposureStatusVk()
+                                                           : DlssNr::GameExposureStatus();
+            const float baseWhitePoint = gameStatus.exposure > 1e-8f
+                ? gameStatus.preExposure / gameStatus.exposure : 0.0f;
+            RenderExposureTrimAnchorControls(config->DlssNrGameExposureTrimAnchors,
+                                             config->DlssNrGameExposureTrimPreview,
+                                             baseWhitePoint, gameTrim, "gameExposureTrim");
+        }
+        else if (wpSource == 3)
+        {
+            float autoTrim = config->DlssNrAutoExposureTrim.value_or_default();
+            if (ImGui::SliderFloat("Trim (x automatic exposure)", &autoTrim, 0.25f, 50.0f, "%.2fx",
+                                   ImGuiSliderFlags_Logarithmic))
+                config->DlssNrAutoExposureTrim = std::clamp(autoTrim, 0.25f, 50.0f);
+
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Reset##autoexposuretrim"))
+            {
+                config->DlssNrAutoExposureTrim = 5.0f;
+                autoTrim = 5.0f;
+            }
+
+            HelpMarker("OptiScaler calculates exposure from the ORIGINAL linear-HDR frame before Neural Rendering."
+                       "\nRange: 0.25x to 50.00x. Default: 5.00x"
+                       "\nTry to use the highest value that subjectively looks best; excessive values"
+                       "\nwill degrade image quality. Anchor points can use different Trim values for"
+                       "\ndifferent Base White Point values."
+                       "\nAutomatic exposure is available on D3D12 and Vulkan.");
+
+            float protection = config->DlssNrAutoExposureShadowProtection.value_or_default();
+            if (ImGui::SliderFloat("Shadow protection from bright highlights", &protection, 0.0f, 100.0f, "%.0f%%"))
+                config->DlssNrAutoExposureShadowProtection = protection;
+
+            HelpMarker("Controls how strongly very bright highlights are prevented from driving Automatic exposure."
+                       "\n0% keeps the original full-frame arithmetic average."
+                       "\n100% uses the strongest soft highlight compression. No tiles are discarded.");
+
+            ImGui::TextDisabled("Metering: highlight-compressed arithmetic average.");
+
+            const auto autoStatus = DlssNr::IsRunningVk() ? DlssNr::AutoExposureStatusVk()
+                                                           : DlssNr::AutoExposureStatus();
+            const float baseWhitePoint = autoStatus.exposure > 1e-8f
+                ? autoStatus.preExposure / autoStatus.exposure : 0.0f;
+            RenderExposureTrimAnchorControls(config->DlssNrAutoExposureTrimAnchors,
+                                             config->DlssNrAutoExposureTrimPreview,
+                                             baseWhitePoint, autoTrim, "automaticExposureTrim");
         }
         else
         {

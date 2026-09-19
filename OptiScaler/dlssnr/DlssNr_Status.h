@@ -31,6 +31,7 @@ struct StatusSnapshot
     std::optional<double> gpuTime;
     unsigned long long frames = 0;
     ExposureStatus exposure;
+    ExposureStatus autoExposure;
     bool captureInProgress = false;
 };
 
@@ -50,6 +51,7 @@ void RetryAfterFailure();
 bool IsRunning();
 const char* FailureReason();
 ExposureStatus GameExposureStatus();
+ExposureStatus AutoExposureStatus();
 std::optional<double> LastGpuTime();
 void RequestCapture(unsigned int frames);
 bool CaptureInProgress();
@@ -59,4 +61,6 @@ const char* FailureReasonVk();
 unsigned long long FramesVk();
 std::optional<double> LastGpuTimeVk();
 bool ExposureOfferedVk();
+ExposureStatus GameExposureStatusVk();
+ExposureStatus AutoExposureStatusVk();
 } // namespace DlssNr

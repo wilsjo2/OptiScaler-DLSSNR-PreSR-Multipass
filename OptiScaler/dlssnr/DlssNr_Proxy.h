@@ -41,7 +41,8 @@ class Context
 
     // Each pass owns its feature, parameter map and temporal history. False evaluated means no output.
     unsigned int Run(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, ID3D12Resource* color,
-                     ID3D12Resource* depth, ID3D12Resource* motion, ID3D12Resource* output, unsigned int width,
+                     ID3D12Resource* depth, ID3D12Resource* motion, ID3D12Resource* exposure,
+                     ID3D12Resource* output, unsigned int width,
                      unsigned int height, unsigned int guideWidth, unsigned int guideHeight, unsigned int motionWidth,
                      unsigned int motionHeight, unsigned int depthBaseX, unsigned int depthBaseY,
                      unsigned int motionBaseX, unsigned int motionBaseY, bool depthInverted, bool reset, float mvScaleX,

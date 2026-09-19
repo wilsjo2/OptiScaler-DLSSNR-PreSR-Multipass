@@ -109,6 +109,14 @@ struct VkState
     // frame-statistics meter that was removed from the shared shader, and 8x8 is here only so that a
     // single 8x8 thread group lands entirely inside the image.
     OwnedImage meter;
+    OwnedImage autoExposure;
+    bool autoExposureActive = false;
+    float autoExposureValue = 0.0f;
+    float autoExposurePreExposure = 1.0f;
+    unsigned long long autoExposureFrames = 0;
+    uint32_t exposureReadbackSource = 0;
+    uint32_t meterExposureKind[4] = {};
+    float meterExposurePreExposure[4] = {};
     VkBuffer meterReadback[4] = {};
     VkDeviceMemory meterReadbackMemory[4] = {};
     void* meterMapped[4] = {};
@@ -116,7 +124,7 @@ struct VkState
 };
 
 // The grid the meter writes, and the size of one readback. 8 * 8 * sizeof(float).
-constexpr uint32_t kMeterSide = 8;
+constexpr uint32_t kMeterSide = 64;
 constexpr VkDeviceSize kMeterBytes = kMeterSide * kMeterSide * sizeof(float);
 
 // Four, so the slot being read is four frames behind the slot being written and the read never waits
@@ -163,7 +171,8 @@ struct ModelVk::Impl
                      unsigned int height, const Config& config);
     NVSDK_NGX_Result EvaluateModel(VkCommandBuffer commandBuffer, unsigned int passIndex,
                                   NVSDK_NGX_Resource_VK* colour, NVSDK_NGX_Resource_VK* depth,
-                                  NVSDK_NGX_Resource_VK* motion, NVSDK_NGX_Resource_VK* output,
+                                  NVSDK_NGX_Resource_VK* motion, NVSDK_NGX_Resource_VK* exposure,
+                                  NVSDK_NGX_Resource_VK* output,
                                   unsigned int width, unsigned int height, const GuideRegions& guides,
                                   bool depthInverted, float mvX, float mvY, const Config& config);
     bool FormatCanHoldLinearHdr(VkFormat format);

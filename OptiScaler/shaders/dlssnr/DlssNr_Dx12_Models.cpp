@@ -146,6 +146,16 @@ bool DlssNr_Dx12::State::PrepareRunModels(ID3D12GraphicsCommandList* cmdList, ID
             LOG_INFO("DLSS-NR: white point meter up, {}x{} tiles", kDlssNrMeterGrid, kDlssNrMeterGrid);
     }
 
+    if (nr.autoExposure == nullptr)
+    {
+        nr.autoExposure = CreateScratch(device, DXGI_FORMAT_R32_FLOAT, 1, 1);
+        nr.autoExposureReadable = false;
+        if (nr.autoExposure != nullptr)
+            LOG_INFO("DLSS-NR: GPU automatic exposure is available");
+        else
+            LOG_WARN("DLSS-NR: could not allocate the automatic exposure texture");
+    }
+
     if (!nr.output || !nr.colorCopy || !nr.hdrCopy)
     {
         nr.failed = true;
