@@ -59,6 +59,9 @@ $files['Licenses/FidelityFX_v1_LICENSE.md'] = Join-Path $root 'external/Fidelity
 $files['Licenses/FidelityFX_v2_LICENSE.md'] = Join-Path $root 'external/FidelityFX-SDK-v2/docs/license.md'
 $files['Licenses/DirectX_LICENSE.txt'] = Join-Path $root 'external/directx_agility_sdk/LICENSE.txt'
 $files['Licenses/RenoDX_ATTRIBUTION.txt'] = Join-Path $root 'Licenses/RenoDX_ATTRIBUTION.txt'
+if ($EnableRtx40Mfg) {
+    $files['Licenses/MFGUnlock_LICENSE.txt'] = Join-Path $root 'Licenses/MFGUnlock_LICENSE.txt'
+}
 foreach ($name in @('CREDITS.md', 'NR-COMPATIBILITY.md', 'NR-MOTION-METADATA.md', 'NR-PIPELINE-UI.md', 'NR-FINISHED-BRIDGES.md', 'PADDED-PRESR.md',
                     'DEFERRED-NR-DLSS.md', 'RESIDUAL-ACROSS-RR.md', 'COMPATIBILITY-CHANGES.md',
                     'NR-DLSS-ENLARGEMENT.md', 'NR-GPU-RETIREMENT.md', 'NR-NATIVE-STREAMLINE-PRESENT.md',
@@ -74,7 +77,7 @@ foreach ($entry in $files.GetEnumerator()) {
 
 $ini = Get-Content -LiteralPath $files['OptiScaler.ini'] -Raw
 if ($ini -match '(?mi)^Enabled=true\s*$') { throw 'A feature is enabled in the default INI.' }
-foreach ($key in @('FinishedPicture', 'DeferredDLSS', 'UnlockPasses', 'AdaMfgUnlock')) {
+foreach ($key in @('FinishedPicture', 'DeferredDLSS', 'UnlockPasses', 'AdaMfgUnlock', 'AdaFlipMeteringPatch')) {
     if ($ini -match "(?mi)^$key=true\s*$") { throw "Experimental option $key is enabled in the default INI." }
 }
 if ($ini -notmatch '(?mi)^TargetProcessName=auto\s*$') { throw 'The INI contains a game-specific process filter.' }
@@ -88,6 +91,7 @@ foreach ($entry in $files.GetEnumerator()) {
 if (-not $EnableRtx40Mfg) {
     $ini = $ini -replace '(?m)^; Experimental built-in RTX 40 MFG unlock[^\r\n]*\r?\n', ''
     $ini = $ini -replace '(?m)^AdaMfgUnlock=[^\r\n]*\r?\n', ''
+    $ini = $ini -replace '(?ms)^; Frame timing fix for the extra frames.*?^AdaFlipMeteringPatch=[^\r\n]*\r?\n', ''
     [IO.File]::WriteAllText((Join-Path $stage 'OptiScaler.ini'), $ini, [Text.UTF8Encoding]::new($false))
 }
 [IO.File]::WriteAllText((Join-Path $stage '!! EXTRACT ALL FILES TO GAME FOLDER !!'), '')
