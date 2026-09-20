@@ -35,6 +35,17 @@ cbuffer Params : register(b0)
     float gSkinColour;
     float gEnvironmentDetail;
     float gEnvironmentColour;
+    // DlssNrConstants carries four ResidualAcrossRR fields here that only dlssnr_residual.hlsl reads.
+    // They are declared so the two fields after them land on the offsets the C++ struct gives them.
+    float gResidualBlendUnused;
+    uint  gResidualHistoryValidUnused;
+    uint  gResidualMotionBaseXUnused;
+    uint  gResidualMotionBaseYUnused;
+    float gReplaceDetailStrength; // Replace modes only: how much native high-frequency detail is
+                                  // restored when the model ran small. 0 = unchanged output.
+    float gModelWorkScale; // Set from C++, not inferred from gSource's bound size -- the matched-residual
+                           // enlarge can make that read native even though the model ran small.
+                           // 1.0 = not reduced.
 };
 
 // Bringing an impossible colour back into a possible one.
@@ -1071,6 +1082,44 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         result = gPassthrough != 0 ? modelDirect : NeutwoDecode(modelDirect);
     else if (gReversibleMode == 4)
         result = gPassthrough != 0 ? modelDirect : HybridDecode(modelDirect);
+
+    // Replace-only detail injection (Restore Sharpness). Below the frame's own resolution the model
+    // computed its answer at a reduced working size, and Replace has no native-resolution fallback the way
+    // the composition above does: it is anchored on `original` throughout, Replace is not. This pulls real
+    // high-frequency structure back from the native frame. A box blur of the native luminance approximates
+    // what the model's reduced raster could have resolved, and what is left after subtracting it is the
+    // edge and texture detail that was missing. The edit is luminance-only and multiplicative, the same
+    // "one scalar from luminance, applied to the whole triple" shape as `boundedRatio` above, so it does
+    // not blend toward the native colour and Replace keeps its no-composition character.
+    //
+    // The blur radius tracks how far the model's raster shrank. A fixed one-texel offset only reaches
+    // single-pixel grain, and that is not where a reduced working resolution's softness lives: it spans
+    // about as many native texels as the downscale factor.
+    if ((gReversibleMode == 2 || gReversibleMode == 4) && gModelWorkScale > 0.0 && gModelWorkScale < 0.999 &&
+        gReplaceDetailStrength > 0.0)
+    {
+        const int radius = clamp((int) round(1.0 / gModelWorkScale), 1, 4);
+        // Taps step from the same position `original` was read at, through the clamping sampler. Load
+        // at id.xy + offset read black outside the frame, which put a bright ring around the whole
+        // border, and read a different place from `original` in the side-by-side compare view. At a
+        // texel centre the linear sampler returns the texel exactly, so nothing changes elsewhere.
+        const float2 tap = float(radius) / float2(gWidth, gHeight);
+        float3 nLeft  = gOriginal.SampleLevel(gLinear, cmpUv + float2(-tap.x, 0.0), 0).rgb / normScale;
+        float3 nRight = gOriginal.SampleLevel(gLinear, cmpUv + float2( tap.x, 0.0), 0).rgb / normScale;
+        float3 nUp    = gOriginal.SampleLevel(gLinear, cmpUv + float2(0.0, -tap.y), 0).rgb / normScale;
+        float3 nDown  = gOriginal.SampleLevel(gLinear, cmpUv + float2(0.0,  tap.y), 0).rgb / normScale;
+        float blurLuma = dot((original + nLeft + nRight + nUp + nDown) / 5.0, kLuma);
+        float highFreq = originalLuma - blurLuma;
+
+        // The same floor on both sides as `lumaRatio` above, and for the same reason: `highFreq` is an
+        // unbounded absolute difference, and dividing it by a denominator floored on only one side does
+        // not tame it near black. A shadow pixel beside a contrasty edge computed a ratio well past -1
+        // and was clamped to flat black. Flooring both sides leaves bright pixels alone and lets the
+        // ratio settle to one as luminance approaches zero.
+        float detailRatio = (originalLuma + gReplaceDetailStrength * highFreq + kRatioFloor) /
+                            (originalLuma + kRatioFloor);
+        result *= max(detailRatio, 0.0);
+    }
 
     // Back out of the normalised space the composition worked in.
     result *= normScale;

@@ -240,6 +240,18 @@ struct alignas(256) DlssNrConstants
     uint32_t ResidualHistoryValid;
     uint32_t ResidualMotionBaseX;
     uint32_t ResidualMotionBaseY;
+
+    // Replace HDR-mapping modes only (ReversibleMode 2 and 4): how much native high-frequency detail is
+    // restored when the model ran below full resolution. 0 leaves the output unchanged. Trailing scalar,
+    // mirrored in dlssnr.hlsl's cbuffer after the four residual placeholders.
+    float ReplaceDetailStrength;
+
+    // The model's working-resolution scale this frame, or 1.0 when it was not reduced. Set from C++
+    // rather than inferred in the shader from the size of a bound buffer: the matched-residual enlarge can
+    // hand the resolve native-sized buffers even though the model itself ran small, which makes a
+    // shader-side "is this buffer still small" check read false. Zero-initialised constants would read as
+    // "reduced to nothing", so MakeConstants sets 1.0 and only the resolve sets a smaller value.
+    float ModelWorkScale;
 };
 static_assert(sizeof(DlssNrConstants) == 256);
 
@@ -282,6 +294,8 @@ class DlssNr_Common
         constants.SkinColour = config.DlssNrSkinColour.value_or_default();
         constants.EnvironmentDetail = config.DlssNrEnvironmentDetail.value_or_default();
         constants.EnvironmentColour = config.DlssNrEnvironmentColour.value_or_default();
+        constants.ReplaceDetailStrength = config.DlssNrReplaceDetailStrength.value_or_default();
+        constants.ModelWorkScale = 1.0f;
         return constants;
     }
 

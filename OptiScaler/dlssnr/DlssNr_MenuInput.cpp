@@ -71,6 +71,19 @@ void RenderInput(Config* config, float menuResScale)
 
     HelpMarker("HDR mapping curve. Replace bypasses strength and highlight controls.");
 
+    if (reversible == 2 || reversible == 4)
+    {
+        float replaceDetail = config->DlssNrReplaceDetailStrength.value_or_default();
+        if (ImGui::SliderFloat("Restore Sharpness", &replaceDetail, 0.0f, 2.0f, "%.2f"))
+            config->DlssNrReplaceDetailStrength = replaceDetail;
+
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Reset##replacedetail"))
+            config->DlssNrReplaceDetailStrength = 0.5f;
+
+        HelpMarker("Restores fine edges and texture from the original frame. Replace looks soft when model resolution is below 100%. No effect at 100% or above, or at 0.");
+    }
+
     {
         {
             const auto ex = DlssNr::GameExposureStatus();

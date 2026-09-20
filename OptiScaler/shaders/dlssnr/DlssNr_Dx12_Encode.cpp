@@ -302,6 +302,11 @@ DlssNrConstants DlssNr_Dx12::State::MakeResolveConstants(const EncodeContext& co
     resolveParams.CompareSplit = cfg.DlssNrCompareSplit.value_or_default();
     resolveParams.CompareZoom = std::max(1.0f, cfg.DlssNrCompareZoom.value_or_default());
     resolveParams.CompareSwap = cfg.DlssNrCompareSwap.value_or_default() ? 1u : 0u;
+    resolveParams.ReplaceDetailStrength = cfg.DlssNrReplaceDetailStrength.value_or_default();
+    // Only a model that ran smaller than the frame reports a scale below one. Supersampling (workScale > 1)
+    // and a full-size model both report 1.0, which switches Restore Sharpness off.
+    const bool modelRanSmall = nr.workWidth != width || nr.workHeight != height;
+    resolveParams.ModelWorkScale = (modelRanSmall && context.workScale < 1.0f) ? context.workScale : 1.0f;
 
     // Report the effective composition settings when they change.
 

@@ -479,6 +479,7 @@ bool ModelVk::Impl::Evaluate(VkCommandBuffer cmdBuffer, const VkImageInfo& colou
 
     DlssNrConstants resolve = encode;
     resolve.Mode = DlssNrMode_Resolve;
+    resolve.ModelWorkScale = (reduced && workScale < 1.0f) ? workScale : 1.0f;
 
     // Downsample the model answer to native before composition.
     OwnedImage* resolveProxy = modelInput;

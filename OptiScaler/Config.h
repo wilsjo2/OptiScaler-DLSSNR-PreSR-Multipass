@@ -324,6 +324,11 @@ class Config
     CustomOptional<float> DlssNrTransferStrength { 1.0f };
     CustomOptional<float> DlssNrColourStrength { 1.0f };
 
+    // Replace HDR-mapping modes only (ReversibleMode 2 and 4): how much native high-frequency detail is
+    // restored when the model ran below full resolution. Replace has no native-resolution fallback the
+    // way the composed modes do, so a reduced working size leaves it soft. 0 = unchanged output.
+    CustomOptional<float> DlssNrReplaceDetailStrength { 0.5f };
+
     // The RenoDX reversible proxy mode. 0 = today's soft-knee encode + our composition (default,
     // byte-identical); 1 = unclipped Neutwo proxy + our composition; 2 = Neutwo proxy + pure-inverse
     // replace. An in-game A/B and a way back. Default 0 = byte-identical to before.
