@@ -251,6 +251,7 @@ md $(SolutionDir)x64\Release\a\Licenses
 del /Q $(SolutionDir)x64\Release\a\Licenses\*.*
 copy $(SolutionDir)external\xess\LICENSE.txt $(SolutionDir)x64\Release\a\Licenses\XeSS_LICENSE.txt /Y
 copy "$(SolutionDir)Licenses\RenoDX_ATTRIBUTION.txt" $(SolutionDir)x64\Release\a\Licenses\ /Y
+copy "$(SolutionDir)Licenses\MFGUnlock_LICENSE.txt" $(SolutionDir)x64\Release\a\Licenses\ /Y
 md $(SolutionDir)x64\Release\a\OptiScaler
 copy $(SolutionDir)external\xess\bin\*.dll $(SolutionDir)x64\Release\a\OptiScaler\ /Y
 copy $(SolutionDir)external\FidelityFX-SDK\docs\license.md $(SolutionDir)x64\Release\a\OptiScaler\Licenses\FidelityFX_v1_LICENSE.md /Y
@@ -345,6 +346,11 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="exports\winmm.h" />
     <ClInclude Include="framegen\dlssg\DLSSG_Dx12.h" />
     <ClInclude Include="framegen\dlssg\MfgUnlock.h" />
+    <ClInclude Include="framegen\dlssg\MfgUnlockFlip.h" />
+    <ClInclude Include="framegen\dlssg\MfgUnlockMethod.h" />
+    <ClInclude Include="framegen\dlssg\MfgUnlockPlugin.h" />
+    <ClInclude Include="framegen\dlssg\MfgUnlockProvider.h" />
+    <ClInclude Include="framegen\dlssg\MfgUnlockPtx.h" />
     <ClInclude Include="dlssnr\PassProfiles.h" />
     <ClInclude Include="framegen\ffx\FSRFG_Dx12.h" />
     <ClInclude Include="framegen\IFGFeature.h" />

@@ -110,9 +110,11 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
             LOG_ERROR("Trying to load dll: {}", libNameA);
     }
 
-    // Patch a supported Ada snippet before NGX reads and caches its capabilities.
+    // Patch a supported Ada snippet before NGX reads and caches its capabilities. Covers the driver's OTA
+    // copy (models\dlssg\...\<hash>.bin) as well as the game's nvngx_dlssg.dll, which the .bin branch
+    // below would otherwise load without patching.
 #if defined(OPTISCALER_RTX40_MFG)
-    if (std::filesystem::path(normalizedPath).filename() == L"nvngx_dlssg.dll" && MfgUnlock::Pending())
+    if (MfgUnlock::Provider::IsProviderPath(normalizedPath) && MfgUnlock::Pending())
     {
         auto snippet = NtdllProxy::LoadLibraryExW_Ldr(lpLibFullPath, NULL, 0);
         if (snippet)

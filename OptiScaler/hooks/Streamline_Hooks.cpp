@@ -1114,6 +1114,11 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
 
     newOptions.structVersion = newStructVer;
 
+#if defined(OPTISCALER_RTX40_MFG)
+    // What the game asked for, before any override. A struct too old to carry the field reads as 1 (2X).
+    const unsigned int requestedCount = newOptions.numFramesToGenerate;
+#endif
+
     auto& state = State::Instance();
 
     // Disable game's DLSSG when we are trying to create our own instance of DLSSG
@@ -1210,7 +1215,14 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
 
     state.dlssgLastSetMode = newOptions.mode;
 
-    return o_slDLSSGSetOptions(viewport, newOptions);
+    const auto result = o_slDLSSGSetOptions(viewport, newOptions);
+
+#if defined(OPTISCALER_RTX40_MFG)
+    MfgUnlock::RecordSetOptions(requestedCount, newOptions.numFramesToGenerate,
+                                newOptions.mode != sl::DLSSGMode::eOff, static_cast<unsigned int>(result));
+#endif
+
+    return result;
 }
 
 sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport, sl::DLSSGState& state,
@@ -1250,6 +1262,13 @@ sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport
         }
 
         State::Instance().dlssgGameDMFGSupported = newState.bIsDynamicMFGSupported == sl::eTrue;
+
+#if defined(OPTISCALER_RTX40_MFG)
+        // The real DLSS-G's count, unless our own frame generation stands in for it (it writes its own
+        // count further down).
+        if (State::Instance().activeFgInput != FGInput::DLSSG)
+            MfgUnlock::RecordState(newState.numFramesActuallyPresented);
+#endif
     }
     else
     {
@@ -1257,6 +1276,11 @@ sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport
         if (result != sl::Result::eOk)
             return result;
         State::Instance().dlssgGameDMFGSupported = state.bIsDynamicMFGSupported == sl::eTrue;
+
+#if defined(OPTISCALER_RTX40_MFG)
+        if (State::Instance().activeFgInput != FGInput::DLSSG)
+            MfgUnlock::RecordState(state.numFramesActuallyPresented);
+#endif
     }
 
 #if defined(OPTISCALER_RTX40_MFG)
@@ -2143,6 +2167,11 @@ void StreamlineHooks::hookDlssg(HMODULE slDlssg)
         LOG_WARN("Dlssg module in NULL");
         return;
     }
+
+#if defined(OPTISCALER_RTX40_MFG)
+    // The game's copy or the driver's OTA one; both come through here.
+    MfgUnlock::OnStreamlinePluginLoaded(slDlssg);
+#endif
 
     if (o_dlssg_slGetPluginFunction)
         unhookDlssg();

@@ -1,4 +1,4 @@
-﻿#include "pch.h"
+#include "pch.h"
 #include <dlssnr/DlssNr_MenuOverlay.h>
 #include "menu_common.h"
 #if defined(OPTISCALER_RTX40_MFG)
@@ -3148,6 +3148,133 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
     }
 }
 
+#if defined(OPTISCALER_RTX40_MFG)
+// Options for the built-in RTX 40 unlock, shown only while it is on and not overridden by another
+// unlocker. Startup settings: they apply when DLSSG loads, so a change needs a restart, and the result of
+// each is shown directly under it.
+static void RenderAdaUnlockOptions(Config* config, const MfgUnlock::Status& status,
+                                   void (*showHelp)(const char*))
+{
+    if (!ImGui::CollapsingHeader("RTX 40 (Ada) MFG Unlock Options"))
+        return;
+
+    ImGui::Indent();
+
+    // Frame timing fix. Auto is resolved inline, like the RTX 20/30 "Kernel Image" combo below.
+    const auto resolved = MfgUnlock::ConfiguredTemporalMethod();
+    const char* options[] = { "Auto (reuse Blackwell kernel)", "Reuse Blackwell kernel", "Rewrite blend weight (PTX)" };
+
+    const std::string chosen = config->FGDLSSGAdaTemporalFix.value_or("Auto");
+    int index = chosen == "Retarget" ? 1 : chosen == "Ptx" ? 2 : 0;
+
+    if (ImGui::Combo("Frame timing fix##ada", &index, options, 3))
+    {
+        const char* stored[] = { "Auto", "Retarget", "Ptx" };
+        config->FGDLSSGAdaTemporalFix = std::string(stored[index]);
+    }
+    showHelp("Above 2X, every generated frame can land at the midpoint between two real frames, so 3X/4X\n"
+             "shows more frames but no smoother motion. This gives each its own time.\n"
+             "Auto / Reuse Blackwell kernel: uses the Blackwell interpolation kernel the DLSSG module\n"
+             "already carries. This is the default.\n"
+             "Rewrite blend weight: edits the Ada kernel's PTX instead. It only works on DLSSG builds\n"
+             "it recognises. Try it only if 3X/4X motion is not smoother.\n"
+             "ini: [DLSSG] AdaTemporalFix. Save Settings and restart to apply.");
+
+    // The result, directly under the control (which method applied, or the specific reason it did not).
+    if (!status.ModuleFound)
+    {
+        ImGui::TextDisabled("Not applied yet: DLSSG has not loaded.");
+    }
+    else if (status.KernelsRewritten > 0)
+    {
+        const bool ptx = status.TemporalAttempted == MfgUnlock::TemporalMethod::Ptx;
+        ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Applied: %s, %u %s",
+                           ptx ? "rewrite blend weight" : "reuse Blackwell kernel", status.KernelsRewritten,
+                           ptx ? "descriptor(s)" : "kernel group(s)");
+    }
+    else
+    {
+        ImGui::TextColored(ImVec4(0.95f, 0.70f, 0.20f, 1.0f), "Not applied: %s.",
+                           status.TemporalDetail.empty() ? "no reason recorded" : status.TemporalDetail.c_str());
+    }
+
+    if (status.ModuleFound && status.TemporalAttempted != resolved)
+        ImGui::TextColored(ImVec4(0.95f, 0.70f, 0.20f, 1.0f), "Save Settings and restart to apply.");
+
+    ImGui::Spacing();
+
+    // Software frame pacing. Second because it is the rarer need: a freeze above 2X, not a setting every
+    // unlock user wants.
+    bool softwarePacing = config->FGDLSSGAdaFlipMeteringPatch.value_or_default();
+
+    if (ImGui::Checkbox("Software frame pacing (only if 3X+ freezes)##ada", &softwarePacing))
+        config->FGDLSSGAdaFlipMeteringPatch = softwarePacing;
+    showHelp("Asking for more than one generated frame while hardware flip metering is on can freeze the picture.\n"
+             "This edits NVIDIA's Streamline DLSS-G plugin in memory, when it loads, so that it paces in\n"
+             "software instead. It refuses unless the plugin's code is of the shape it recognises.\n"
+             "Use it only if 3X or more freezes. [NvApi] DisableFlipMetering=true (ini only) is milder; try\n"
+             "that first.\n"
+             "ini: [DLSSG] AdaFlipMeteringPatch. Save Settings and restart to apply.");
+
+    const std::string_view pacing = status.FlipMetering;
+
+    if (pacing.empty())
+    {
+        if (softwarePacing)
+            ImGui::TextDisabled("Not applied yet: the Streamline DLSS-G plugin has not loaded.");
+    }
+    else if (pacing == "patched")
+    {
+        ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f), "Applied at %u site(s).", status.FlipSites);
+    }
+    else if (pacing != "off")
+    {
+        ImGui::TextColored(ImVec4(0.95f, 0.70f, 0.20f, 1.0f), "Not applied: %s.", status.FlipMetering);
+    }
+
+    if (!pacing.empty() && softwarePacing != status.FlipRequested)
+        ImGui::TextColored(ImVec4(0.95f, 0.70f, 0.20f, 1.0f), "Save Settings and restart to apply.");
+
+    ImGui::Unindent();
+}
+
+// One line under "Override DLSSG Ratio". The combo says what was requested; this says whether it
+// happened: what the game asked for, what was sent on after any override, and what Streamline reports it
+// presented at the last check. Nothing is drawn while DLSS-G is off.
+static void RenderDlssgTelemetry()
+{
+    const auto& telemetry = MfgUnlock::GetTelemetry();
+
+    if (!telemetry.optionsSeen.load(std::memory_order_acquire) || !telemetry.active.load(std::memory_order_relaxed))
+        return;
+
+    if (!telemetry.stateSeen.load(std::memory_order_acquire))
+    {
+        ImGui::TextDisabled("DLSSG: waiting for Streamline state...");
+        return;
+    }
+
+    const unsigned int requestedX = telemetry.requested.load(std::memory_order_relaxed) + 1;
+    const unsigned int sentX = telemetry.sent.load(std::memory_order_relaxed) + 1;
+    const unsigned int presented = telemetry.presented.load(std::memory_order_relaxed);
+    const unsigned int result = telemetry.result.load(std::memory_order_relaxed);
+
+    const bool agrees = result == 0 && presented == sentX;
+    const ImVec4 green(0.4f, 0.9f, 0.5f, 1.0f);
+    const ImVec4 amber(0.95f, 0.70f, 0.20f, 1.0f);
+
+    ImGui::TextColored(agrees ? green : amber, "Game asked %uX, sent %uX, Streamline presented %u (max seen %u)",
+                       requestedX, sentX, presented, telemetry.maxPresented.load(std::memory_order_relaxed));
+
+    if (result != 0)
+        ImGui::TextColored(amber, "slDLSSGSetOptions returned sl::Result %u for that request.", result);
+
+    // Only when the symptom is there: 3X or more sent, fewer presented, and nothing pacing in software.
+    if (result == 0 && sentX > 2 && presented < sentX && MfgUnlock::UnlockedMax() > 0 && !MfgUnlock::SoftwarePacing())
+        ImGui::TextColored(amber, "If the picture froze: try Software frame pacing under RTX 40 (Ada) MFG Unlock Options.");
+}
+#endif
+
 void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 {
     auto& state = ctx.state;
@@ -3177,6 +3304,11 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
             ImGui::TextWrapped("DLSSG %s: RTX 40 MFG unlock applied.", status.SnippetVersion.c_str());
         else
             ImGui::TextWrapped("DLSSG %s: unlock unavailable for this runtime.", status.SnippetVersion.c_str());
+
+        if (status.ModuleFound && status.PluginCeiling[0] != '\0')
+            ImGui::TextWrapped("Streamline plugin ceiling: %s.", status.PluginCeiling);
+
+        RenderAdaUnlockOptions(config, status, [](const char* tip) { ShowHelpMarker(tip); });
     }
 #endif
 
@@ -3511,6 +3643,11 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         }
 
         ImGui::EndDisabled();
+
+#if defined(OPTISCALER_RTX40_MFG)
+        if (state.dlssgMfgMax.has_value() && state.dlssgMfgMax.value() >= 1 && !dlssgInputOrOutput)
+            RenderDlssgTelemetry();
+#endif
 
         if (state.dlssgGameDMFGSupported && !dlssgInputOrOutput)
         {

@@ -1,0 +1,78 @@
+DLSS Multi Frame Generation unlock for RTX 40 (built in)
+=========================================================
+
+Files
+-----
+
+OptiScaler/framegen/dlssg/MfgUnlock.cpp and MfgUnlock.h
+  Adapted from y4my4my4m/OptiScaler_DLSSNR_Multipass_MFG, tag v4 (7b7220bb), GPL-3.0:
+  https://github.com/y4my4my4m/OptiScaler_DLSSNR_Multipass_MFG
+
+OptiScaler/framegen/dlssg/MfgUnlockProvider.h, MfgUnlockPlugin.h, MfgUnlockPtx.h, MfgUnlockFlip.h
+  Adapted from KleberMotta/OptiScaler-DLSS5-MFG-RTX40, commit 74c3bac
+  (OptiScaler/mfgunlock/, MIT):
+  https://github.com/KleberMotta/OptiScaler-DLSS5-MFG-RTX40
+
+  That code is a port of the "MFG Unlock" ReShade addon:
+    https://github.com/mavismmg/MFGAdaUnlock-RenoDx   (fork maintained by mavismmg)
+    https://github.com/ImDreamt/MFGAdaUnlock-RenoDx   (original addon by Dreamt)
+
+  The underlying technique -- the Ada arch-gate rewrite, the temporal-midpoint correction of the
+  DLSS-G interpolation kernel and the Streamline wrapper verification -- originates from
+  dashdogy's RTX40MFG-Unlock:
+    https://github.com/dashdogy/RTX40MFG-Unlock
+
+  As stated by the KleberMotta repository, the addon and dashdogy's project are published under the
+  MIT License. Both notices are reproduced below and apply to the parts of this code taken from
+  them. The bounds checks, uniqueness checks and tests around that code are this project's own.
+
+External unlocker (optional, not built in): dashdogy's RTX40MFG-Unlock is pinned as a submodule at
+external/RTX40MFG-Unlock with its own LICENSE.
+
+---------------------------------------------------------------------
+
+MIT License
+
+Copyright (c) 2026 ImDreamt
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---------------------------------------------------------------------
+
+MIT License
+
+Copyright (c) 2026 Michael Robles (dashdogy)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

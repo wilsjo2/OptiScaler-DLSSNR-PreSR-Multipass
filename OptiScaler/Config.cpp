@@ -228,6 +228,18 @@ bool Config::Reload(std::filesystem::path iniPath)
         {
 #if defined(OPTISCALER_RTX40_MFG)
             FGDLSSGAdaMfgUnlock.set_from_config(readBool("DLSSG", "AdaMfgUnlock"));
+
+            if (auto adaFix = readString("DLSSG", "AdaTemporalFix"); adaFix.has_value())
+            {
+                if (lstrcmpiA(adaFix.value().c_str(), "retarget") == 0)
+                    FGDLSSGAdaTemporalFix.set_from_config("Retarget");
+                else if (lstrcmpiA(adaFix.value().c_str(), "ptx") == 0)
+                    FGDLSSGAdaTemporalFix.set_from_config("Ptx");
+                else
+                    FGDLSSGAdaTemporalFix.set_from_config("Auto");
+            }
+
+            FGDLSSGAdaFlipMeteringPatch.set_from_config(readBool("DLSSG", "AdaFlipMeteringPatch"));
 #endif
             FGDLSSGInterpolationCount.set_from_config(readInt("DLSSG", "InterpolationCount"));
             if (FGDLSSGInterpolationCount.has_value() &&
@@ -1108,8 +1120,13 @@ bool Config::SaveIni()
     {
 #if defined(OPTISCALER_RTX40_MFG)
         ini.SetValue("DLSSG", "AdaMfgUnlock", GetBoolValue(Instance()->FGDLSSGAdaMfgUnlock.value_for_config()).c_str());
+        ini.SetValue("DLSSG", "AdaTemporalFix", Instance()->FGDLSSGAdaTemporalFix.value_for_config_or("auto").c_str());
+        ini.SetValue("DLSSG", "AdaFlipMeteringPatch",
+                     GetBoolValue(Instance()->FGDLSSGAdaFlipMeteringPatch.value_for_config()).c_str());
 #else
         ini.Delete("DLSSG", "AdaMfgUnlock");
+        ini.Delete("DLSSG", "AdaTemporalFix");
+        ini.Delete("DLSSG", "AdaFlipMeteringPatch");
 #endif
         ini.SetValue("DLSSG", "InterpolationCount",
                      GetIntValue(Instance()->FGDLSSGInterpolationCount.value_for_config()).c_str());

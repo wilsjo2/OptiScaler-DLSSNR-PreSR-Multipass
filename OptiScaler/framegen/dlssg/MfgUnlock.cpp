@@ -9,8 +9,13 @@
 #include <Util.h>
 #include <scanner/scanner.h>
 #include <misc/IdentifyGpu.h>
-#include <mutex>
 
+#include "MfgUnlockFlip.h"
+#include "MfgUnlockPlugin.h"
+#include "MfgUnlockPtx.h"
+
+#include <mutex>
+#include <tlhelp32.h>
 
 namespace
 {
@@ -65,6 +70,198 @@ std::string ModuleVersion(HMODULE module)
         return {};
 
     return std::format("{}.{}.{}", file.major, file.minor, file.patch);
+}
+
+// The DLSS-G provider, if it is mapped. The file name finds the game's own copy. The driver's OTA copy
+// (models\dlssg\versions\<n>\files\<hash>.bin) and a renamed snippet are found by walking the loaded
+// modules, which is only safe from an ordinary thread: a snapshot taken under the loader lock
+// deadlocks. The load hook hands TryApply its module directly and never comes here.
+//
+// TryApply runs on every Streamline call until the snippet is found, so the walk is rate limited. A
+// provider that has not appeared after these few walks is not going to appear through this route.
+HMODULE FindProvider()
+{
+    if (auto module = GetModuleHandleW(L"nvngx_dlssg.dll"))
+        return module;
+
+    static uint64_t nextWalk = 0;
+    static unsigned walks = 0;
+    constexpr unsigned kMaxWalks = 8;
+    constexpr uint64_t kWalkIntervalMs = 2000;
+
+    const uint64_t now = GetTickCount64();
+
+    if (walks >= kMaxWalks || now < nextWalk)
+        return nullptr;
+
+    nextWalk = now + kWalkIntervalMs;
+    ++walks;
+
+    // The marker string is a literal in this DLL, so it has to be excluded from the walk.
+    HMODULE self = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCWSTR>(&FindProvider), &self);
+
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
+
+    if (snapshot == INVALID_HANDLE_VALUE)
+        return nullptr;
+
+    HMODULE found = nullptr;
+    MODULEENTRY32W entry {};
+    entry.dwSize = sizeof(entry);
+
+    for (bool more = Module32FirstW(snapshot, &entry); more && found == nullptr; more = Module32NextW(snapshot, &entry))
+    {
+        if (entry.hModule == self)
+            continue;
+
+        if (MfgUnlock::Provider::IsProviderPath(entry.szExePath))
+        {
+            found = entry.hModule;
+            continue;
+        }
+
+        // A renamed or relocated snippet: only look inside modules that expose an NGX entry point.
+        if (GetProcAddress(entry.hModule, "NVSDK_NGX_D3D12_PopulateDeviceParameters_Impl") == nullptr &&
+            GetProcAddress(entry.hModule, "NVSDK_NGX_VULKAN_PopulateDeviceParameters_Impl") == nullptr)
+            continue;
+
+        if (MfgUnlock::Provider::ImageContains(entry.hModule, MfgUnlock::Provider::kMarker))
+            found = entry.hModule;
+    }
+
+    CloseHandle(snapshot);
+
+    return found;
+}
+
+// The Streamline DLSS-G plugins seen so far, and the ones already tried. A plugin is tried once: the
+// answer does not change, and a repeat would only repeat the log line.
+std::mutex g_pluginLock;
+std::vector<HMODULE> g_plugins;
+std::vector<HMODULE> g_pluginsTried;
+
+// Same guards as TryApply: the option on for this session, an Ada GPU.
+bool AdaUnlockWanted()
+{
+    if (!MfgUnlock::EnabledForSession())
+        return false;
+
+    const auto& gpu = IdentifyGpu::getPrimaryGpu();
+    return gpu.vendorId == VendorId::Nvidia && gpu.nvidiaArchInfo.architecture_id == NV_GPU_ARCHITECTURE_AD100;
+}
+
+// Software frame pacing: pin the plugin's flip-metering state to its own software fallback. Applied when
+// the plugin is loaded, before Streamline uses it, because rewriting a register store is a seven byte
+// write into code that no other thread should be executing yet. Caller holds g_pluginLock.
+void PatchFlipMetering(HMODULE plugin)
+{
+    g_status.FlipRequested = Config::Instance()->FGDLSSGAdaFlipMeteringPatch.value_or_default();
+
+    if (std::string_view(g_status.FlipMetering) == "patched")
+        return;
+
+    // A plugin has been seen; "off" tells the overlay that, and that nothing was asked of it.
+    if (!g_status.FlipRequested)
+    {
+        g_status.FlipMetering = "off";
+        return;
+    }
+
+    wchar_t path[MAX_PATH] {};
+    GetModuleFileNameW(plugin, path, MAX_PATH);
+    const auto pluginPath = wstring_to_string(path);
+
+    MfgUnlock::Flip::Plan plan;
+    const auto found = MfgUnlock::Flip::FindPlan(plugin, plan);
+
+    if (found != MfgUnlock::Flip::FindResult::Found)
+    {
+        g_status.FlipMetering = MfgUnlock::Flip::Describe(found);
+        LOG_WARN("MFG unlock: {}: software frame pacing not applied: {}", pluginPath, g_status.FlipMetering);
+        return;
+    }
+
+    switch (MfgUnlock::Flip::Apply(plan))
+    {
+    case MfgUnlock::Flip::ApplyResult::Patched:
+        g_status.FlipMetering = "patched";
+        g_status.FlipSites = static_cast<unsigned int>(plan.sites.size());
+        LOG_INFO("MFG unlock: {}: flip-metering state +0x{:X} pinned to {} at {} site(s); multi-frame should pace in "
+                 "software",
+                 pluginPath, plan.field, plan.value, plan.sites.size());
+        break;
+    case MfgUnlock::Flip::ApplyResult::Mismatch:
+        g_status.FlipMetering = "the plugin changed while it was being patched";
+        LOG_WARN("MFG unlock: {}: software frame pacing not applied: {}", pluginPath, g_status.FlipMetering);
+        break;
+    case MfgUnlock::Flip::ApplyResult::ProtectFailed:
+        g_status.FlipMetering = "its memory could not be made writable";
+        LOG_WARN("MFG unlock: {}: software frame pacing not applied: {}", pluginPath, g_status.FlipMetering);
+        break;
+    }
+}
+
+// Only once the snippet unlock has landed. Raising the plugin's ceiling while the snippet still answers
+// Ada's 1 would only move the rejection from the plugin to the snippet.
+void PatchPluginCeilings()
+{
+    if (MfgUnlock::UnlockedMax() == 0)
+        return;
+
+    std::lock_guard lock(g_pluginLock);
+
+    for (HMODULE plugin : g_plugins)
+    {
+        if (std::find(g_pluginsTried.begin(), g_pluginsTried.end(), plugin) != g_pluginsTried.end())
+            continue;
+
+        g_pluginsTried.push_back(plugin);
+
+        wchar_t path[MAX_PATH] {};
+        GetModuleFileNameW(plugin, path, MAX_PATH);
+        const auto pluginPath = wstring_to_string(path);
+
+        // A plugin that was patched stays patched; a second one that cannot be does not change that.
+        const bool alreadyPatched = std::string_view(g_status.PluginCeiling) == "patched";
+
+        MfgUnlock::Plugin::CeilingSite site;
+        const char* result = "not matched";
+
+        switch (MfgUnlock::Plugin::FindCeilingSite(plugin, site))
+        {
+        case MfgUnlock::Plugin::FindResult::Found:
+            switch (MfgUnlock::Plugin::ApplyCeilingPatch(site))
+            {
+            case MfgUnlock::Plugin::ApplyResult::Patched:
+                result = "patched";
+                LOG_INFO("MFG unlock: {}: frame-count clamp neutralised, compiled maximum {} generated frame(s)",
+                         pluginPath, site.compiled);
+                break;
+            case MfgUnlock::Plugin::ApplyResult::ProtectFailed:
+                result = "not writable";
+                LOG_WARN("MFG unlock: {}: frame-count clamp found but its page could not be made writable",
+                         pluginPath);
+                break;
+            case MfgUnlock::Plugin::ApplyResult::Mismatch:
+                LOG_WARN("MFG unlock: {}: frame-count clamp changed under us; left unchanged", pluginPath);
+                break;
+            }
+            break;
+        case MfgUnlock::Plugin::FindResult::Ambiguous:
+            result = "ambiguous";
+            LOG_WARN("MFG unlock: {}: more than one frame-count clamp; left unchanged", pluginPath);
+            break;
+        case MfgUnlock::Plugin::FindResult::None:
+        case MfgUnlock::Plugin::FindResult::BadImage:
+            LOG_WARN("MFG unlock: {}: no frame-count clamp of the known shape; left unchanged", pluginPath);
+            break;
+        }
+
+        if (!alreadyPatched)
+            g_status.PluginCeiling = result;
+    }
 }
 
 bool WriteBytes(uintptr_t address, const uint8_t* bytes, size_t count)
@@ -320,11 +517,15 @@ void MfgUnlock::TryApply(HMODULE requestedModule)
 
     if (!snippetDone)
     {
-        if (auto module = requestedModule ? requestedModule : GetModuleHandleW(L"nvngx_dlssg.dll"); module != nullptr)
+        if (auto module = requestedModule ? requestedModule : FindProvider(); module != nullptr)
         {
             snippetDone = true;
             g_status.ModuleFound = true;
             g_status.SnippetVersion = ModuleVersion(module);
+
+            wchar_t modulePath[MAX_PATH] {};
+            GetModuleFileNameW(module, modulePath, MAX_PATH);
+            LOG_INFO("MFG unlock: DLSS-G provider {} at {}", g_status.SnippetVersion, wstring_to_string(modulePath));
 
             // Validate both gates before touching either. Ambiguous/unknown versions remain unmodified.
             const bool knownGates =
@@ -337,8 +538,32 @@ void MfgUnlock::TryApply(HMODULE requestedModule)
                 return;
             }
 
-            // Retargeting and both gates form one feature; a count-only unlock repeats frames.
-            g_status.KernelsRewritten = RewriteBlackwellKernels(module);
+            // Retargeting and both gates form one feature; a count-only unlock repeats frames. One temporal
+            // method per session, since both edit the same fatbin.
+            const auto method = ConfiguredTemporalMethod();
+            g_status.TemporalAttempted = method;
+
+            if (method == TemporalMethod::Retarget)
+            {
+                g_status.KernelsRewritten = RewriteBlackwellKernels(module);
+
+                g_status.TemporalDetail = g_status.KernelsRewritten > 0
+                                              ? "reused the Blackwell interpolation kernel"
+                                              : "no compatible Blackwell interpolation kernel image";
+            }
+            else
+            {
+                Ptx::Result ptx;
+
+                Ptx::Apply(module, ptx);
+                g_status.KernelsRewritten = static_cast<unsigned int>(ptx.redirected);
+                g_status.TemporalDetail = ptx.detail;
+
+                if (ptx.redirected > 0)
+                    LOG_INFO("MFG unlock: PTX temporal fix: {}", ptx.detail);
+                else
+                    LOG_WARN("MFG unlock: PTX temporal fix not applied: {}", ptx.detail);
+            }
 
             if (g_status.KernelsRewritten == 0)
             {
@@ -354,8 +579,73 @@ void MfgUnlock::TryApply(HMODULE requestedModule)
                 LOG_INFO("MFG unlock: nvngx_dlssg.dll patched for {} generated frames", kMaxGeneratedFrames);
             else
                 LOG_WARN("MFG unlock: nvngx_dlssg.dll incomplete, advertise {}, validate {}", advertise, validate);
+
+            // A plugin that was loaded first has been waiting for this.
+            PatchPluginCeilings();
         }
     }
+}
+
+namespace
+{
+MfgUnlock::Telemetry g_telemetry;
+}
+
+const MfgUnlock::Telemetry& MfgUnlock::GetTelemetry() { return g_telemetry; }
+
+bool MfgUnlock::SoftwarePacing() { return std::string_view(g_status.FlipMetering) == "patched"; }
+
+void MfgUnlock::RecordSetOptions(unsigned int requested, unsigned int sent, bool active, unsigned int result)
+{
+    // Above 2X with hardware flip metering still on can freeze presentation. Say so once, and change
+    // nothing: whether it freezes depends on the game and the plugin build.
+    static std::atomic_bool warned { false };
+
+    if (active && sent > 1 && UnlockedMax() > 0 && !SoftwarePacing() &&
+        !Config::Instance()->DisableFlipMetering.value_or(false) && !warned.exchange(true))
+        LOG_WARN("MFG unlock: {}X requested with hardware flip metering still on. If presentation freezes, try "
+                 "[NvApi] DisableFlipMetering=true, then [DLSSG] AdaFlipMeteringPatch=true.",
+                 sent + 1);
+
+    g_telemetry.requested.store(requested, std::memory_order_relaxed);
+    g_telemetry.sent.store(sent, std::memory_order_relaxed);
+    g_telemetry.result.store(result, std::memory_order_relaxed);
+    g_telemetry.active.store(active, std::memory_order_relaxed);
+    g_telemetry.optionsSeen.store(true, std::memory_order_release);
+}
+
+void MfgUnlock::RecordState(unsigned int presented)
+{
+    g_telemetry.presented.store(presented, std::memory_order_relaxed);
+
+    auto seenMax = g_telemetry.maxPresented.load(std::memory_order_relaxed);
+    while (presented > seenMax &&
+           !g_telemetry.maxPresented.compare_exchange_weak(seenMax, presented, std::memory_order_relaxed))
+    {
+    }
+
+    g_telemetry.stateSeen.store(true, std::memory_order_release);
+}
+
+void MfgUnlock::OnStreamlinePluginLoaded(HMODULE plugin)
+{
+    if (plugin == nullptr || !AdaUnlockWanted())
+        return;
+
+    {
+        std::lock_guard lock(g_pluginLock);
+
+        if (std::find(g_plugins.begin(), g_plugins.end(), plugin) == g_plugins.end())
+        {
+            g_plugins.push_back(plugin);
+
+            // At load, ahead of any use of the plugin.
+            PatchFlipMetering(plugin);
+        }
+    }
+
+    // A no-op until the snippet unlock has landed; TryApply calls it again then.
+    PatchPluginCeilings();
 }
 
 unsigned int MfgUnlock::UnlockedMax()
@@ -385,6 +675,17 @@ bool MfgUnlock::EnabledForSession()
     // Latch before the first FG load/query. UI changes take effect on the next launch.
     static const bool enabled = Config::Instance()->FGDLSSGAdaMfgUnlock.value_or_default();
     return enabled;
+}
+
+MfgUnlock::TemporalMethod MfgUnlock::ConfiguredTemporalMethod()
+{
+    const auto* config = Config::Instance();
+
+    std::optional<std::string> fix;
+    if (config->FGDLSSGAdaTemporalFix.has_value())
+        fix = config->FGDLSSGAdaTemporalFix.value_or("Auto");
+
+    return ResolveTemporalMethod(fix);
 }
 
 #endif
