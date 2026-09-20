@@ -46,6 +46,29 @@ try
         expect(result == WAIT_OBJECT_0, "GPU did not drain");
     };
     auto wait = [&] { waitOn(queue.Get()); };
+    // Readiness must survive collection, but never accept discarded or unsubmitted work.
+    {
+        DlssNr::GpuLifetime life;
+        life.Record(commands.Get());
+        auto completed = life.CompletionProbe(commands.Get());
+        expect(!completed(), "unsubmitted creation became ready");
+        life.ResetRecording(commands.Get());
+        expect(!completed(), "discarded creation became ready");
+        life.Record(commands.Get());
+        auto submitted = life.CompletionProbe(commands.Get());
+        check(queue->Wait(gate.Get(), 100));
+        queue->ExecuteCommandLists(1, lists);
+        life.Submitted(queue.Get(), 1, lists);
+        expect(!submitted(), "pending GPU creation became ready");
+        check(gate->Signal(100));
+        wait();
+        expect(submitted(), "completed creation stayed blocked at fixed epoch");
+        life.ResetRecording(commands.Get());
+        life.Collect();
+        expect(submitted(), "collection lost completed creation proof");
+        expect(!completed(), "unrelated submission revived discarded creation");
+        check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate)));
+    }
     int released = 0;
     {
         DlssNr::GpuLifetime life;

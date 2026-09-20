@@ -36,6 +36,7 @@ NVSDK_NGX_Result CompatibilityRuntime::Release(NVSDK_NGX_Handle* h) {
 }
 }
 
+namespace CompletionMock { bool complete = false; }
 // NGX tests substitute completion only; nr_gpu_lifetime_smoke exercises real D3D12 fences.
 struct DlssNr::GpuLifetime::Impl
 {
@@ -45,6 +46,8 @@ struct DlssNr::GpuLifetime::Impl
 DlssNr::GpuLifetime::GpuLifetime() : impl(std::make_unique<Impl>()) {}
 DlssNr::GpuLifetime::~GpuLifetime() { Collect(); }
 void DlssNr::GpuLifetime::Record(ID3D12GraphicsCommandList*) { impl->pending = true; }
+std::function<bool()> DlssNr::GpuLifetime::CompletionProbe(ID3D12GraphicsCommandList*)
+{ return [] { return CompletionMock::complete; }; }
 void DlssNr::GpuLifetime::Submitted(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*) {}
 void DlssNr::GpuLifetime::ResetRecording(ID3D12CommandList*) { impl->pending = false; Collect(); }
 void DlssNr::GpuLifetime::Retire(std::function<void()> destroy)
@@ -100,7 +103,11 @@ int main()
     assert(value.operator()<unsigned int>("DLSSNR.Width") == 1920);
     assert(value.operator()<unsigned int>("DLSSNR.Hint.Render.Preset") == 0);
     assert(value.operator()<float>("DLSSNR.Intensity") == 0.5f);
-    assert(run() == NVSDK_NGX_Result_Success && evaluated);
+    assert(!proxy.Ready(epoch));
+    CompletionMock::complete = true;
+    assert(proxy.Ready(epoch));
+    CompletionMock::complete = false;
+    assert(run(false) == NVSDK_NGX_Result_Success && evaluated);
     assert(value.operator()<ID3D12Resource*>("DLSSNR.Color") == &color);
     assert(value.operator()<ID3D12Resource*>("DLSSNR.Output") == &output);
     // High-resolution motion and guide offsets must survive the typed NGX dispatch independently.
