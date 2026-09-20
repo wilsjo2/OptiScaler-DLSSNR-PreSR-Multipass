@@ -147,6 +147,16 @@ auto DlssNr_Dx12::State::ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D1
     std::lock_guard<std::recursive_mutex> lock(mutex);
     if (!swapchain || !queue)
         return;
+    // Nothing below does anything with Finished Picture off, so do not touch the swapchain then. GetBuffer on a
+    // frame-generation swapchain waits for that swapchain's lock, which its present thread holds while it waits
+    // for this mutex in FinishedPictureSubmitted (via hkExecuteCommandLists): a lock-order deadlock that froze
+    // OptiFG (FSR FG) with NR active even with Finished Picture off. ApplyFinishedColor makes the same check.
+    if (!Config::Instance()->DlssNrFinishedPicture.value_or_default() ||
+        !Config::Instance()->DlssNrEnabled.value_or_default())
+    {
+        late.Cancel();
+        return;
+    }
     // Native Streamline owns an app-facing buffer set. Its before-present hook handles NR.
     // Editing the underlying display swapchain here races/is overwritten by DLSSG's own copies.
     if (DlssNr::StreamlinePicture::RenderQueue(swapchain))
