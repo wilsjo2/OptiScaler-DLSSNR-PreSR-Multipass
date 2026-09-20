@@ -3152,8 +3152,7 @@ void MenuCommon::RenderActiveUpscalerSettings(RenderMenuContext& ctx)
 // Options for the built-in RTX 40 unlock, shown only while it is on and not overridden by another
 // unlocker. Startup settings: they apply when DLSSG loads, so a change needs a restart, and the result of
 // each is shown directly under it.
-static void RenderAdaUnlockOptions(Config* config, const MfgUnlock::Status& status,
-                                   void (*showHelp)(const char*))
+static void RenderAdaUnlockOptions(Config* config, const MfgUnlock::Status& status, void (*showHelp)(const char*))
 {
     if (!ImGui::CollapsingHeader("RTX 40 (Ada) MFG Unlock Options"))
         return;
@@ -3271,7 +3270,8 @@ static void RenderDlssgTelemetry()
 
     // Only when the symptom is there: 3X or more sent, fewer presented, and nothing pacing in software.
     if (result == 0 && sentX > 2 && presented < sentX && MfgUnlock::UnlockedMax() > 0 && !MfgUnlock::SoftwarePacing())
-        ImGui::TextColored(amber, "If the picture froze: try Software frame pacing under RTX 40 (Ada) MFG Unlock Options.");
+        ImGui::TextColored(amber,
+                           "If the picture froze: try Software frame pacing under RTX 40 (Ada) MFG Unlock Options.");
 }
 #endif
 

@@ -56,33 +56,33 @@ inline FindResult FindCeilingSite(void* image, CeilingSite& site)
     site = {};
     size_t hits = 0;
 
-    const bool valid = Provider::ForEachSection(
-        image,
-        [&](uint8_t* data, size_t size, DWORD characteristics)
-        {
-            if (!(characteristics & IMAGE_SCN_MEM_EXECUTE) || size < kCeilingLength)
-                return;
+    const bool valid =
+        Provider::ForEachSection(image,
+                                 [&](uint8_t* data, size_t size, DWORD characteristics)
+                                 {
+                                     if (!(characteristics & IMAGE_SCN_MEM_EXECUTE) || size < kCeilingLength)
+                                         return;
 
-            for (size_t off = 0; off + kCeilingLength <= size; ++off)
-            {
-                const uint8_t* p = data + off;
+                                     for (size_t off = 0; off + kCeilingLength <= size; ++off)
+                                     {
+                                         const uint8_t* p = data + off;
 
-                if (p[0] != 0xBA || p[2] != 0 || p[3] != 0 || p[4] != 0)
-                    continue;
+                                         if (p[0] != 0xBA || p[2] != 0 || p[3] != 0 || p[4] != 0)
+                                             continue;
 
-                if (p[1] == 0 || p[1] > 8)
-                    continue;
+                                         if (p[1] == 0 || p[1] > 8)
+                                             continue;
 
-                if (std::memcmp(p + 5, kClampTail, sizeof(kClampTail)) != 0)
-                    continue;
+                                         if (std::memcmp(p + 5, kClampTail, sizeof(kClampTail)) != 0)
+                                             continue;
 
-                if (hits++ == 0)
-                {
-                    site.address = data + off;
-                    site.compiled = p[1];
-                }
-            }
-        });
+                                         if (hits++ == 0)
+                                         {
+                                             site.address = data + off;
+                                             site.compiled = p[1];
+                                         }
+                                     }
+                                 });
 
     if (!valid)
     {
@@ -105,7 +105,7 @@ inline FindResult FindCeilingSite(void* image, CeilingSite& site)
 enum class ApplyResult
 {
     Patched,
-    Mismatch,      // the ModRM byte is not the original: already patched, or not the instruction found
+    Mismatch, // the ModRM byte is not the original: already patched, or not the instruction found
     ProtectFailed,
 };
 

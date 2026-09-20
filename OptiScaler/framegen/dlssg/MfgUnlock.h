@@ -54,7 +54,7 @@ struct Status
     bool ValidateMatched = false;
     unsigned int KernelsRewritten = 0; // kernel groups relabelled, or descriptors redirected to the PTX rebuild
     TemporalMethod TemporalAttempted = TemporalMethod::None; // what the configuration asked for at load
-    std::string TemporalDetail; // why the attempt did not land, or what it did
+    std::string TemporalDetail;                              // why the attempt did not land, or what it did
     std::string SnippetVersion; // file version of nvngx_dlssg.dll, empty if it could not be read
 
     // The Streamline DLSS-G plugin's own frame-count clamp. A string literal, empty until a plugin has

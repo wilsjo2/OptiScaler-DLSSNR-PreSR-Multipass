@@ -428,10 +428,10 @@ inline bool ReadRelativePointer(uintptr_t start, size_t imageSize, uintptr_t slo
 
 struct Result
 {
-    size_t redirected = 0;   // descriptor slots now pointing at the rebuilt fatbin
+    size_t redirected = 0; // descriptor slots now pointing at the rebuilt fatbin
     size_t originalSize = 0;
     size_t rebuiltSize = 0;
-    std::string detail;      // what was done, or why nothing was
+    std::string detail; // what was done, or why nothing was
 };
 
 // Replaces the temporal-kernel fatbin in every descriptor that references it. The module carries several

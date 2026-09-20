@@ -40,8 +40,8 @@ namespace MfgUnlock::Flip
 {
 inline constexpr std::string_view kMarker = "FG1 DLL has been detected";
 
-inline constexpr size_t kWindow = 0x200;      // how far after the reference the fallback store is looked for
-inline constexpr uint32_t kMinField = 0x100;  // the context offset must lie strictly between these
+inline constexpr size_t kWindow = 0x200;     // how far after the reference the fallback store is looked for
+inline constexpr uint32_t kMinField = 0x100; // the context offset must lie strictly between these
 inline constexpr uint32_t kMaxField = 0x20000;
 inline constexpr size_t kStoreLength = 7;
 inline constexpr size_t kMaxSites = 16;
@@ -126,17 +126,17 @@ inline FindResult FindPlan(void* image, Plan& plan)
     // 1. Exactly one copy of the fallback message.
     std::vector<const uint8_t*> strings;
 
-    const bool valid = Provider::ForEachSection(
-        image,
-        [&](uint8_t* data, size_t size, DWORD characteristics)
-        {
-            if (!(characteristics & IMAGE_SCN_MEM_READ) || size < kMarker.size())
-                return;
+    const bool valid =
+        Provider::ForEachSection(image,
+                                 [&](uint8_t* data, size_t size, DWORD characteristics)
+                                 {
+                                     if (!(characteristics & IMAGE_SCN_MEM_READ) || size < kMarker.size())
+                                         return;
 
-            for (size_t off = 0; off + kMarker.size() <= size; ++off)
-                if (std::memcmp(data + off, kMarker.data(), kMarker.size()) == 0)
-                    strings.push_back(data + off);
-        });
+                                     for (size_t off = 0; off + kMarker.size() <= size; ++off)
+                                         if (std::memcmp(data + off, kMarker.data(), kMarker.size()) == 0)
+                                             strings.push_back(data + off);
+                                 });
 
     if (!valid)
         return FindResult::BadImage;
@@ -230,57 +230,58 @@ inline FindResult FindPlan(void* image, Plan& plan)
     const uint8_t opposite = static_cast<uint8_t>(1 - wantValue);
     bool tooMany = false;
 
-    Provider::ForEachSection(
-        image,
-        [&](uint8_t* data, size_t size, DWORD characteristics)
-        {
-            if (!(characteristics & IMAGE_SCN_MEM_EXECUTE) || size < kStoreLength)
-                return;
+    Provider::ForEachSection(image,
+                             [&](uint8_t* data, size_t size, DWORD characteristics)
+                             {
+                                 if (!(characteristics & IMAGE_SCN_MEM_EXECUTE) || size < kStoreLength)
+                                     return;
 
-            for (size_t off = 0; off + kStoreLength <= size; ++off)
-            {
-                const uint8_t* p = data + off;
-                Site site;
+                                 for (size_t off = 0; off + kStoreLength <= size; ++off)
+                                 {
+                                     const uint8_t* p = data + off;
+                                     Site site;
 
-                if (p[0] == 0xC6)
-                {
-                    // Flip the immediate. A store that already writes the wanted value needs nothing.
-                    if (!IsDisp32NoSib(p[1]) || (p[1] & 0x38) != 0 || ReadU32(p + 2) != wantField || p[6] != opposite)
-                        continue;
+                                     if (p[0] == 0xC6)
+                                     {
+                                         // Flip the immediate. A store that already writes the wanted value needs
+                                         // nothing.
+                                         if (!IsDisp32NoSib(p[1]) || (p[1] & 0x38) != 0 ||
+                                             ReadU32(p + 2) != wantField || p[6] != opposite)
+                                             continue;
 
-                    std::memcpy(site.original, p, kStoreLength);
-                    std::memcpy(site.replacement, p, kStoreLength);
-                    site.replacement[6] = wantValue;
-                }
-                else if (p[0] == 0x40 && p[1] == 0x88)
-                {
-                    // A register store, rewritten whole. REX must be exactly 0x40: any B/R/X/W bit would
-                    // change the length or the base register.
-                    if (!IsDisp32NoSib(p[2]) || ReadU32(p + 3) != wantField)
-                        continue;
+                                         std::memcpy(site.original, p, kStoreLength);
+                                         std::memcpy(site.replacement, p, kStoreLength);
+                                         site.replacement[6] = wantValue;
+                                     }
+                                     else if (p[0] == 0x40 && p[1] == 0x88)
+                                     {
+                                         // A register store, rewritten whole. REX must be exactly 0x40: any B/R/X/W bit
+                                         // would change the length or the base register.
+                                         if (!IsDisp32NoSib(p[2]) || ReadU32(p + 3) != wantField)
+                                             continue;
 
-                    std::memcpy(site.original, p, kStoreLength);
-                    site.replacement[0] = 0xC6;
-                    site.replacement[1] = static_cast<uint8_t>(0x80 | (p[2] & 7));
-                    std::memcpy(site.replacement + 2, &wantField, sizeof(wantField));
-                    site.replacement[6] = wantValue;
-                    site.fromRegister = true;
-                }
-                else
-                {
-                    continue;
-                }
+                                         std::memcpy(site.original, p, kStoreLength);
+                                         site.replacement[0] = 0xC6;
+                                         site.replacement[1] = static_cast<uint8_t>(0x80 | (p[2] & 7));
+                                         std::memcpy(site.replacement + 2, &wantField, sizeof(wantField));
+                                         site.replacement[6] = wantValue;
+                                         site.fromRegister = true;
+                                     }
+                                     else
+                                     {
+                                         continue;
+                                     }
 
-                if (plan.sites.size() >= kMaxSites)
-                {
-                    tooMany = true;
-                    return;
-                }
+                                     if (plan.sites.size() >= kMaxSites)
+                                     {
+                                         tooMany = true;
+                                         return;
+                                     }
 
-                site.address = data + off;
-                plan.sites.push_back(site);
-            }
-        });
+                                     site.address = data + off;
+                                     plan.sites.push_back(site);
+                                 }
+                             });
 
     if (tooMany)
     {

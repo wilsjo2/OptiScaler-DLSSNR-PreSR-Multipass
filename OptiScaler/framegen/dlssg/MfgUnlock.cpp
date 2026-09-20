@@ -241,8 +241,7 @@ void PatchPluginCeilings()
                 break;
             case MfgUnlock::Plugin::ApplyResult::ProtectFailed:
                 result = "not writable";
-                LOG_WARN("MFG unlock: {}: frame-count clamp found but its page could not be made writable",
-                         pluginPath);
+                LOG_WARN("MFG unlock: {}: frame-count clamp found but its page could not be made writable", pluginPath);
                 break;
             case MfgUnlock::Plugin::ApplyResult::Mismatch:
                 LOG_WARN("MFG unlock: {}: frame-count clamp changed under us; left unchanged", pluginPath);

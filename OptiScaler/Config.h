@@ -870,7 +870,7 @@ class Config
 #if defined(OPTISCALER_RTX40_MFG)
     CustomOptional<bool> FGDLSSGAdaMfgUnlock { false }; // RTX 40 only; restart required
     CustomOptional<std::string, NoDefault> FGDLSSGAdaTemporalFix; // Auto / Retarget / Ptx
-    CustomOptional<bool> FGDLSSGAdaFlipMeteringPatch { false };  // pin sl.dlss_g to software frame pacing
+    CustomOptional<bool> FGDLSSGAdaFlipMeteringPatch { false };   // pin sl.dlss_g to software frame pacing
 #endif
     CustomOptional<int> FGDLSSGInterpolationCount { 1 }; // For Opti's own SL instance
     CustomOptional<bool> FGDLSSGUseGamesReflexMarkers { true };

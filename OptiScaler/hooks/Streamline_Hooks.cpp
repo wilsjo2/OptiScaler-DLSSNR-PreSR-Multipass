@@ -1218,8 +1218,8 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
     const auto result = o_slDLSSGSetOptions(viewport, newOptions);
 
 #if defined(OPTISCALER_RTX40_MFG)
-    MfgUnlock::RecordSetOptions(requestedCount, newOptions.numFramesToGenerate,
-                                newOptions.mode != sl::DLSSGMode::eOff, static_cast<unsigned int>(result));
+    MfgUnlock::RecordSetOptions(requestedCount, newOptions.numFramesToGenerate, newOptions.mode != sl::DLSSGMode::eOff,
+                                static_cast<unsigned int>(result));
 #endif
 
     return result;
