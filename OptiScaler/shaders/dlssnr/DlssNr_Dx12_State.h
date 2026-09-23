@@ -375,6 +375,10 @@ struct DlssNr_Dx12::State
     bool ApplyFinishedColor(ID3D12Resource* color, ID3D12CommandQueue* queue, DXGI_COLOR_SPACE_TYPE colorSpace,
                             bool gameFrameHandoff = false);
 
+    bool PendingFinishedCapture(ID3D12Resource* color, ID3D12CommandQueue* queue, DXGI_COLOR_SPACE_TYPE colorSpace,
+                                DlssNr::XeFGCapture& facts);
+    void CloseFinishedCaptures(uint64_t throughSerial);
+
     bool PrepareRunModels(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, const DlssNrFrameInfo& frame,
                           const D3D12_RESOURCE_DESC& desc, DlssNr::ColorExtent native, DlssNr::ColorExtent work,
                           float workScale, unsigned int requestedPasses, bool spatial);

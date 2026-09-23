@@ -1656,6 +1656,8 @@
     <ClInclude Include="dlssnr\DlssNr_Upscaler.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="dlssnr\DlssNr_VkExtensions.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="dlssnr\DlssNrFeature_Dx12.h"><Filter>Header Files</Filter></ClInclude>
+    <ClCompile Include="dlssnr\DlssNr_XeFGHandoff.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClInclude Include="dlssnr\DlssNr_XeFGHandoff.h"><Filter>Header Files</Filter></ClInclude>
     <ClCompile Include="dlssnr\DlssNrFeature_Vk.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClInclude Include="dlssnr\DlssNrFeature_Vk.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="dlssnr\DlssNrFeature_Vk_Internal.h"><Filter>Header Files</Filter></ClInclude>

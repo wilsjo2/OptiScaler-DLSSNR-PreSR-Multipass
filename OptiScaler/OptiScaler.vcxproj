@@ -946,6 +946,10 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="dlssnr\DlssNr_Upscaler.h" />
     <ClInclude Include="dlssnr\DlssNr_VkExtensions.h" />
     <ClInclude Include="dlssnr\DlssNrFeature_Dx12.h" />
+    <ClCompile Include="dlssnr\DlssNr_XeFGHandoff.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClInclude Include="dlssnr\DlssNr_XeFGHandoff.h" />
     <ClInclude Include="dlssnr\DlssNrFeature_Vk_Internal.h" />
     <ClCompile Include="dlssnr\DlssNrFeature_Vk_Model.cpp" />
     <ClInclude Include="shaders\dlssnr\DlssNr_GpuTime.h" />

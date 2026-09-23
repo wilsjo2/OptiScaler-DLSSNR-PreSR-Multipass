@@ -5,6 +5,9 @@
 #include <proxies/XeLL_Proxy.h>
 #include <proxies/XeFG_Proxy.h>
 
+#include <dlssnr/DlssNr_XeFGHandoff.h>
+#include <hooks/FG_Hooks.h>
+
 #include "shaders/depth_invert/DI_Dx12.h"
 
 #include <xell.h>
@@ -24,6 +27,19 @@ class XeFG_Dx12 : public virtual IFGFeature_Dx12
     bool _infiniteDepth = false;
     std::optional<bool> _haveHudless = std::nullopt;
     bool _uiComposition = false;
+
+    // Creation format of the app-facing proxy, used by the handoff colour gate.
+    DXGI_FORMAT _proxyFormat = DXGI_FORMAT_UNKNOWN;
+
+    // Owned NR handoff (nr-xefg-088-release, todo 10): the finished application picture is
+    // composed once per accepted application frame at the end of Present() on the
+    // XeFG-retained application queue. The decision core is the landed seam core
+    // (dlssnr/DlssNr_XeFGHandoff.h): the generation changes on swapchain recreation and FG
+    // discontinuity, and the accepted frame id is _lastDispatchedFrame (never GetDispatchIndex).
+    DlssNr::XeFGHandoff::Tracker _nrHandoff;
+    uint64_t _nrGeneration = 0;
+    void OwnedNrHandoff();
+    void ResetNrHandoff();
 
     std::unique_ptr<DI_Dx12> _depthInvert;
 

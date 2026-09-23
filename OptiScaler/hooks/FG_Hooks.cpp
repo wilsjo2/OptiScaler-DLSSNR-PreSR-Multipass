@@ -344,6 +344,10 @@ void FGHooks::SetFGSwapchain(IDXGISwapChain* pSwapChain, HWND hWnd)
 
     _hwnd = hWnd;
 
+    // A new app-facing proxy does not inherit the recorded colour-space request.
+    if (pSwapChain != State::Instance().currentFGSwapchain)
+        ResetFGColorSpaceCarrier();
+
     if (_dx12InteropPresentSC == pSwapChain)
     {
         _dx12InteropPresentSC = nullptr;
@@ -399,6 +403,9 @@ void FGHooks::HookFGSwapchain(IDXGISwapChain* pSwapChain)
     o_FGSCGetFullscreenDesc = (PFN_GetFullscreenDesc) pFactoryVTable[19];
     o_FGSCPresent1 = (PFN_Present1) pFactoryVTable[22];
     o_FGSCGetFrameLatencyWaitableObject = (PFN_GetFrameLatencyWaitableObject) pFactoryVTable[33];
+    // IDXGISwapChain3: [36] GetCurrentBackBufferIndex, [37] CheckColorSpaceSupport, [38] SetColorSpace1,
+    // [39] ResizeBuffers1 - the [33]/[39] loads pin the numbering.
+    o_FGSCSetColorSpace1 = (PFN_SetColorSpace1) pFactoryVTable[38];
     o_FGSCResizeBuffers1 = (PFN_ResizeBuffers1) pFactoryVTable[39];
 
     if (o_FGSCPresent != nullptr)
@@ -414,6 +421,7 @@ void FGHooks::HookFGSwapchain(IDXGISwapChain* pSwapChain)
         LOG_TRACE("FGSCPresent1: {:X}", (size_t) o_FGSCPresent1);
         LOG_TRACE("FGSCResizeBuffers1: {:X}", (size_t) o_FGSCResizeBuffers1);
         LOG_TRACE("FGSCGetFrameLatencyWaitableObject: {:X}", (size_t) o_FGSCGetFrameLatencyWaitableObject);
+        LOG_TRACE("FGSCSetColorSpace1: {:X}", (size_t) o_FGSCSetColorSpace1);
 
         DetourTransactionBegin();
         DetourUpdateThread(GetCurrentThread());
@@ -438,6 +446,11 @@ void FGHooks::HookFGSwapchain(IDXGISwapChain* pSwapChain)
             if (o_FGSCGetFullscreenDesc != nullptr)
                 DetourAttach(&(PVOID&) o_FGSCGetFullscreenDesc, hkGetFullscreenDesc);
 
+            // App-facing colour-space carrier: the game's SetColorSpace1 request is recorded and forwarded
+            // exactly once (see CarrySetColorSpace1).
+            if (o_FGSCSetColorSpace1 != nullptr)
+                DetourAttach(&(PVOID&) o_FGSCSetColorSpace1, hkSetColorSpace1);
+
             if ((Config::Instance()->SimulateWaitableObject.value_or_default() ||
                  (State::Instance().gameEngine == GameEngineType::Unity &&
                   State::Instance().activeFgOutput == FGOutput::XeFG)) &&
@@ -460,6 +473,7 @@ void FGHooks::HookFGSwapchain(IDXGISwapChain* pSwapChain)
             o_FGSCGetFullscreenDesc = nullptr;
             o_FGSCPresent1 = nullptr;
             o_FGSCResizeBuffers1 = nullptr;
+            o_FGSCSetColorSpace1 = nullptr;
             o_FGSCGetFrameLatencyWaitableObject = nullptr;
         }
     }
@@ -599,6 +613,14 @@ HRESULT FGHooks::hkGetFullscreenState(IDXGISwapChain* This, BOOL* pFullscreen, I
     }
 
     return result;
+}
+
+HRESULT FGHooks::hkSetColorSpace1(IDXGISwapChain3* This, DXGI_COLOR_SPACE_TYPE ColorSpace)
+{
+    // Only the registered XeFG app-facing proxy is recorded; other instances reached through the same
+    // detoured class code are still forwarded, exactly once.
+    const bool owningProxy = This != nullptr && This == State::Instance().currentFGSwapchain;
+    return CarrySetColorSpace1(This, ColorSpace, o_FGSCSetColorSpace1, owningProxy);
 }
 
 HRESULT FGHooks::hkResizeBuffers(IDXGISwapChain* This, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat,
@@ -792,6 +814,9 @@ HRESULT FGHooks::hkResizeBuffers(IDXGISwapChain* This, UINT BufferCount, UINT Wi
 
     if (result == S_OK)
     {
+        if (This == State::Instance().currentFGSwapchain)
+            InvalidateFGColorSpaceCarrierEpoch(); // rebuilt buffers: the colour space must be re-applied once
+
         if (fg != nullptr)
         {
             State::Instance().fgChanged = true;
@@ -1035,6 +1060,9 @@ HRESULT FGHooks::hkResizeBuffers1(IDXGISwapChain3* This, UINT BufferCount, UINT 
 
     if (result == S_OK)
     {
+        if (This == State::Instance().currentFGSwapchain)
+            InvalidateFGColorSpaceCarrierEpoch(); // rebuilt buffers: the colour space must be re-applied once
+
         if (fg != nullptr)
         {
             State::Instance().fgChanged = true;
@@ -1252,9 +1280,17 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         }
     }
 
+    // Only the active native XeFG application proxy uses the owned handoff at the
+    // end of XeFG_Dx12::Present. Keep the existing inactive and interop paths;
+    // DXGI_PRESENT_TEST never accepts a frame and must not hand one off.
     const bool xeFgGamePicture = state.activeFgOutput == FGOutput::XeFG &&
                                  state.swapchainInteropApi == SwapchainInteropApi::None &&
                                  This == state.currentFGSwapchain;
+    uint64_t xefgHandoffSeq = 0;
+    const bool xefgOwnedHandoff = willPresent && fgFeatureActive && xeFgGamePicture;
+    if (xefgOwnedHandoff)
+        xefgHandoffSeq = FGHooks::XeFGHandoffSequence();
+
     if (willPresent && fgFeatureActive)
     {
         if (state.activeFgInput == FGInput::FSRFG)
@@ -1262,11 +1298,9 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         else if (state.activeFgInput == FGInput::FSRFG30)
             FSR3FG::ffxPresentCallback();
 
-        // XeFG must receive NR on its app-facing buffer and initialization queue.
-        // The global queue may belong to XeFG's asynchronous display swapchain.
-        // Keep the readiness check: a different, unfinished NR producer is still skipped.
-        DlssNr::ApplyToFinishedPicture(This, xeFgGamePicture ? state.currentFG->GetCommandQueue()
-                                                             : state.currentCommandQueue);
+        if (!xefgOwnedHandoff)
+            DlssNr::ApplyToFinishedPicture(This, state.currentCommandQueue);
+
         fg->Present();
     }
     else if (willPresent && fg != nullptr)
@@ -1322,6 +1356,30 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         result = o_FGSCPresent(This, SyncInterval, Flags);
     else
         result = o_FGSCPresent1((IDXGISwapChain1*) This, SyncInterval, Flags, pPresentParameters);
+
+    // NR_XEFG_PRESENT (todo 10): after the corresponding original proxy Present, from the
+    // SDK's own status (framesPresented counts pictures submitted for presentation, not
+    // proven scanout). Only the owning application proxy, and only when the owned handoff
+    // decided this present (the sequence moved); never for a generated-frame internal
+    // present and never for DXGI_PRESENT_TEST.
+    if (xefgOwnedHandoff && This == state.currentFGSwapchain)
+    {
+        uint64_t handoffGeneration = 0;
+        uint64_t handoffFrame = 0;
+        void* handoffContext = nullptr;
+        if (FGHooks::XeFGHandoffSince(xefgHandoffSeq, handoffGeneration, handoffFrame, handoffContext) &&
+            handoffContext != nullptr && XeFGProxy::GetLastPresentStatus() != nullptr)
+        {
+            xefg_swapchain_present_status_t status {};
+            if (XeFGProxy::GetLastPresentStatus()((xefg_swapchain_handle_t) handoffContext, &status) ==
+                XEFG_SWAPCHAIN_RESULT_SUCCESS)
+            {
+                LOG_INFO("NR_XEFG_PRESENT generation={} frame={} enabled={} framegen_result={} frames_presented={}",
+                         handoffGeneration, handoffFrame, status.isFrameGenEnabled, (UINT) status.frameGenResult,
+                         status.framesPresented);
+            }
+        }
+    }
 
     if (result == S_OK)
     {
@@ -1463,6 +1521,7 @@ ULONG FGHooks::hkFGRelease(IUnknown* This)
 
             LOG_DEBUG("FG Swapchain released, clearing currentFGSwapchain");
             State::Instance().currentFGSwapchain = nullptr;
+            ResetFGColorSpaceCarrier();
 
             if (State::Instance().currentWrappedSwapchain != nullptr &&
                 State::Instance().currentSwapchainDesc.OutputWindow == _hwnd)

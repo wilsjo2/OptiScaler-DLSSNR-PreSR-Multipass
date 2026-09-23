@@ -643,16 +643,29 @@ void DlssNr_Dx12::SubmitFinishedCommands(ID3D12CommandQueue* queue, UINT count, 
     _state->FinishedPictureSubmitted(queue, count, lists);
 }
 bool DlssNr_Dx12::WaitFinished() { return _state->WaitForFinishedPicture(); }
-void DlssNr_Dx12::ApplyFinished(ID3D12Resource* picture, ID3D12CommandQueue* queue, DXGI_COLOR_SPACE_TYPE space,
+bool DlssNr_Dx12::ApplyFinished(ID3D12Resource* picture, ID3D12CommandQueue* queue, DXGI_COLOR_SPACE_TYPE space,
                                 bool gameFrameHandoff)
 {
     std::lock_guard lock(_state->mutex);
+    bool ran = false;
     if (!Config::Instance()->DlssNrFinishedPicture.value_or_default() ||
         !Config::Instance()->DlssNrEnabled.value_or_default())
         _state->late.Cancel();
     else if (picture && queue)
-        _state->ApplyFinishedColor(picture, queue, space, gameFrameHandoff);
+        ran = _state->ApplyFinishedColor(picture, queue, space, gameFrameHandoff);
     _state->Publish();
+    return ran;
+}
+bool DlssNr_Dx12::PendingFinishedCapture(ID3D12Resource* picture, ID3D12CommandQueue* queue,
+                                         DXGI_COLOR_SPACE_TYPE space, DlssNr::XeFGCapture& facts)
+{
+    std::lock_guard lock(_state->mutex);
+    return _state->PendingFinishedCapture(picture, queue, space, facts);
+}
+void DlssNr_Dx12::CloseFinishedCaptures(uint64_t throughSerial)
+{
+    std::lock_guard lock(_state->mutex);
+    _state->CloseFinishedCaptures(throughSerial);
 }
 void DlssNr_Dx12::ApplyFinishedDx11(IDXGISwapChain* swapchain)
 {
@@ -661,6 +674,79 @@ void DlssNr_Dx12::ApplyFinishedDx11(IDXGISwapChain* swapchain)
 }
 std::string DlssNr_Dx12::FinishedStatus() { return _state->FinishedPictureStatus(); }
 std::string DlssNr_Dx12::DeferredStatus() { return _state->DeferredDlssStatus(); }
+
+// XeFG owned application-frame handoff, State side (todo 10). Under the owner mutex
+// (the class wrappers above hold it): the pending-capture facts for a finished
+// application picture, and interval closure for refused/skipped captures.
+bool DlssNr_Dx12::State::PendingFinishedCapture(ID3D12Resource* color, ID3D12CommandQueue* queue,
+                                                DXGI_COLOR_SPACE_TYPE colorSpace, DlssNr::XeFGCapture& facts)
+{
+    facts = DlssNr::XeFGCapture {};
+    if (color == nullptr || queue == nullptr)
+        return false;
+    if (!late.tracking.load())
+        return false;
+    LateContext::ComPtr<ID3D12Device> currentDevice;
+    if (FAILED(queue->GetDevice(IID_PPV_ARGS(&currentDevice))) || currentDevice != late.device)
+        return false;
+    // The colour gate mirrors ApplyFinishedColor: an unsupported space never becomes a capture.
+    const bool pq = colorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+    const bool scrgb = colorSpace == DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709;
+    const bool sdr = colorSpace == DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+    if (!sdr && !pq && !scrgb)
+        return false;
+    ID3D12CommandQueue* realQueue = nullptr;
+    if (!Util::CheckForRealObject(__FUNCTION__, queue, (IUnknown**) &realQueue))
+        realQueue = queue;
+    const auto desc = color->GetDesc();
+    const auto& cfg = *Config::Instance();
+    const bool residualOnly =
+        DlssNr::ResolvePlacement(cfg.DlssNrRunBeforeSr.value_or_default(), cfg.DlssNrDeferredDlss.value_or_default(),
+                                 cfg.DlssNrResidualAcrossRr.value_or_default(), true)
+            .deferred;
+    // The newest pending capture matching this finished picture - the frame being presented.
+    // The epoch rule does not apply (gameFrameHandoff semantics: the accepted application
+    // frame is not the display-frame clock); staleness is closed by the handoff wiring.
+    // Slots invalidated by Cancel keep pending with a zeroed extent and never match.
+    LateContext::Slot* match = nullptr;
+    for (auto& slot : late.slots)
+    {
+        if (!slot.pending || slot.frame.OutputWidth == 0)
+            continue;
+        if (slot.residualOnly != residualOnly || slot.frame.OutputWidth != desc.Width ||
+            slot.frame.OutputHeight != desc.Height)
+            continue;
+        if (match == nullptr || slot.serial > match->serial)
+            match = &slot;
+    }
+    if (match == nullptr)
+        return false;
+    facts.exists = true;
+    facts.serial = match->serial;
+    facts.submitted = match->submitted;
+    facts.sameQueue = match->submitted && match->producerQueue.Get() == realQueue;
+    facts.ready = match->submitted && DlssNr::FinishedInputReady(match->producerQueue.Get() == realQueue,
+                                                                 match->fence->GetCompletedValue(), match->ready);
+    return true;
+}
+
+void DlssNr_Dx12::State::CloseFinishedCaptures(uint64_t throughSerial)
+{
+    // Close presentation eligibility, not recording ownership. Like LateContext::Cancel,
+    // keep an unsubmitted slot pending with an invalid extent so wil's submission/reset
+    // hooks can still retire its promised fence. Submitted work keeps its fence as usual.
+    if (!late.tracking.load())
+        return;
+    for (auto& slot : late.slots)
+        if (slot.pending && slot.serial <= throughSerial)
+        {
+            if (slot.submitted)
+                slot.pending = false;
+            else
+                slot.frame.OutputWidth = 0;
+        }
+}
+
 namespace DlssNr
 {
 void FinishedPictureResetCommandList(ID3D12CommandList* cmd)
@@ -734,6 +820,44 @@ void ApplyToStreamlinePicture(IDXGISwapChain* swapchain, ID3D12Resource* picture
     std::lock_guard lock(nrOwnersMutex);
     if (activeNrOwner)
         activeNrOwner->ApplyFinished(picture, queue, space, true);
+}
+
+// XeFG owned application-frame handoff (todo 10). The wiring in XeFG_Dx12::Present()
+// queries the capture facts first and composes only after the handoff core accepted the
+// frame; a refused or skipped capture is closed through XeFGCloseCaptures so it can
+// never become a later frame's NR input. All three take the NR locks; the caller queries
+// swapchain/buffer/colour space BEFORE calling (ApplyToFinishedPicture ordering).
+bool XeFGPendingCapture(ID3D12Resource* picture, ID3D12CommandQueue* queue, DXGI_COLOR_SPACE_TYPE space,
+                        XeFGCapture& facts)
+{
+    if (::State::Instance().isShuttingDown)
+        return false;
+    std::lock_guard lock(nrOwnersMutex);
+    if (activeNrOwner == nullptr)
+        return false;
+    return activeNrOwner->PendingFinishedCapture(picture, queue, space, facts);
+}
+
+bool ApplyXeFGPicture(ID3D12Resource* picture, ID3D12CommandQueue* queue, DXGI_COLOR_SPACE_TYPE space)
+{
+    if (::State::Instance().isShuttingDown)
+        return false;
+    std::lock_guard lock(nrOwnersMutex);
+    if (activeNrOwner == nullptr)
+        return false;
+    // Real-game-frame semantics: ApplyFinishedColor consumes the pending capture without
+    // the display-frame epoch rule (DlssNr_Dx12_FinishedCompose.cpp gameFrameHandoff).
+    return activeNrOwner->ApplyFinished(picture, queue, space, /*gameFrameHandoff=*/true);
+}
+
+void XeFGCloseCaptures(uint64_t throughSerial)
+{
+    if (::State::Instance().isShuttingDown)
+        return;
+    std::lock_guard lock(nrOwnersMutex);
+    if (activeNrOwner == nullptr)
+        return;
+    activeNrOwner->CloseFinishedCaptures(throughSerial);
 }
 void ApplyToFinishedPictureDx11(IDXGISwapChain* swapchain)
 {

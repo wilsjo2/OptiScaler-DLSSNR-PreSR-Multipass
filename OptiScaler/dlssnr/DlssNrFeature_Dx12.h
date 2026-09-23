@@ -25,6 +25,25 @@ void ApplyToStreamlinePicture(IDXGISwapChain* swapchain, ID3D12Resource* picture
 void ApplyToFinishedPictureDx11(IDXGISwapChain* swapchain);
 void FinishedPictureColorSpace(IDXGISwapChain* swapchain, DXGI_COLOR_SPACE_TYPE colorSpace);
 
+// XeFG owned application-frame handoff (nr-xefg-088-release, todo 10). The Present-site
+// wiring in framegen/xefg/XeFG_Dx12.cpp drives these on the XeFG-retained application
+// queue (never State.currentCommandQueue): the capture facts are queried first, the
+// composition runs only after the handoff core (dlssnr/DlssNr_XeFGHandoff.h) accepted
+// the frame. Swapchain/buffer/colour-space queries must happen before these calls -
+// they take the NR locks (see ApplyToFinishedPicture for the ordering rule).
+struct XeFGCapture
+{
+    bool exists = false;    // a pending capture matches this finished picture
+    bool submitted = false; // its producer command list was executed
+    bool ready = false;     // same application queue, or its readiness fence completed
+    bool sameQueue = false; // the capture's producer queue is the application queue
+    uint64_t serial = 0;    // the pending capture's slot serial
+};
+bool XeFGPendingCapture(ID3D12Resource* picture, ID3D12CommandQueue* queue, DXGI_COLOR_SPACE_TYPE space,
+                        XeFGCapture& facts);
+bool ApplyXeFGPicture(ID3D12Resource* picture, ID3D12CommandQueue* queue, DXGI_COLOR_SPACE_TYPE space);
+void XeFGCloseCaptures(uint64_t throughSerial);
+
 std::string DeferredDlssStatus();
 // Outside DllMain only. Returns false rather than releasing a runtime with unresolved owners/work.
 bool Shutdown();
