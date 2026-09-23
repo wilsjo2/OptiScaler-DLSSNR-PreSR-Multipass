@@ -239,8 +239,17 @@ bool Config::Reload(std::filesystem::path iniPath)
         {
             FGXeFGInterpolationCount.set_from_config(readInt("XeFG", "InterpolationCount"));
             if (FGXeFGInterpolationCount.has_value() &&
-                (FGXeFGInterpolationCount.value() < 1 || FGXeFGInterpolationCount.value() > 3))
+                (FGXeFGInterpolationCount.value() < 1 || FGXeFGInterpolationCount.value() > XeFGMaxInterpolations))
                 FGXeFGInterpolationCount.reset();
+
+            FGXeFGUnlockEnabled.set_from_config(readBool("XeFG", "UnlockMFG"));
+            FGXeFGMaxInterpolatedFrames.set_from_config(readInt("XeFG", "MaxInterpolatedFrames"));
+            if (FGXeFGMaxInterpolatedFrames.has_value() &&
+                (FGXeFGMaxInterpolatedFrames.value() < 1 ||
+                 FGXeFGMaxInterpolatedFrames.value() > XeFGMaxInterpolations))
+                FGXeFGMaxInterpolatedFrames.reset();
+
+            FGXeFGExtraPacing.set_from_config(readBool("XeFG", "ExtraPacing"));
 
             FGXeFGIgnoreInitChecks.set_from_config(readBool("XeFG", "IgnoreInitChecks"));
             FGXeFGUIComposition.set_from_config(readBool("XeFG", "UIComposition"));
@@ -1133,6 +1142,10 @@ bool Config::SaveIni()
     {
         ini.SetValue("XeFG", "InterpolationCount",
                      GetIntValue(Instance()->FGXeFGInterpolationCount.value_for_config()).c_str());
+        ini.SetValue("XeFG", "UnlockMFG", GetBoolValue(Instance()->FGXeFGUnlockEnabled.value_for_config()).c_str());
+        ini.SetValue("XeFG", "MaxInterpolatedFrames",
+                     GetIntValue(Instance()->FGXeFGMaxInterpolatedFrames.value_for_config()).c_str());
+        ini.SetValue("XeFG", "ExtraPacing", GetBoolValue(Instance()->FGXeFGExtraPacing.value_for_config()).c_str());
         ini.SetValue("XeFG", "IgnoreInitChecks",
                      GetBoolValue(Instance()->FGXeFGIgnoreInitChecks.value_for_config()).c_str());
         ini.SetValue("XeFG", "UIComposition", GetBoolValue(Instance()->FGXeFGUIComposition.value_for_config()).c_str());

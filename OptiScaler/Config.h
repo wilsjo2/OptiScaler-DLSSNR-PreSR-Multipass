@@ -883,8 +883,36 @@ class Config
     CustomOptional<bool> FSRFGEnableWatermark { false };
 
     // XeFG
+    //
+    // A sanity bound, not a capability: it exists only so that a nonsense value
+    // in the ini cannot ask the provider for a million frames per real frame.
+    // 31 interpolations is a 32X multiplier, which is far past anything usable,
+    // so in practice this is not reached.
+    //
+    // It used to be 5, described as "the combo box offers 2X..6X" - which was
+    // circular, because that combo box is ours. The patch that raises the
+    // provider's reported maximum writes a 4 byte immediate, so the encoding has
+    // never been the limit; nothing in the XeFG path is. Whether the provider
+    // actually copes above 6X is a separate question, and untested.
+    static constexpr int32_t XeFGMaxInterpolations = 31;
+
     CustomOptional<bool> FGXeFGIgnoreInitChecks { false };
     CustomOptional<int> FGXeFGInterpolationCount { 1 };
+    CustomOptional<bool> FGXeFGUnlockEnabled { false };
+    // What the unlock patch reports to the provider as its maximum, and what
+    // the multiplier menu lets you pick. Those are not two settings: the number
+    // written into the U3/U4/U5 patches is read back as
+    // xefg_swapchain_properties_t::maxSupportedInterpolations, and
+    // XeFG_Dx12 fills xefg_swapchain_d3d12_init_params_t::maxInterpolatedFrames
+    // from it at swapchain init - so raising the menu ceiling necessarily
+    // declares the same number to the provider at init on every launch.
+    //
+    // It used to be 5, which is what capped the menu at 6X. Above 6X is
+    // untested: if the provider sizes anything from this at init, the symptom
+    // would be a failed init or exhausted VRAM, and the way back is to set
+    // XeFG\MaxInterpolatedFrames back to 5.
+    CustomOptional<int> FGXeFGMaxInterpolatedFrames { 5 };
+    CustomOptional<bool> FGXeFGExtraPacing { true };
     CustomOptional<bool> FGXeFGUIComposition { false };
     CustomOptional<bool> FGXeFGDepthInverted { true };
     CustomOptional<bool> FGXeFGJitteredMV { false };

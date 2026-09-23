@@ -928,10 +928,33 @@ bool XeFG_Dx12::Dispatch()
     else
         constData.resetHistory = false;
 
+    // xefg_swapchain.h documents frameRenderTime as "time that was required to
+    // render current frame in milliseconds", and the provider drives its generated
+    // frame pacing with it. Nothing fills _ftDelta on this backend though -
+    // SetFrameTimeDelta is only wired up for the FSR and Streamline paths.
+    //
+    // The fallback used to be state.lastFGFrameTime, the present to present delta
+    // (see FG_Hooks.cpp). That value brackets the whole of the previous present,
+    // the pacing included, so above 2X - where the provider really does space the
+    // generated frames - it is self-referential: the frames are asked to fill a
+    // period that only exists because they were asked to fill it, and the real
+    // frame period settles at renderTime * (count + 1) rather than coming down
+    // towards the time the game actually spends rendering. That is where the
+    // input latency came from. XeFGPacing measures its own blocking, so it can
+    // hand over the period with that taken back out; it returns 0 until it has
+    // seen a burst, and then the old value is still what gets used.
+    auto frameRenderTime = _ftDelta[fIndex];
+
+    if (!(frameRenderTime > 0.0))
+        frameRenderTime = XeFGPacing::RenderTimeMs();
+
+    if (!(frameRenderTime > 0.0))
+        frameRenderTime = state.lastFGFrameTime;
+
     switch (Config::Instance()->FTInput.value_or_default())
     {
     case FrameTimeSource::Input:
-        constData.frameRenderTime = (float) _ftDelta[fIndex];
+        constData.frameRenderTime = static_cast<float>(frameRenderTime);
         break;
 
     case FrameTimeSource::Opti:
@@ -943,8 +966,12 @@ bool XeFG_Dx12::Dispatch()
         break;
     }
 
-    LOG_DEBUG("Reset: {}, Opti FT: {}, Source FT: {}, Set FT: {}, Opti Id: {}, Reflex Id: {}", _reset[fIndex],
-              constData.frameRenderTime, _ftDelta[fIndex], constData.frameRenderTime, _frameCount,
+    // Report what the provider actually got, next to the period it came out of.
+    // The two numbers together are what says whether the loop above is real.
+    XeFGPacing::NoteFedFrameTime(constData.frameRenderTime);
+
+    LOG_DEBUG("Reset: {}, Input FT: {}, Opti FT: {}, Set FT: {} ms, Opti Id: {}, Reflex Id: {}", _reset[fIndex],
+              _ftDelta[fIndex], state.lastFGFrameTime, constData.frameRenderTime, _frameCount,
               State::Instance().reflexFrameId);
 
     auto frameId = static_cast<uint32_t>(willDispatchFrame);
