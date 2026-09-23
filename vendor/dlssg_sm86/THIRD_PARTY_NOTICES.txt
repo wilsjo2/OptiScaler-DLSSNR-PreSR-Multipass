@@ -1,0 +1,63 @@
+Helper libraries used by this project
+
+Project source follows the dlssg-to-fsr3 repository's GPLv3 license
+(LICENSE.md). The NVIDIA runtime DLL and extracted/recompiled NVIDIA kernel
+assets are separate third-party material from this user's local installation;
+they are not relicensed by LICENSE.md. The bundled runtime is an unmodified
+nvngx_dlssg.dll 310.1.0.0 with SHA256:
+c989c0ebd9cd21dbf3db0becd857aa1f218068d94da371d924331a6f0fb97525
+
+SM75 GPU assets: thank you to Coldwood1026 for the RTX 20-series / SM75 work.
+Repository: https://github.com/Coldwood1026/dlssg_for_sm75 (previous name:
+Coldwood1026/dlssg_for_sm86).
+Pinned source:
+https://github.com/Coldwood1026/dlssg_for_sm75/commit/c60c2aa363c7e66a523122aa5cec9c884658ad5f
+No CPU host from that binary is embedded. PTX container lengths, termination and
+alignment were repaired, and the PTX ISA declaration of the 33 image kernels was
+normalised from 8.7 to 8.5 (payload text and container field; no instruction
+text changed). Two families ship: assets/kernels/sm75 carries PTX with one
+further recorded rewrite (the f16x2 .local unpack repair) and cubins this project
+built from it with ptxas, while assets/kernels/sm75/original carries that
+repository's 72 sm_75 cubins byte for byte and its PTX with only the .version
+normalisation, selected by [Compatibility] SM75Family=Original so a Turing owner
+can A/B the repair. Those assets are themselves derivatives of NVIDIA kernel code
+and are third-party material in the same bucket as assets/runtime/nvngx_dlssg.dll:
+they are not relicensed by LICENSE.md. The per-file manifests with every source
+and imported SHA256 are assets/kernels/sm75/index.json and
+assets/kernels/sm75/original/index.json.
+
+DirectX helper header d3dx12.h
+Copyright (c) Microsoft Corporation. All rights reserved.
+SPDX-License-Identifier: MIT
+
+Microsoft Research Detours 4.0.1
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+JSON for Modern C++ 3.11.2
+Copyright (c) 2013-2022 Niels Lohmann
+SPDX-License-Identifier: MIT
+
+The following MIT notice applies to the helper libraries identified above.
+Their original attribution is also retained in third_party/detours/detours.h,
+third_party/json/json.h and third_party/directx/d3dx12.h. This license does not
+describe the NVIDIA runtime or extracted NVIDIA kernel assets.
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to
+do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

@@ -1859,9 +1859,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 #endif
 
         // Initial state of FG
-        State::Instance().activeFgInput = Config::Instance()->FGInput.value_or_default();
-        State::Instance().activeFgOutput = Config::Instance()->FGOutput.value_or_default();
-        State::Instance().activeFgNvngx = Config::Instance()->FGNvngxReplacement.value_or_default();
+        const bool externalFg = Config::Instance()->ExternalFrameGeneration.value_or_default();
+        State::Instance().activeFgInput = externalFg ? FGInput::NoFG : Config::Instance()->FGInput.value_or_default();
+        State::Instance().activeFgOutput =
+            externalFg ? FGOutput::NoFG : Config::Instance()->FGOutput.value_or_default();
+        State::Instance().activeFgNvngx =
+            externalFg ? FGNvngxReplacement::None : Config::Instance()->FGNvngxReplacement.value_or_default();
 
         // Ensure valid FG configuration
         if (State::Instance().activeFgInput != FGInput::NvngxFG && State::Instance().activeFgOutput != FGOutput::DLSSG)

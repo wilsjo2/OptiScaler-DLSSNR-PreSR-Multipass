@@ -867,8 +867,17 @@ class Config
     CustomOptional<bool> FGXeFGForceBorderless { false };
 
     // DLSSG
+    CustomOptional<bool> ExternalFrameGeneration {
+        false
+    }; // Leave Streamline/Reflex and native FG to the game or an external MFG unlocker
+    // Ampere/Turing (SM86/SM75) MFG unlocker - sideloads the bundled dlssg_sm86 payload
+    CustomOptional<bool> FGDLSSGAmpereMfgUnlock { false };
+    CustomOptional<int> FGDLSSGAmpereMfgMaxFrames { 3 }; // 1..5: 1=2X, 2=3X, 3=4X, 4=5X, 5=6X; clamped on load
+    CustomOptional<std::string, NoDefault> FGDLSSGAmpereMfgKernelImage; // Auto / PTX / Cubin
 #if defined(OPTISCALER_RTX40_MFG)
     CustomOptional<bool> FGDLSSGAdaMfgUnlock { false }; // RTX 40 only; restart required
+    CustomOptional<std::string, NoDefault> FGDLSSGAdaTemporalFix; // Auto / Retarget / Ptx
+    CustomOptional<bool> FGDLSSGAdaFlipMeteringPatch { false };   // pin sl.dlss_g to software frame pacing
 #endif
     CustomOptional<int> FGDLSSGInterpolationCount { 1 }; // For Opti's own SL instance
     CustomOptional<bool> FGDLSSGUseGamesReflexMarkers { true };

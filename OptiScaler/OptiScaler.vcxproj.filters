@@ -776,6 +776,12 @@
     <ClInclude Include="framegen\dlssg\MfgUnlock.h">
       <Filter>framegen</Filter>
     </ClInclude>
+    <ClInclude Include="framegen\dlssg\MfgUnlockFlip.h"><Filter>framegen</Filter></ClInclude>
+    <ClInclude Include="framegen\dlssg\MfgUnlockMethod.h"><Filter>framegen</Filter></ClInclude>
+    <ClInclude Include="framegen\dlssg\MfgUnlockPlugin.h"><Filter>framegen</Filter></ClInclude>
+    <ClInclude Include="framegen\dlssg\MfgUnlockProvider.h"><Filter>framegen</Filter></ClInclude>
+    <ClInclude Include="framegen\dlssg\MfgUnlockPtx.h"><Filter>framegen</Filter></ClInclude>
+    <ClInclude Include="framegen\dlssg\AmpereMfgLoader.h"><Filter>framegen</Filter></ClInclude>
     <ClInclude Include="framegen\dlssg\DLSSG_Dx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -1382,6 +1388,7 @@
     <ClCompile Include="framegen\dlssg\MfgUnlock.cpp">
       <Filter>framegen</Filter>
     </ClCompile>
+    <ClCompile Include="framegen\dlssg\AmpereMfgLoader.cpp"><Filter>framegen</Filter></ClCompile>
     <ClCompile Include="framegen\dlssg\DLSSG_Dx12.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

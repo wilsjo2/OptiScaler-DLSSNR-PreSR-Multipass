@@ -1,0 +1,72 @@
+{
+  "repo": "sdli1995/dlssg_for_sm86",
+  "release_tag": "0.3.5",
+  "release_assets": {
+    "present": false,
+    "note": "The 0.3.5 release tag carries no downloadable assets; the payload is fetched from the pinned commit tree instead."
+  },
+  "commit": "9621db573e07ed54f50c15bbb585ed9a7bdfac28",
+  "source_base_url": "https://raw.githubusercontent.com/sdli1995/dlssg_for_sm86/9621db573e07ed54f50c15bbb585ed9a7bdfac28",
+  "source_api_tree": "https://api.github.com/repos/sdli1995/dlssg_for_sm86/git/trees/9621db573e07ed54f50c15bbb585ed9a7bdfac28?recursive=1",
+  "fetch_date": "2026-09-22",
+  "fetch_timestamp_utc": "2026-09-22T06:58:12Z",
+  "staged_dir": "vendor/dlssg_sm86",
+  "bundled_name_candidate": "dlssg_sm86.dll",
+  "fallback": "version.dll",
+  "bundled_name": "dlssg_sm86.dll",
+  "bundled_name_note": "Decided by todo 2's explicit-load probe (tests/ampere_mfg_sidecar_harness.cpp; receipts in .omo/evidence/rtx2030-mfg-integration/02/). Renamed variant loaded cleanly (status=PayloadLoaded, role=1, identity=version.dll); original-name variant loaded cleanly (status=PayloadLoaded, role=1, identity=version.dll). The name that loaded cleanly by explicit absolute path with DlssgProxy_Role=1 (active) is shipped.",
+  "files": [
+    {
+      "name": "dlssg_sm86.dll",
+      "source_name": "version.dll",
+      "renamed": true,
+      "role": "payload module (proxy build); byte-identical to the upstream version.dll",
+      "url": "https://raw.githubusercontent.com/sdli1995/dlssg_for_sm86/9621db573e07ed54f50c15bbb585ed9a7bdfac28/version.dll",
+      "sha256": "c3934a09399f022504227c72df0bf8c0de55f9a08880dddde898c5262cefa838",
+      "bytes": 30021920
+    },
+    {
+      "name": "dlssg_sm86.ini",
+      "source_name": "dlssg_sm86.ini",
+      "renamed": false,
+      "role": "companion INI (factory release configuration)",
+      "url": "https://raw.githubusercontent.com/sdli1995/dlssg_for_sm86/9621db573e07ed54f50c15bbb585ed9a7bdfac28/dlssg_sm86.ini",
+      "sha256": "2616857ee29ec61e33c8b52e1b50f4c93cb5339adbb13b73f0ae71a722427a43",
+      "bytes": 3548
+    },
+    {
+      "name": "THIRD_PARTY_NOTICES.txt",
+      "source_name": "THIRD_PARTY_NOTICES.txt",
+      "renamed": false,
+      "role": "third-party notices (NVIDIA runtime/models, Coldwood1026 SM75 kernels)",
+      "url": "https://raw.githubusercontent.com/sdli1995/dlssg_for_sm86/9621db573e07ed54f50c15bbb585ed9a7bdfac28/THIRD_PARTY_NOTICES.txt",
+      "sha256": "ac3b44ab30a4235edd18feca1ab4f802d57c8d3d0ee4878dc77b81a6b127155f",
+      "bytes": 3349
+    }
+  ],
+  "not_downloaded": {
+    "note": "Listed in docs/rtx2030-payload-contract.md for reference only; NOT fetched and NOT in the repo.",
+    "alternatives": {
+      "d3d12.dll": 30021920,
+      "dbghelp.dll": 30039840,
+      "dinput8.dll": 30021408,
+      "dxgi.dll": 30021920,
+      "winmm.dll": 30033184
+    },
+    "runtime_variant_310_1": {
+      "version.dll": 27995424,
+      "alternatives/d3d12.dll": 27995424,
+      "alternatives/dbghelp.dll": 28013344,
+      "alternatives/dinput8.dll": 27994912,
+      "alternatives/dxgi.dll": 27995424,
+      "alternatives/winmm.dll": 28006688
+    }
+  },
+  "payload_identity": {
+    "signature_subject": "CN=DLSSG for SM86 (self-signed)",
+    "signature_thumbprint_sha1": "85BA66762F851E49148D706915D09026281418E6",
+    "authenticode_status": "UnknownError",
+    "authenticode_status_note": "Self-signed certificate, so the chain is untrusted on a stock Windows box; status UnknownError is expected and is not a tamper signal.",
+    "export_set": "version.dll's 17 exports + DlssgProxy_Name + DlssgProxy_Role (19 total)"
+  }
+}

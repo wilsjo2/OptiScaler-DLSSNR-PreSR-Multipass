@@ -68,6 +68,33 @@ bool Config::Reload(std::filesystem::path iniPath)
         // Frame Generation
         {
             FGEnabled.set_from_config(readBool("FrameGen", "Enabled"));
+            // The game, or an external MFG unlocker, owns frame generation: OptiScaler's own FG input/output step
+            // aside for this session. Startup-only.
+            ExternalFrameGeneration.set_from_config(readBool("FrameGen", "External"));
+
+            // RTX 20/30 (SM75/SM86) MFG unlock, served by the bundled dlssg_sm86 payload. Default off.
+            FGDLSSGAmpereMfgUnlock.set_from_config(readBool("DLSSG", "AmpereMfgUnlock"));
+            FGDLSSGAmpereMfgMaxFrames.set_from_config(readInt("DLSSG", "AmpereMfgMaxFrames"));
+
+            // The unlock advertises 2X..6X to the game: anything outside 1..5 is clamped into that range.
+            if (FGDLSSGAmpereMfgMaxFrames.has_value())
+                FGDLSSGAmpereMfgMaxFrames = std::clamp(FGDLSSGAmpereMfgMaxFrames.value(), 1, 5);
+
+            if (auto ampereKernel = readString("DLSSG", "AmpereMfgKernelImage"); ampereKernel.has_value())
+            {
+                if (lstrcmpiA(ampereKernel.value().c_str(), "ptx") == 0)
+                    FGDLSSGAmpereMfgKernelImage.set_from_config("PTX");
+                else if (lstrcmpiA(ampereKernel.value().c_str(), "cubin") == 0)
+                    FGDLSSGAmpereMfgKernelImage.set_from_config("Cubin");
+                else
+                    FGDLSSGAmpereMfgKernelImage.set_from_config("Auto");
+            }
+
+            // The unlock needs the game's own Streamline FG to own frame generation, so enabling it turns
+            // External FG mode on too; the save side keeps the two consistent (value || ampereUnlock).
+            if (FGDLSSGAmpereMfgUnlock.value_or_default())
+                ExternalFrameGeneration.set_from_config(true);
+
             FGDebugView.set_from_config(readBool("FrameGen", "DebugView"));
 
             if (auto FGInputString = readString("FrameGen", "FGInput"); FGInputString.has_value())
@@ -228,6 +255,18 @@ bool Config::Reload(std::filesystem::path iniPath)
         {
 #if defined(OPTISCALER_RTX40_MFG)
             FGDLSSGAdaMfgUnlock.set_from_config(readBool("DLSSG", "AdaMfgUnlock"));
+
+            if (auto adaFix = readString("DLSSG", "AdaTemporalFix"); adaFix.has_value())
+            {
+                if (lstrcmpiA(adaFix.value().c_str(), "retarget") == 0)
+                    FGDLSSGAdaTemporalFix.set_from_config("Retarget");
+                else if (lstrcmpiA(adaFix.value().c_str(), "ptx") == 0)
+                    FGDLSSGAdaTemporalFix.set_from_config("Ptx");
+                else
+                    FGDLSSGAdaTemporalFix.set_from_config("Auto");
+            }
+
+            FGDLSSGAdaFlipMeteringPatch.set_from_config(readBool("DLSSG", "AdaFlipMeteringPatch"));
 #endif
             FGDLSSGInterpolationCount.set_from_config(readInt("DLSSG", "InterpolationCount"));
             if (FGDLSSGInterpolationCount.has_value() &&
@@ -973,12 +1012,19 @@ bool Config::SaveIni()
 
     // Frame Generation
     {
+        bool ampereUnlock = Instance()->FGDLSSGAmpereMfgUnlock.value_for_config_or(false);
+
         ini.SetValue("FrameGen", "Enabled", GetBoolValue(Instance()->FGEnabled.value_for_config()).c_str());
+        ini.SetValue(
+            "FrameGen", "External",
+            GetBoolValue(Instance()->ExternalFrameGeneration.value_for_config_or(false) || ampereUnlock).c_str());
         // Discard settings from removed fork-only frame-generation extensions.
-        ini.Delete("FrameGen", "External");
-        for (const auto* key : { "AdaBlackwellKernels", "AmpereMfgUnlock", "AmpereMfgMaxFrames",
-                                "AmpereMfgKernelImage", "AmpereMfgHardwareBilinear" })
-            ini.Delete("DLSSG", key);
+        ini.Delete("DLSSG", "AdaBlackwellKernels");
+        ini.SetValue("DLSSG", "AmpereMfgUnlock", GetBoolValue(ampereUnlock).c_str());
+        ini.SetValue("DLSSG", "AmpereMfgMaxFrames",
+                     GetIntValue(Instance()->FGDLSSGAmpereMfgMaxFrames.value_for_config()).c_str());
+        ini.SetValue("DLSSG", "AmpereMfgKernelImage",
+                     Instance()->FGDLSSGAmpereMfgKernelImage.value_for_config_or("auto").c_str());
         ini.SetValue("FrameGen", "DebugView", GetBoolValue(Instance()->FGDebugView.value_for_config()).c_str());
         std::string FGInputString = "auto";
         if (auto FGInputHeld = Instance()->FGInput.value_for_config(); FGInputHeld.has_value())
@@ -1108,8 +1154,13 @@ bool Config::SaveIni()
     {
 #if defined(OPTISCALER_RTX40_MFG)
         ini.SetValue("DLSSG", "AdaMfgUnlock", GetBoolValue(Instance()->FGDLSSGAdaMfgUnlock.value_for_config()).c_str());
+        ini.SetValue("DLSSG", "AdaTemporalFix", Instance()->FGDLSSGAdaTemporalFix.value_for_config_or("auto").c_str());
+        ini.SetValue("DLSSG", "AdaFlipMeteringPatch",
+                     GetBoolValue(Instance()->FGDLSSGAdaFlipMeteringPatch.value_for_config()).c_str());
 #else
         ini.Delete("DLSSG", "AdaMfgUnlock");
+        ini.Delete("DLSSG", "AdaTemporalFix");
+        ini.Delete("DLSSG", "AdaFlipMeteringPatch");
 #endif
         ini.SetValue("DLSSG", "InterpolationCount",
                      GetIntValue(Instance()->FGDLSSGInterpolationCount.value_for_config()).c_str());

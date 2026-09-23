@@ -2,6 +2,7 @@
 
 #include "Streamline_Hooks.h"
 #if defined(OPTISCALER_RTX40_MFG)
+#include <framegen/dlssg/AmpereMfgLoader.h>
 #include <framegen/dlssg/MfgUnlock.h>
 #endif
 #include <dlssnr/DlssNr_StreamlinePicture.h>
@@ -109,6 +110,20 @@ void StreamlineHooks::streamlineLogCallback(sl::LogType type, const char* msg)
 sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVersion)
 {
     LOG_FUNC();
+
+#if defined(OPTISCALER_RTX40_MFG)
+    // Pre-slInit arming (RTX 20/30 SM75/SM86 unlock). Streamline 2.x decides "this platform does not support
+    // DLSS-G" inside slInit, so the payload and its companion INI have to be in place BEFORE the original is
+    // called (C2: docs/rtx2030-payload-contract.md "Arming order"). The call sits above every return in this
+    // function on purpose - the DLSSG branch further down returns early at the `return o_slInit(localPref,
+    // sdkVersion);` inside `if (State::Instance().activeFgInput == FGInput::DLSSG || ...)`, so an arming call
+    // placed after it would never run in the game-owned-FG modes this unlock is built for. Arm() is the single
+    // entry point: it reads the setting itself (off -> Disabled, no file work), latches once per process and
+    // reports named failures (PayloadMissing / IniWriteFailed / PayloadLoadFailed / PayloadStandby, C4/C5).
+    // No file I/O happens in DllMain: this is the game's own slInit call, and the GPU facts it needs come from
+    // the existing getGpuInfo worker's IdentifyGpu cache.
+    AmpereMfgLoader::Arm();
+#endif
 
     sl::Preferences localPref = pref;
 
@@ -1114,6 +1129,11 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
 
     newOptions.structVersion = newStructVer;
 
+#if defined(OPTISCALER_RTX40_MFG)
+    // What the game asked for, before any override. A struct too old to carry the field reads as 1 (2X).
+    const unsigned int requestedCount = newOptions.numFramesToGenerate;
+#endif
+
     auto& state = State::Instance();
 
     // Disable game's DLSSG when we are trying to create our own instance of DLSSG
@@ -1210,7 +1230,14 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
 
     state.dlssgLastSetMode = newOptions.mode;
 
-    return o_slDLSSGSetOptions(viewport, newOptions);
+    const auto result = o_slDLSSGSetOptions(viewport, newOptions);
+
+#if defined(OPTISCALER_RTX40_MFG)
+    MfgUnlock::RecordSetOptions(requestedCount, newOptions.numFramesToGenerate, newOptions.mode != sl::DLSSGMode::eOff,
+                                static_cast<unsigned int>(result));
+#endif
+
+    return result;
 }
 
 sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport, sl::DLSSGState& state,
@@ -1250,6 +1277,13 @@ sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport
         }
 
         State::Instance().dlssgGameDMFGSupported = newState.bIsDynamicMFGSupported == sl::eTrue;
+
+#if defined(OPTISCALER_RTX40_MFG)
+        // The real DLSS-G's count, unless our own frame generation stands in for it (it writes its own
+        // count further down).
+        if (State::Instance().activeFgInput != FGInput::DLSSG)
+            MfgUnlock::RecordState(newState.numFramesActuallyPresented);
+#endif
     }
     else
     {
@@ -1257,6 +1291,11 @@ sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport
         if (result != sl::Result::eOk)
             return result;
         State::Instance().dlssgGameDMFGSupported = state.bIsDynamicMFGSupported == sl::eTrue;
+
+#if defined(OPTISCALER_RTX40_MFG)
+        if (State::Instance().activeFgInput != FGInput::DLSSG)
+            MfgUnlock::RecordState(state.numFramesActuallyPresented);
+#endif
     }
 
 #if defined(OPTISCALER_RTX40_MFG)
@@ -1862,6 +1901,15 @@ void StreamlineHooks::unhookInterposer()
 // Call it just after sl.interposer's load or if sl.interposer is already loaded
 void StreamlineHooks::hookInterposer(HMODULE slInterposer)
 {
+    // Install audit (todo 6): EVERY path below must stay reachable in every frame-generation ownership mode,
+    // because this function is what installs the slInit detour (`DetourAttach(&(PVOID&) o_slInit, hkslInit)`
+    // below) that carries the pre-slInit arming call. The reference fork guards this whole function with
+    //     if (State::Instance().externalFrameGeneration) return;
+    // (wilsjo2/main:OptiScaler/hooks/Streamline_Hooks.cpp:1866-1867), which skips the install exactly in the
+    // External-FG-ownership mode the 20/30 unlock runs in: the hook would never be installed, Arm() would
+    // never run, and the payload would never reach the game's capability decision. That guard is deliberately
+    // NOT ported - there is no ownership-mode early return here, and tools/check_ampere_arming_seam.py fails
+    // the build-side check if one is ever introduced.
     LOG_FUNC();
 
     if (!slInterposer)
@@ -2143,6 +2191,11 @@ void StreamlineHooks::hookDlssg(HMODULE slDlssg)
         LOG_WARN("Dlssg module in NULL");
         return;
     }
+
+#if defined(OPTISCALER_RTX40_MFG)
+    // The game's copy or the driver's OTA one; both come through here.
+    MfgUnlock::OnStreamlinePluginLoaded(slDlssg);
+#endif
 
     if (o_dlssg_slGetPluginFunction)
         unhookDlssg();
