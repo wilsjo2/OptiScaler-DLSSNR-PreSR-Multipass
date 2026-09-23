@@ -9,4 +9,4 @@ inline bool FinishedInputReady(bool sameQueue, uint64_t completed, uint64_t requ
 {
     return completed != UINT64_MAX && (sameQueue || completed >= required);
 }
-}
+} // namespace DlssNr

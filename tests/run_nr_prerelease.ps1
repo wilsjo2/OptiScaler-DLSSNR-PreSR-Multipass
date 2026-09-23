@@ -26,6 +26,7 @@ try {
     RunSmoke 'nr_residual_rr_smoke' @('d3d11.lib', 'd3dcompiler.lib')
     RunSmoke 'nr_active_color_smoke' @('d3d12.lib', 'dxgi.lib')
     RunSmoke 'nr_finished_queue_smoke' @('d3d12.lib', 'dxgi.lib')
+    & "$PSScriptRoot/run_nr_spatial_smoke.ps1"
     RunSmoke 'nr_vulkan_shader_smoke' @('OptiScaler/library/vulkan/vulkan-1.lib') `
         @("$repo/OptiScaler/shaders/dlssnr/precompile/DlssNr_Shader_Vk.spv") `
         @('/IOptiScaler', '/Iexternal/vulkan/include', '/Iexternal/nvngx_dlss_sdk', '/Iexternal/spdlog/include')

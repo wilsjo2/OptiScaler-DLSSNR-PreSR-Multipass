@@ -1,4 +1,4 @@
-> **v0.8.7 prerelease:** [finished-picture queue safety fix and validation](docs/RELEASE-v0.8.7.md).
+> **v0.8.91 prerelease:** [compressed model input preview](docs/RELEASE-v0.8.91.md).
 
 <div align="center">
 
@@ -45,6 +45,8 @@ The [built-in RTX 40 MFG unlock](docs/RTX40-MFG.md) is an optional build feature
 Experimental NR adds pre/post-upscale and finished-picture processing, multipass tuning,
 model resolution, HDR/exposure controls and separate edit upscaling. It defaults off and
 uses a separately supplied `nvngx_dlssnr.dll` through the NVIDIA driver; no NR helper DLL.
+
+Optional [peripheral spatial compression](docs/NR-SPATIAL-COMPRESSION.md) reduces NR work near the screen edges while retaining more centre detail. It supports DX12 and native Vulkan and combines with Model resolution.
 
 See [installation](INSTALL-DLSSNR.md), [controls](docs/NR-PIPELINE-UI.md),
 [game tests and limits](docs/NR-UPSTREAM-REVIEW.md), [implementation](OptiScaler/dlssnr/README.md)

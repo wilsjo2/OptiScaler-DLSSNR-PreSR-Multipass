@@ -1252,6 +1252,9 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         }
     }
 
+    const bool xeFgGamePicture = state.activeFgOutput == FGOutput::XeFG &&
+                                 state.swapchainInteropApi == SwapchainInteropApi::None &&
+                                 This == state.currentFGSwapchain;
     if (willPresent && fgFeatureActive)
     {
         if (state.activeFgInput == FGInput::FSRFG)
@@ -1259,11 +1262,18 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         else if (state.activeFgInput == FGInput::FSRFG30)
             FSR3FG::ffxPresentCallback();
 
-        DlssNr::ApplyToFinishedPicture(This, state.currentCommandQueue);
+        // XeFG must receive NR on its app-facing buffer and initialization queue.
+        // The global queue may belong to XeFG's asynchronous display swapchain.
+        // Keep the readiness check: a different, unfinished NR producer is still skipped.
+        DlssNr::ApplyToFinishedPicture(This, xeFgGamePicture ? state.currentFG->GetCommandQueue()
+                                                             : state.currentCommandQueue);
         fg->Present();
     }
     else if (willPresent && fg != nullptr)
     {
+        // The proxy still owns the app buffers when interpolation is disabled or paused.
+        if (xeFgGamePicture)
+            DlssNr::ApplyToFinishedPicture(This, state.currentFG->GetCommandQueue());
         LOG_TRACE("FGHooks::FGPresent: FG feature exists but is inactive/paused; pass-through present only");
     }
 

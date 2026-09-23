@@ -4,8 +4,8 @@
 auto DlssNr_Dx12::State::SameHoldShape(const D3D12_RESOURCE_DESC& a, const D3D12_RESOURCE_DESC& b) -> bool
 {
     return a.Dimension == b.Dimension && a.Width == b.Width && a.Height == b.Height &&
-           a.DepthOrArraySize == b.DepthOrArraySize && a.MipLevels == b.MipLevels &&
-           a.Format == b.Format && a.SampleDesc.Count == b.SampleDesc.Count;
+           a.DepthOrArraySize == b.DepthOrArraySize && a.MipLevels == b.MipLevels && a.Format == b.Format &&
+           a.SampleDesc.Count == b.SampleDesc.Count;
 }
 
 auto DlssNr_Dx12::State::ReleaseInputHold() -> void
@@ -17,7 +17,7 @@ auto DlssNr_Dx12::State::ReleaseInputHold() -> void
 }
 
 auto DlssNr_Dx12::State::BeginInputHold(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* params,
-                        const D3D12_RESOURCE_STATES* states) -> void
+                                        const D3D12_RESOURCE_STATES* states) -> void
 {
     if (!cmd || !params)
         return;
@@ -25,8 +25,8 @@ auto DlssNr_Dx12::State::BeginInputHold(ID3D12GraphicsCommandList* cmd, NVSDK_NG
     const unsigned route = (cfg.DlssNrRunBeforeSr.value_or_default() ? 1u : 0u) |
                            (cfg.DlssNrDeferredDlss.value_or_default() ? 2u : 0u) |
                            (cfg.DlssNrFinishedPicture.value_or_default() ? 4u : 0u);
-    const bool requested = cfg.DlssNrEnabled.value_or_default() && cfg.DlssNrHoldFrame.value_or_default() &&
-                           (route & 3u) != 0;
+    const bool requested =
+        cfg.DlssNrEnabled.value_or_default() && cfg.DlssNrHoldFrame.value_or_default() && (route & 3u) != 0;
     if (!requested)
     {
         if (inputHold.active)
@@ -42,8 +42,8 @@ auto DlssNr_Dx12::State::BeginInputHold(ID3D12GraphicsCommandList* cmd, NVSDK_NG
     auto* output = GetResource(params, NVSDK_NGX_Parameter_Output, "DLSSD.Output");
     if (!output)
         return;
-    bool capture = !inputHold.active || inputHold.route != route ||
-                   !SameHoldShape(inputHold.outputDesc, output->GetDesc());
+    bool capture =
+        !inputHold.active || inputHold.route != route || !SameHoldShape(inputHold.outputDesc, output->GetDesc());
     for (size_t i = 0; i < inputHold.textures.size(); ++i)
     {
         const auto& saved = inputHold.textures[i];

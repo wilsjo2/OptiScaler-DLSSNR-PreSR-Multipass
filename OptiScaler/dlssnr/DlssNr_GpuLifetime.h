@@ -37,4 +37,4 @@ class GpuLifetime
     // Unsubmitted recordings and failed/removed-device fences remain unresolved.
     void FinishSubmitted();
 };
-}
+} // namespace DlssNr

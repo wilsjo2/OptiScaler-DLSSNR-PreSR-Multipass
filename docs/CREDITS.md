@@ -12,6 +12,12 @@ This variant restores the built-in [Ada MFG work and attribution](RTX40-MFG.md),
 
 The built-in RTX 40 multi frame generation unlock is adapted from [y4my4my4m's fork](https://github.com/y4my4my4m/OptiScaler_DLSSNR_Multipass_MFG) (GPL-3.0). The provider discovery, the Streamline plugin frame-ceiling patch, the software frame pacing option and the PTX temporal fix are adapted from [KleberMotta's fork](https://github.com/KleberMotta/OptiScaler-DLSS5-MFG-RTX40) (MIT), a port of the MFG Unlock ReShade addon by [Dreamt](https://github.com/ImDreamt/MFGAdaUnlock-RenoDx) and [mavismmg](https://github.com/mavismmg/MFGAdaUnlock-RenoDx). The technique originates from [dashdogy's RTX40MFG-Unlock](https://github.com/dashdogy/RTX40MFG-Unlock). See [RTX40-MFG.md](RTX40-MFG.md) and the [licences](../Licenses/MFGUnlock_LICENSE.txt).
 
+## Fork contributors
+
+- [Yuri Grib / @BeliyG3](https://github.com/BeliyG3) for the MIT-licensed peripheral spatial mapping adapted from [Optimizer FPS for DLSS5](https://github.com/BeliyG3/optimizer-fps-dlss5/tree/64902dd6a02460e5f6b778504ec2a4005faf4d9c). See [spatial compression](NR-SPATIAL-COMPRESSION.md) for integration details.
+
+- [@LorisPicariello](https://github.com/LorisPicariello) for investigating and testing RDR2's Finished Picture NR / OptiFG interaction, and for [PR #70](https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass/pull/70), which informed the rewritten finished-picture ordering and subsequent queue-safety work.
+
 ## OptiScaler contributors
 
 - @PotatoOfDoom for CyberFSR2.

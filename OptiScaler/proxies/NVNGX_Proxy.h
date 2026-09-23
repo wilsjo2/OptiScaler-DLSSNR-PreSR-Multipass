@@ -435,6 +435,7 @@ class NVNGXProxy
     class ScopedFeatureCreationTrace
     {
         bool previous = _traceFeatureCreation;
+
       public:
         ScopedFeatureCreationTrace() { _traceFeatureCreation = true; }
         ~ScopedFeatureCreationTrace() { _traceFeatureCreation = previous; }

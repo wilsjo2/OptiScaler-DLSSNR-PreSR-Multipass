@@ -13,7 +13,10 @@ constexpr unsigned int kMaxFrames = 8;
 // Consecutive before/after images, with completion tracked for every recorded copy.
 class FrameCapture
 {
-    struct Pair { DlssNr::ReadbackImage before, after; };
+    struct Pair
+    {
+        DlssNr::ReadbackImage before, after;
+    };
     struct Data
     {
         std::vector<Pair> pairs;
@@ -73,7 +76,9 @@ class FrameCapture
     }
     bool isActive() const { return wanted_ != 0; }
     void Submitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists)
-    { lifetime_.Submitted(queue, count, lists); }
+    {
+        lifetime_.Submitted(queue, count, lists);
+    }
     void ResetRecording(ID3D12CommandList* commands) { lifetime_.ResetRecording(commands); }
     void FinishSubmitted() { lifetime_.FinishSubmitted(); }
 
@@ -85,22 +90,27 @@ class FrameCapture
         if (!data_)
         {
             auto next = std::make_unique<Data>();
-            if (!next->Init(device, before, after, wanted_)) { release(); return; }
+            if (!next->Init(device, before, after, wanted_))
+            {
+                release();
+                return;
+            }
             data_ = std::move(next);
         }
         auto& pair = data_->pairs[data_->recorded];
         if (!Matches(pair.before, before) || !Matches(pair.after, after))
         {
             const auto retry = wanted_;
-            release(); request(retry);
+            release();
+            request(retry);
             return;
         }
         lifetime_.Record(cmd);
         pair.before.Copy(cmd, before, beforeState);
         pair.after.Copy(cmd, after, afterState);
         cmd->EndQuery(data_->query.Get(), D3D12_QUERY_TYPE_TIMESTAMP, data_->recorded);
-        cmd->ResolveQueryData(data_->query.Get(), D3D12_QUERY_TYPE_TIMESTAMP, data_->recorded, 1,
-                              data_->stamps.Get(), data_->recorded * sizeof(UINT64));
+        cmd->ResolveQueryData(data_->query.Get(), D3D12_QUERY_TYPE_TIMESTAMP, data_->recorded, 1, data_->stamps.Get(),
+                              data_->recorded * sizeof(UINT64));
         ++data_->recorded;
     }
 
@@ -111,7 +121,8 @@ class FrameCapture
         if (!data_->AllSubmitted())
         {
             const auto retry = wanted_;
-            release(); request(retry);
+            release();
+            request(retry);
             return {};
         }
         std::error_code error;
@@ -155,4 +166,4 @@ class FrameCapture
         wanted_ = 0;
     }
 };
-}
+} // namespace capture

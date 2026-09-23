@@ -332,6 +332,18 @@ class Config
     // Model width/height scale; composition remains at the input size.
     CustomOptional<float> DlssNrWorkingScale { 1.0f };
 
+    CustomOptional<bool> DlssNrSpatialCompression { false };
+    CustomOptional<float> DlssNrSpatialCenterX { 80.0f };
+    CustomOptional<float> DlssNrSpatialCenterY { 80.0f };
+    CustomOptional<float> DlssNrSpatialWorkX { 90.0f };
+    CustomOptional<float> DlssNrSpatialWorkY { 90.0f };
+    CustomOptional<float> DlssNrSpatialOffsetX { 0.0f };
+    CustomOptional<float> DlssNrSpatialOffsetY { 0.0f };
+    CustomOptional<float> DlssNrSpatialShiftX { 0.0f };
+    CustomOptional<float> DlssNrSpatialShiftY { 0.0f };
+    CustomOptional<bool> DlssNrSpatialShowCenter { false };
+    CustomOptional<bool> DlssNrSpatialShowWork { false };
+
     // Independent downsampling filter for NR model scales above 100%.
     CustomOptional<Scaler> DlssNrScalingDownscaler { Scaler::Lanczos3 };
 
@@ -702,7 +714,7 @@ class Config
 
     // DLSSG
 #if defined(OPTISCALER_RTX40_MFG)
-    CustomOptional<bool> FGDLSSGAdaMfgUnlock { false }; // RTX 40 only; restart required
+    CustomOptional<bool> FGDLSSGAdaMfgUnlock { false };           // RTX 40 only; restart required
     CustomOptional<std::string, NoDefault> FGDLSSGAdaTemporalFix; // Auto / Retarget / Ptx
     CustomOptional<bool> FGDLSSGAdaFlipMeteringPatch { false };   // pin sl.dlss_g to software frame pacing
 #endif

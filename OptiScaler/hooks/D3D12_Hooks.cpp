@@ -1894,8 +1894,8 @@ static HRESULT hkCreateCommittedResource(ID3D12Device* device, const D3D12_HEAP_
         }
     }
 
-    return o_CreateCommittedResource(device, pHeapProperties, HeapFlags, pDesc,
-                                     InitialResourceState, pOptimizedClearValue, riidResource, ppvResource);
+    return o_CreateCommittedResource(device, pHeapProperties, HeapFlags, pDesc, InitialResourceState,
+                                     pOptimizedClearValue, riidResource, ppvResource);
 }
 
 static bool skipPlacedResource = false;
@@ -1924,8 +1924,8 @@ static HRESULT hkCreatePlacedResource(ID3D12Device* device, ID3D12Heap* pHeap, U
         }
     }
 
-    return o_CreatePlacedResource(device, pHeap, HeapOffset, pDesc, InitialState,
-                                  pOptimizedClearValue, riid, ppvResource);
+    return o_CreatePlacedResource(device, pHeap, HeapOffset, pDesc, InitialState, pOptimizedClearValue, riid,
+                                  ppvResource);
 }
 
 VALIDATE_HOOK(hkSetResidencyPriority, PFN_SetResidencyPriority)

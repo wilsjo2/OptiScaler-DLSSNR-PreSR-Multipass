@@ -42,4 +42,4 @@ inline void SetModelRegions(NVSDK_NGX_Parameter* params, GuideExtent size, const
     params->Set("DLSSNR.MVecSubrectWidth", guides.motion.width);
     params->Set("DLSSNR.MVecSubrectHeight", guides.motion.height);
 }
-}
+} // namespace DlssNr

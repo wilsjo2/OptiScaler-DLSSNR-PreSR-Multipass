@@ -92,13 +92,27 @@ inline void Draw(const View& view, Section& selected)
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     const float width = std::max(ImGui::GetContentRegionAvail().x, 1.0f);
     const float gap = ImGui::GetFontSize() * 1.5f;
-    const bool split = view.enabled && (view.route == Route::Deferred ||
-                                        view.route == Route::FinishedBefore);
+    const bool split = view.enabled && (view.route == Route::Deferred || view.route == Route::FinishedBefore);
     const bool finished = view.route == Route::Finished || view.route == Route::FinishedBefore;
     const float nodeWidth =
         split ? std::max((width - gap) * 0.5f, 1.0f) : std::min(width, ImGui::GetFontSize() * 27.0f);
-    enum Stage { GameInput, Upscale, Effects, Prepare, Model, Apply, Enlarge, GameOutput };
-    struct Label { const char* title; std::string detail; int section = -1; };
+    enum Stage
+    {
+        GameInput,
+        Upscale,
+        Effects,
+        Prepare,
+        Model,
+        Apply,
+        Enlarge,
+        GameOutput
+    };
+    struct Label
+    {
+        const char* title;
+        std::string detail;
+        int section = -1;
+    };
     const Label labels[] = {
         { "Game input", "Placement / routing", (int) Section::Placement },
         { view.rayReconstruction ? "RR + Super Resolution" : "Super Resolution",
@@ -111,12 +125,19 @@ inline void Draw(const View& view, Section& selected)
         { "Game output", "FG / presentation" }
     };
     // Parents encode the two branches directly; ordinary routes are simple ordered stages.
-    struct Node { Stage stage; int lane, row, parent, otherParent = -1; };
+    struct Node
+    {
+        Stage stage;
+        int lane, row, parent, otherParent = -1;
+    };
     std::vector<Node> nodes;
     if (split)
     {
-        nodes = { { GameInput, 0, 0, -1 }, { Prepare, -1, 1, 0 }, { Model, -1, 2, 1 },
-                  { Enlarge, -1, 3, 2 }, { Upscale, 1, 1, 0 } };
+        nodes = { { GameInput, 0, 0, -1 },
+                  { Prepare, -1, 1, 0 },
+                  { Model, -1, 2, 1 },
+                  { Enlarge, -1, 3, 2 },
+                  { Upscale, 1, 1, 0 } };
         if (finished)
             nodes.push_back({ Effects, 1, 2, 4 });
         nodes.push_back({ Apply, 0, 4, 3, (int) nodes.size() - 1 });
@@ -149,7 +170,7 @@ inline void Draw(const View& view, Section& selected)
     {
         const auto& label = labels[node.stage];
         height = std::max(height, ImGui::CalcTextSize(label.title, nullptr, false, wrapWidth).y +
-                                 ImGui::CalcTextSize(label.detail.c_str(), nullptr, false, wrapWidth).y + 12.0f);
+                                      ImGui::CalcTextSize(label.detail.c_str(), nullptr, false, wrapWidth).y + 12.0f);
     }
     const float step = height + gap;
     const auto topLeft = [&](int index)
@@ -161,17 +182,18 @@ inline void Draw(const View& view, Section& selected)
     auto* draw = ImGui::GetWindowDrawList();
     const ImU32 lineColour = ImGui::GetColorU32(ImGuiCol_TextDisabled);
     for (int i = 0; i < (int) nodes.size(); ++i)
-    for (int parent : { nodes[i].parent, nodes[i].otherParent })
-    {
-        if (parent < 0) continue;
-        const auto a = topLeft(parent), b = topLeft(i);
-        const ImVec2 start(a.x + nodeWidth * 0.5f, a.y + height), end(b.x + nodeWidth * 0.5f, b.y);
-        const float bend = end.y - gap * 0.5f;
-        draw->AddLine(start, ImVec2(start.x, bend), lineColour, 1.5f);
-        draw->AddLine(ImVec2(start.x, bend), ImVec2(end.x, bend), lineColour, 1.5f);
-        draw->AddLine(ImVec2(end.x, bend), end, lineColour, 1.5f);
-        draw->AddTriangleFilled(end, ImVec2(end.x - 3, end.y - 5), ImVec2(end.x + 3, end.y - 5), lineColour);
-    }
+        for (int parent : { nodes[i].parent, nodes[i].otherParent })
+        {
+            if (parent < 0)
+                continue;
+            const auto a = topLeft(parent), b = topLeft(i);
+            const ImVec2 start(a.x + nodeWidth * 0.5f, a.y + height), end(b.x + nodeWidth * 0.5f, b.y);
+            const float bend = end.y - gap * 0.5f;
+            draw->AddLine(start, ImVec2(start.x, bend), lineColour, 1.5f);
+            draw->AddLine(ImVec2(start.x, bend), ImVec2(end.x, bend), lineColour, 1.5f);
+            draw->AddLine(ImVec2(end.x, bend), end, lineColour, 1.5f);
+            draw->AddTriangleFilled(end, ImVec2(end.x - 3, end.y - 5), ImVec2(end.x + 3, end.y - 5), lineColour);
+        }
     for (int i = 0; i < (int) nodes.size(); ++i)
     {
         const auto& label = labels[nodes[i].stage];

@@ -17,18 +17,20 @@ namespace DlssNr
 namespace
 {
 // NGX RR keys from NVIDIA's nvsdk_ngx_defs_dlssd.h; no additional runtime or SDK dependency.
-constexpr const char* rrKeys[] = { "DLSS.Input.DiffuseAlbedo", "DLSS.Input.SpecularAlbedo",
-    "GBuffer.Normals", "GBuffer.Roughness", "MotionVectorsReflection",
-    "DLSSD.SpecularHitDistance", "DLSSD.DiffuseHitDistance" };
-constexpr const char* rrOffsetPrefixes[] = { "DLSS.Input.DiffuseAlbedo", "DLSS.Input.SpecularAlbedo",
-    "DLSS.Input.Normals", "DLSS.Input.Roughness", nullptr,
-    "DLSSD.SpecularHitDistance", "DLSSD.DiffuseHitDistance" };
-}
+constexpr const char* rrKeys[] = { "DLSS.Input.DiffuseAlbedo", "DLSS.Input.SpecularAlbedo", "GBuffer.Normals",
+                                   "GBuffer.Roughness",        "MotionVectorsReflection",   "DLSSD.SpecularHitDistance",
+                                   "DLSSD.DiffuseHitDistance" };
+constexpr const char* rrOffsetPrefixes[] = {
+    "DLSS.Input.DiffuseAlbedo",  "DLSS.Input.SpecularAlbedo", "DLSS.Input.Normals", "DLSS.Input.Roughness", nullptr,
+    "DLSSD.SpecularHitDistance", "DLSSD.DiffuseHitDistance"
+};
+} // namespace
 
 PrivateRrInputsDx12 PrivateUpscalerDx12::ReadRrInputs(NVSDK_NGX_Parameter* source, unsigned width, unsigned height)
 {
     PrivateRrInputsDx12 result;
-    if (!source) return result;
+    if (!source)
+        return result;
     source->Get("DLSS.Roughness.Mode", &result.roughnessMode);
     source->Get("DLSS.Use.HW.Depth", &result.hardwareDepth);
     for (unsigned i = 0; i < result.guides.size(); ++i)
@@ -61,13 +63,13 @@ PrivateRrInputsDx12 PrivateUpscalerDx12::ReadRrInputs(NVSDK_NGX_Parameter* sourc
     {
         std::memcpy(result.worldToView.data(), world, sizeof(result.worldToView));
         std::memcpy(result.viewToClip.data(), view, sizeof(result.viewToClip));
-        result.matrices = std::all_of(result.worldToView.begin(), result.worldToView.end(),
-                                      [](float v) { return std::isfinite(v); }) &&
-                          std::all_of(result.viewToClip.begin(), result.viewToClip.end(),
-                                      [](float v) { return std::isfinite(v); });
+        result.matrices =
+            std::all_of(result.worldToView.begin(), result.worldToView.end(),
+                        [](float v) { return std::isfinite(v); }) &&
+            std::all_of(result.viewToClip.begin(), result.viewToClip.end(), [](float v) { return std::isfinite(v); });
     }
-    result.valid = result.roughnessMode <= 1 && result.hardwareDepth <= 1 &&
-                   result.guides[0].resource && result.guides[1].resource && result.guides[2].resource &&
+    result.valid = result.roughnessMode <= 1 && result.hardwareDepth <= 1 && result.guides[0].resource &&
+                   result.guides[1].resource && result.guides[2].resource &&
                    (result.roughnessMode == 1 || result.guides[3].resource) &&
                    (result.guides[4].resource || (result.guides[5].resource && result.matrices));
     return result;
@@ -91,7 +93,7 @@ struct PrivateUpscalerDx12::Impl
     bool NgxError(const char* operation, NVSDK_NGX_Result result)
     {
         char message[96];
-        std::snprintf(message, sizeof(message), "%s returned 0x%08X", operation, (unsigned)result);
+        std::snprintf(message, sizeof(message), "%s returned 0x%08X", operation, (unsigned) result);
         error = message;
         return false;
     }
@@ -110,10 +112,8 @@ struct PrivateUpscalerDx12::Impl
     // Camera values have already been resolved and snapshotted by the NR seam.
     template <class Dispatch> void FrameParameters(Dispatch& d, const PrivateUpscalerFrameDx12& f)
     {
-        d.jitterOffset = { f.jitterX,
-                           f.jitterY };
-        d.motionVectorScale = { f.motionScaleX,
-                                f.motionScaleY };
+        d.jitterOffset = { f.jitterX, f.jitterY };
+        d.motionVectorScale = { f.motionScaleX, f.motionScaleY };
         d.renderSize = { width, height };
         d.frameTimeDelta = std::max(f.frameTimeMs, 0.01f);
         d.preExposure = 1.0f;
@@ -166,8 +166,13 @@ struct PrivateUpscalerDx12::Impl
                 return false;
             }
             const auto allocated = NVNGXProxy::D3D12_AllocateParameters()(&parameters);
-            if (allocated != NVSDK_NGX_Result_Success) return NgxError("AllocateParameters", allocated);
-            if (!parameters) { error = "AllocateParameters returned no parameter table"; return false; }
+            if (allocated != NVSDK_NGX_Result_Success)
+                return NgxError("AllocateParameters", allocated);
+            if (!parameters)
+            {
+                error = "AllocateParameters returned no parameter table";
+                return false;
+            }
             auto* p = parameters;
             p->Set(NVSDK_NGX_Parameter_Width, width);
             p->Set(NVSDK_NGX_Parameter_Height, height);
@@ -197,10 +202,15 @@ struct PrivateUpscalerDx12::Impl
             ScopedSkipHeapCapture skipHeapCapture {};
             NVNGXProxy::ScopedFeatureCreationTrace trace;
             const auto created = NVNGXProxy::D3D12_CreateFeature()(
-                cmd, rayReconstruction ? NVSDK_NGX_Feature_RayReconstruction : NVSDK_NGX_Feature_SuperSampling,
-                p, &feature);
-            if (created != NVSDK_NGX_Result_Success) return NgxError("CreateFeature", created);
-            if (!feature) { error = "CreateFeature returned no feature handle"; return false; }
+                cmd, rayReconstruction ? NVSDK_NGX_Feature_RayReconstruction : NVSDK_NGX_Feature_SuperSampling, p,
+                &feature);
+            if (created != NVSDK_NGX_Result_Success)
+                return NgxError("CreateFeature", created);
+            if (!feature)
+            {
+                error = "CreateFeature returned no feature handle";
+                return false;
+            }
             return true;
         }
         ScopedSkipSpoofingGlobal skipSpoofing {};
@@ -301,20 +311,24 @@ struct PrivateUpscalerDx12::Impl
         auto* depth = f.depth.resource;
         auto* motion = f.motion.resource;
         auto* exposure = f.exposure.resource;
-        if (!color || !output || !depth || !motion || !exposure ||
-            f.width != width || f.height != height || f.outputWidth != outWidth || f.outputHeight != outHeight)
+        if (!color || !output || !depth || !motion || !exposure || f.width != width || f.height != height ||
+            f.outputWidth != outWidth || f.outputHeight != outHeight)
             return false;
-        if (rayReconstruction && (!f.rr.valid || f.rr.roughnessMode != roughnessMode ||
-                                   f.rr.hardwareDepth != hardwareDepth)) return false;
+        if (rayReconstruction &&
+            (!f.rr.valid || f.rr.roughnessMode != roughnessMode || f.rr.hardwareDepth != hardwareDepth))
+            return false;
         std::vector<PrivateUpscalerResourceDx12> inputs;
         auto addInput = [&](PrivateUpscalerResourceDx12 input)
         {
             if (input.resource && std::none_of(inputs.begin(), inputs.end(),
-                    [&](auto existing) { return existing.resource == input.resource; })) inputs.push_back(input);
+                                               [&](auto existing) { return existing.resource == input.resource; }))
+                inputs.push_back(input);
         };
-        for (auto input : { f.color, f.depth, f.motion, f.exposure }) addInput(input);
+        for (auto input : { f.color, f.depth, f.motion, f.exposure })
+            addInput(input);
         if (rayReconstruction)
-            for (auto input : f.rr.guides) addInput(input);
+            for (auto input : f.rr.guides)
+                addInput(input);
         for (auto input : inputs)
             Barrier(cmd, input.resource, input.state, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         Barrier(cmd, output, f.output.state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -349,12 +363,13 @@ struct PrivateUpscalerDx12::Impl
                         p->Set((std::string(rrOffsetPrefixes[i]) + ".Subrect.Base.Y").c_str(), f.rr.baseY[i]);
                     }
                 }
-                p->Set("WorldToViewMatrix", f.rr.matrices ? (void*)f.rr.worldToView.data() : nullptr);
-                p->Set("ViewToClipMatrix", f.rr.matrices ? (void*)f.rr.viewToClip.data() : nullptr);
+                p->Set("WorldToViewMatrix", f.rr.matrices ? (void*) f.rr.worldToView.data() : nullptr);
+                p->Set("ViewToClipMatrix", f.rr.matrices ? (void*) f.rr.viewToClip.data() : nullptr);
             }
             const auto evaluated = NVNGXProxy::D3D12_EvaluateFeature()(cmd, feature, p, nullptr);
             result = evaluated == NVSDK_NGX_Result_Success;
-            if (!result) NgxError("EvaluateFeature", evaluated);
+            if (!result)
+                NgxError("EvaluateFeature", evaluated);
         }
         else if (backend == PrivateUpscaler::FSR22 && fsr2Ready)
         {
@@ -396,10 +411,8 @@ struct PrivateUpscalerDx12::Impl
             d.jitterOffsetY = f.jitterY;
             d.resetHistory = f.reset;
             d.exposureScale = 1.0f;
-            result =
-                XeSSProxy::SetVelocityScale()(xess, f.motionScaleX,
-                                              f.motionScaleY) == XESS_RESULT_SUCCESS &&
-                XeSSProxy::D3D12Execute()(xess, cmd, &d) == XESS_RESULT_SUCCESS;
+            result = XeSSProxy::SetVelocityScale()(xess, f.motionScaleX, f.motionScaleY) == XESS_RESULT_SUCCESS &&
+                     XeSSProxy::D3D12Execute()(xess, cmd, &d) == XESS_RESULT_SUCCESS;
         }
         Barrier(cmd, output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, f.output.state);
         for (auto input : inputs)
@@ -419,7 +432,7 @@ const char* PrivateUpscalerDx12::Name() const
 }
 const std::string& PrivateUpscalerDx12::Error() const { return impl->error; }
 bool PrivateUpscalerDx12::Init(ID3D12Device* device, ID3D12GraphicsCommandList* cmd,
-                                const PrivateUpscalerCreateDx12& info)
+                               const PrivateUpscalerCreateDx12& info)
 {
     return impl->Init(device, cmd, info);
 }

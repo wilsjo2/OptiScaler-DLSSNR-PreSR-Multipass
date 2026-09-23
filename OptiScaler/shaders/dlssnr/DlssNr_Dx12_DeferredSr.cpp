@@ -22,11 +22,12 @@ auto DlssNr_Dx12::State::DeferredSrContext::RetireCurrent() -> void
         return;
     auto* retired = current.release();
     ++retiredCount;
-    lifetime.Retire([this, retired]
-    {
-        delete retired;
-        --retiredCount;
-    });
+    lifetime.Retire(
+        [this, retired]
+        {
+            delete retired;
+            --retiredCount;
+        });
     lifetime.BeginGeneration();
 }
 
@@ -60,10 +61,11 @@ auto DlssNr_Dx12::State::DeferredSrContext::Allocate(Generation& g) -> bool
         for (auto& history : g.accumulatedEdit)
         {
             history = owner.CreateScratch(g.device, DXGI_FORMAT_R32G32B32A32_FLOAT, g.w, g.h);
-            if (!history) return false;
+            if (!history)
+                return false;
         }
-        LOG_INFO("DLSS-NR: motion-reprojected RR residual accumulation enabled at {}x{} before private upscaling",
-                 g.w, g.h);
+        LOG_INFO("DLSS-NR: motion-reprojected RR residual accumulation enabled at {}x{} before private upscaling", g.w,
+                 g.h);
     }
     g.codec = std::make_unique<DlssNr_Dx12>("Deferred NR contribution", g.device);
     if (!g.codec->IsInit())
@@ -75,9 +77,8 @@ auto DlssNr_Dx12::State::DeferredSrContext::Allocate(Generation& g) -> bool
         return false;
     auto heap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_READBACK);
     auto desc = CD3DX12_RESOURCE_DESC::Buffer(MarkerCount * sizeof(UINT64));
-    if (FAILED(g.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-                                                 D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                                 IID_PPV_ARGS(&g.readback))))
+    if (FAILED(g.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                 nullptr, IID_PPV_ARGS(&g.readback))))
         return false;
     void* mapped = nullptr;
     if (FAILED(g.readback->Map(0, nullptr, &mapped)))
@@ -88,14 +89,15 @@ auto DlssNr_Dx12::State::DeferredSrContext::Allocate(Generation& g) -> bool
     return true;
 }
 
-auto DlssNr_Dx12::State::DeferredSrContext::Before(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source, unsigned long long epoch,
-                    unsigned long long submittedEpoch, ID3D12CommandQueue* queue, bool interop, bool rayReconstruction) -> void
+auto DlssNr_Dx12::State::DeferredSrContext::Before(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source,
+                                                   unsigned long long epoch, unsigned long long submittedEpoch,
+                                                   ID3D12CommandQueue* queue, bool interop, bool rayReconstruction)
+    -> void
 {
     if (pending.cmd && current)
     {
-        LOG_DEBUG(
-            "DLSS-NR deferred: Before entry with a stale pending (previous After never ran) -> reset. epoch {}",
-            epoch);
+        LOG_DEBUG("DLSS-NR deferred: Before entry with a stale pending (previous After never ran) -> reset. epoch {}",
+                  epoch);
         current->reset = true; // abandoned/failed main SR call
     }
     pending = {};
@@ -107,16 +109,15 @@ auto DlssNr_Dx12::State::DeferredSrContext::Before(ID3D12GraphicsCommandList* cm
         {
             if (!state.pending.cmd && state.current)
             {
-                LOG_DEBUG("DLSS-NR deferred: Before returned without arming a seam; reset history. epoch {}",
-                          epoch);
+                LOG_DEBUG("DLSS-NR deferred: Before returned without arming a seam; reset history. epoch {}", epoch);
                 state.current->reset = true;
             }
         }
     } resetOnGap { *this, epoch };
     lifetime.Collect();
     const auto& cfg = *Config::Instance();
-    if (cfg.DlssNrDebugView.value_or_default() != 0 ||
-        cfg.DlssNrCompare.value_or_default() != 0 || cfg.DlssNrShowSkinMask.value_or_default() ||
+    if (cfg.DlssNrDebugView.value_or_default() != 0 || cfg.DlssNrCompare.value_or_default() != 0 ||
+        cfg.DlssNrShowSkinMask.value_or_default() ||
         (!cfg.DlssNrApplyModel.value_or_default() && !cfg.DlssNrFinishedPicture.value_or_default()))
     {
         Say("Disable Debug/Compare and enable Apply model.");
@@ -139,12 +140,10 @@ auto DlssNr_Dx12::State::DeferredSrContext::Before(ID3D12GraphicsCommandList* cm
         return;
     }
     for (const char* key :
-         { NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_X,
-           NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_Y,
-           NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X,
-           NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y, NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_X,
-           NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_Y, NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_X,
-           NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_Y })
+         { NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_X, NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_Y,
+           NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X, NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y,
+           NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_X, NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_Y,
+           NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_X, NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_Y })
         if (UInt(source, key) != 0)
         {
             Say("inactive: non-zero colour/guide/output offsets");
@@ -154,8 +153,8 @@ auto DlssNr_Dx12::State::DeferredSrContext::Before(ID3D12GraphicsCommandList* cm
     const auto active =
         DlssNr::PreSrColorExtent(inDesc, UInt(source, NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width),
                                  UInt(source, NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height));
-    if (!active || !DlssNr::PreSrColorExtent(outDesc, 0, 0) || inDesc.MipLevels != 1 ||
-        active->width > outDesc.Width || active->height > outDesc.Height)
+    if (!active || !DlssNr::PreSrColorExtent(outDesc, 0, 0) || inDesc.MipLevels != 1 || active->width > outDesc.Width ||
+        active->height > outDesc.Height)
     {
         Say("inactive: unsupported active input/output dimensions");
         return;
@@ -175,27 +174,25 @@ auto DlssNr_Dx12::State::DeferredSrContext::Before(ID3D12GraphicsCommandList* cm
         return;
     }
     queueDevice->Release();
-    unsigned flags = (owner.featureFlags ? owner.featureFlags
-                                         : UInt(source, NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags)) &
-                     (NVSDK_NGX_DLSS_Feature_Flags_DepthInverted | NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
-                      NVSDK_NGX_DLSS_Feature_Flags_MVJittered);
+    unsigned flags =
+        (owner.featureFlags ? owner.featureFlags : UInt(source, NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags)) &
+        (NVSDK_NGX_DLSS_Feature_Flags_DepthInverted | NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
+         NVSDK_NGX_DLSS_Feature_Flags_MVJittered);
     const auto backend = DlssNr::GetPrivateUpscaler(cfg.DlssNrPrivateUpscaler.value_or_default());
     // Only native DX12 RR parameters contain DX12 material/reflection guides. Bridges
     // do not transfer these resources, so keep their existing private SR backend.
     auto rrInputs = backend == DlssNr::PrivateUpscaler::DLSS && rayReconstruction && !interop
-        ? DlssNr::PrivateUpscalerDx12::ReadRrInputs(source, active->width, active->height)
-        : DlssNr::PrivateRrInputsDx12 {};
+                        ? DlssNr::PrivateUpscalerDx12::ReadRrInputs(source, active->width, active->height)
+                        : DlssNr::PrivateRrInputsDx12 {};
     const bool privateRr = rrInputs.valid;
-    if (current && (current->rayReconstruction != rayReconstruction ||
-                    current->privateRr != privateRr ||
-                    (privateRr && (current->frame.rr.roughnessMode != rrInputs.roughnessMode ||
-                                   current->frame.rr.hardwareDepth != rrInputs.hardwareDepth)) ||
-                    current->finishedPicture != cfg.DlssNrFinishedPicture.value_or_default() ||
-                    current->backend != backend || current->device != device || current->queue != ownerQueue ||
-                    current->w != active->width ||
-                    current->h != active->height || current->outW != outDesc.Width ||
-                    current->outH != outDesc.Height || current->inputFormat != inDesc.Format ||
-                    current->outputFormat != outDesc.Format || current->flags != flags))
+    if (current &&
+        (current->rayReconstruction != rayReconstruction || current->privateRr != privateRr ||
+         (privateRr && (current->frame.rr.roughnessMode != rrInputs.roughnessMode ||
+                        current->frame.rr.hardwareDepth != rrInputs.hardwareDepth)) ||
+         current->finishedPicture != cfg.DlssNrFinishedPicture.value_or_default() || current->backend != backend ||
+         current->device != device || current->queue != ownerQueue || current->w != active->width ||
+         current->h != active->height || current->outW != outDesc.Width || current->outH != outDesc.Height ||
+         current->inputFormat != inDesc.Format || current->outputFormat != outDesc.Format || current->flags != flags))
     {
         owner.late.Cancel();
         RetireCurrent();
@@ -241,9 +238,12 @@ auto DlssNr_Dx12::State::DeferredSrContext::Before(ID3D12GraphicsCommandList* cm
     const auto rrStates = DlssNr::ResolveInputStates_Dx12(interop);
     for (auto& guide : g.frame.rr.guides)
     {
-        if (guide.resource == color) guide.state = rrStates.color;
-        else if (guide.resource == depth) guide.state = rrStates.depth;
-        else if (guide.resource == motion) guide.state = rrStates.motion;
+        if (guide.resource == color)
+            guide.state = rrStates.color;
+        else if (guide.resource == depth)
+            guide.state = rrStates.depth;
+        else if (guide.resource == motion)
+            guide.state = rrStates.motion;
     }
     if (g.failed)
         return;
@@ -273,8 +273,7 @@ auto DlssNr_Dx12::State::DeferredSrContext::Before(ID3D12GraphicsCommandList* cm
         info.height = g.h;
         info.outputWidth = g.outW;
         info.outputHeight = g.outH;
-        info.quality = (int) UInt(source, NVSDK_NGX_Parameter_PerfQualityValue,
-                                  NVSDK_NGX_PerfQuality_Value_MaxPerf);
+        info.quality = (int) UInt(source, NVSDK_NGX_Parameter_PerfQualityValue, NVSDK_NGX_PerfQuality_Value_MaxPerf);
         info.depthInverted = (g.flags & NVSDK_NGX_DLSS_Feature_Flags_DepthInverted) != 0;
         info.jitteredMotion = (g.flags & NVSDK_NGX_DLSS_Feature_Flags_MVJittered) != 0;
         info.lowResolutionMotion = (g.flags & NVSDK_NGX_DLSS_Feature_Flags_MVLowRes) != 0;
@@ -282,22 +281,22 @@ auto DlssNr_Dx12::State::DeferredSrContext::Before(ID3D12GraphicsCommandList* cm
         info.roughnessMode = g.frame.rr.roughnessMode;
         info.hardwareDepth = g.frame.rr.hardwareDepth;
         g.upscaler = std::make_unique<DlssNr::PrivateUpscalerDx12>(g.backend);
-        LOG_INFO("DLSS-NR private creation: {} {}x{} -> {}x{}, quality {}, inverted {}, jittered MV {}, low-res MV {}, roughness {}, HW depth {}",
-                 g.privateRr ? "DLSS RR" : DlssNr::PrivateUpscalerName(g.backend),
-                 info.width, info.height, info.outputWidth, info.outputHeight, info.quality,
-                 info.depthInverted, info.jitteredMotion, info.lowResolutionMotion, info.roughnessMode, info.hardwareDepth);
+        LOG_INFO("DLSS-NR private creation: {} {}x{} -> {}x{}, quality {}, inverted {}, jittered MV {}, low-res MV {}, "
+                 "roughness {}, HW depth {}",
+                 g.privateRr ? "DLSS RR" : DlssNr::PrivateUpscalerName(g.backend), info.width, info.height,
+                 info.outputWidth, info.outputHeight, info.quality, info.depthInverted, info.jitteredMotion,
+                 info.lowResolutionMotion, info.roughnessMode, info.hardwareDepth);
         if (!g.upscaler->Init(g.device, cmd, info))
         {
             g.failed = true;
-            Say(std::string("private ") + g.upscaler->Name() +
-                " creation failed: " + g.upscaler->Error() + "; clean SR frame retained");
+            Say(std::string("private ") + g.upscaler->Name() + " creation failed: " + g.upscaler->Error() +
+                "; clean SR frame retained");
             return;
         }
         DlssNrConstants unit {};
         unit.Mode = DlssNrMode_UnitExposure;
         unit.Width = unit.Height = 1;
-        if (!g.codec->DispatchPass(cmd, unit, g.edited, nullptr, nullptr, nullptr, nullptr, g.exposure,
-                                   nullptr))
+        if (!g.codec->DispatchPass(cmd, unit, g.edited, nullptr, nullptr, nullptr, nullptr, g.exposure, nullptr))
         {
             g.failed = true;
             Say("private exposure initialization failed");
@@ -306,8 +305,7 @@ auto DlssNr_Dx12::State::DeferredSrContext::Before(ID3D12GraphicsCommandList* cm
         owner.Barrier(cmd, g.exposure, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         g.createEpoch = submittedEpoch;
-        Say(std::string("private ") + g.upscaler->Name() +
-            " created; waiting for a later submission epoch");
+        Say(std::string("private ") + g.upscaler->Name() + " created; waiting for a later submission epoch");
         return;
     }
     // Synthetic seam ticks cannot prove that a feature's creation commands were submitted.
@@ -323,8 +321,7 @@ auto DlssNr_Dx12::State::DeferredSrContext::Before(ID3D12GraphicsCommandList* cm
     owner.Barrier(cmd, g.edited, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
     CopyActiveColor(cmd, g.edited, color, *active);
     owner.Barrier(cmd, color, D3D12_RESOURCE_STATE_COPY_SOURCE, arrival);
-    owner.Barrier(cmd, g.edited, D3D12_RESOURCE_STATE_COPY_DEST,
-                  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    owner.Barrier(cmd, g.edited, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
     DlssNrFrameInfo frame {};
     frame.BeforeUpscale = frame.PrivateColorCopy = true;
@@ -337,8 +334,7 @@ auto DlssNr_Dx12::State::DeferredSrContext::Before(ID3D12GraphicsCommandList* cm
     frame.MotionVectorsLowResolution = (flags & NVSDK_NGX_DLSS_Feature_Flags_MVLowRes) != 0;
     frame.DepthInverted = (flags & NVSDK_NGX_DLSS_Feature_Flags_DepthInverted) != 0;
     frame.ColourIsLinearHdr =
-        ((owner.featureFlags ? owner.featureFlags
-                             : UInt(source, NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags)) &
+        ((owner.featureFlags ? owner.featureFlags : UInt(source, NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags)) &
          NVSDK_NGX_DLSS_Feature_Flags_IsHDR) != 0 &&
         DlssNr::FormatCanHoldLinearHdr(outDesc.Format);
     frame.Reset = UInt(source, NVSDK_NGX_Parameter_Reset) != 0 || g.reset;
@@ -404,10 +400,11 @@ auto DlssNr_Dx12::State::DeferredSrContext::Before(ID3D12GraphicsCommandList* cm
                 g.accumulationReadable = true;
             }
             const auto motionDesc = motion->GetDesc();
-            const auto motionRegion = DlssNr::GuideSubrect(
-                { unsigned(motionDesc.Width), motionDesc.Height },
-                frame.MotionVectorsLowResolution ? DlssNr::GuideExtent { g.w, g.h }
-                                                 : DlssNr::GuideExtent { g.outW, g.outH }, 0, 0);
+            const auto motionRegion =
+                DlssNr::GuideSubrect({ unsigned(motionDesc.Width), motionDesc.Height },
+                                     frame.MotionVectorsLowResolution ? DlssNr::GuideExtent { g.w, g.h }
+                                                                      : DlssNr::GuideExtent { g.outW, g.outH },
+                                     0, 0);
             const unsigned next = g.accumulatedIndex ^ 1u;
             auto* history = g.accumulatedEdit[next];
             owner.Barrier(cmd, history, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
@@ -416,17 +413,20 @@ auto DlssNr_Dx12::State::DeferredSrContext::Before(ID3D12GraphicsCommandList* cm
                 owner.Barrier(cmd, motion, inputStates.motion, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             DlssNrConstants accum {};
             accum.Mode = DlssNrResidualMode_Accumulate;
-            accum.Width = g.w; accum.Height = g.h;
+            accum.Width = g.w;
+            accum.Height = g.h;
             const float configuredBlend = cfg.DlssNrResidualAcrossRrBlend.value_or_default();
             accum.ResidualBlend = std::isfinite(configuredBlend) ? std::clamp(configuredBlend, .01f, 1.0f) : .08f;
             accum.ResidualConfidenceSensitivity = cfg.DlssNrResidualConfidenceSensitivity.value_or_default();
             accum.ResidualHistoryValid = g.accumulationValid && !frame.Reset;
-            accum.GuideWidth = motionRegion.width; accum.GuideHeight = motionRegion.height;
+            accum.GuideWidth = motionRegion.width;
+            accum.GuideHeight = motionRegion.height;
             // v0.7.7 convention: convert the game's pixel displacement to input-frame UV displacement.
             accum.MvScaleX = frame.MvScaleX / float(g.w);
             accum.MvScaleY = frame.MvScaleY / float(g.h);
-            accumulated = motionRegion.valid() && g.codec->DispatchResidualPass(cmd, accum, color, g.edited,
-                g.accumulatedEdit[g.accumulatedIndex], motion, history);
+            accumulated = motionRegion.valid() &&
+                          g.codec->DispatchResidualPass(cmd, accum, color, g.edited,
+                                                        g.accumulatedEdit[g.accumulatedIndex], motion, history);
             if (motion != color)
                 owner.Barrier(cmd, motion, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, inputStates.motion);
             owner.Barrier(cmd, history, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
@@ -438,7 +438,9 @@ auto DlssNr_Dx12::State::DeferredSrContext::Before(ID3D12GraphicsCommandList* cm
                 // Actual enlargement is still performed by the selected private DLSS/SR adapter.
                 DlssNrConstants compose {};
                 compose.Mode = DlssNrResidualMode_Apply;
-                compose.Width = g.w; compose.Height = g.h; compose.TransferStrength = 1;
+                compose.Width = g.w;
+                compose.Height = g.h;
+                compose.TransferStrength = 1;
                 owner.Barrier(cmd, g.edited, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
                 accumulated = g.codec->DispatchResidualPass(cmd, compose, color, history, nullptr, nullptr, g.edited);
@@ -466,8 +468,7 @@ auto DlssNr_Dx12::State::DeferredSrContext::Before(ID3D12GraphicsCommandList* cm
             encode.WhitePoint = frame.PreExposure;
             encode.TransferStrength = frame.ColourIsLinearHdr ? 1.0f : 0.0f;
             encode.MaxRatio = std::clamp(cfg.DlssNrMaxRatio.value_or_default(), 1.0f, 8.0f);
-            ok = g.codec->DispatchResidualPass(cmd, encode, color, g.edited, nullptr, nullptr, g.residualInput,
-                                               true);
+            ok = g.codec->DispatchResidualPass(cmd, encode, color, g.edited, nullptr, nullptr, g.residualInput, true);
         }
         else
             ok = g.codec->DispatchPass(cmd, encode, color, g.edited, nullptr, nullptr, nullptr, g.residualInput,
@@ -503,10 +504,10 @@ auto DlssNr_Dx12::State::DeferredSrContext::Before(ID3D12GraphicsCommandList* cm
             f.cameraFar = Float(source, "FSR.cameraFar", farPlane);
             constexpr float radians = 0.01745329252f;
             const float fov = cfg.FsrVerticalFov.has_value() ? cfg.FsrVerticalFov.value() * radians
-                : cfg.FsrHorizontalFov.value_or_default() > 0.0f
-                    ? 2.0f * std::atan(std::tan(cfg.FsrHorizontalFov.value() * radians * 0.5f) *
-                                       (float) g.outH / g.outW)
-                    : 60.0f * radians;
+                              : cfg.FsrHorizontalFov.value_or_default() > 0.0f
+                                  ? 2.0f * std::atan(std::tan(cfg.FsrHorizontalFov.value() * radians * 0.5f) *
+                                                     (float) g.outH / g.outW)
+                                  : 60.0f * radians;
             f.cameraFovVertical = Float(source, OptiKeys::FSR_CameraFovVertical, fov);
             f.viewSpaceToMeters = Float(source, "FSR.viewSpaceToMetersFactor", 1.0f);
             pending = { cmd, source, output, frame.PreExposure };
@@ -519,11 +520,11 @@ auto DlssNr_Dx12::State::DeferredSrContext::Before(ID3D12GraphicsCommandList* cm
         g.reset = true;
         Say("waiting for NR evaluation; clean SR frame retained");
     }
-    owner.Barrier(cmd, g.edited, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    owner.Barrier(cmd, g.edited, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 }
 
-auto DlssNr_Dx12::State::DeferredSrContext::After(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source, unsigned long long epoch) -> void
+auto DlssNr_Dx12::State::DeferredSrContext::After(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source,
+                                                  unsigned long long epoch) -> void
 {
     const auto pair = pending;
     pending = {}; // Consume only the immediately matching successful upscale.
@@ -556,8 +557,8 @@ auto DlssNr_Dx12::State::DeferredSrContext::After(ID3D12GraphicsCommandList* cmd
     if (!g.upscaler->Evaluate(cmd, g.frame))
     {
         g.failed = true;
-        Say(std::string("private ") + g.upscaler->Name() +
-            " evaluation failed: " + g.upscaler->Error() + "; clean SR frame retained");
+        Say(std::string("private ") + g.upscaler->Name() + " evaluation failed: " + g.upscaler->Error() +
+            "; clean SR frame retained");
         return;
     }
     LOG_TRACE("DLSS-NR deferred: applied current-frame contribution at epoch {} (reset {})", epoch, g.reset);
@@ -565,13 +566,13 @@ auto DlssNr_Dx12::State::DeferredSrContext::After(ID3D12GraphicsCommandList* cmd
     if (cfg.DlssNrFinishedPicture.value_or_default())
     {
         const bool sceneLinear =
-            ((owner.featureFlags ? owner.featureFlags
-                                 : UInt(source, NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags)) &
+            ((owner.featureFlags ? owner.featureFlags : UInt(source, NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags)) &
              NVSDK_NGX_DLSS_Feature_Flags_IsHDR) != 0 &&
             DlssNr::FormatCanHoldLinearHdr(g.outputFormat);
         if (owner.late.CaptureResidual(cmd, pair.output, g.residualOutput, pair.scale, sceneLinear,
                                        UInt(source, NVSDK_NGX_Parameter_Reset) != 0))
-            Say(std::string("running: model -> private ") + g.upscaler->Name() + "; changes saved for the finished picture");
+            Say(std::string("running: model -> private ") + g.upscaler->Name() +
+                "; changes saved for the finished picture");
         else
         {
             g.reset = true;
@@ -594,8 +595,8 @@ auto DlssNr_Dx12::State::DeferredSrContext::After(ID3D12GraphicsCommandList* cmd
     apply.Width = g.outW;
     apply.Height = g.outH;
     apply.ResidualScale = pair.scale;
-    const bool ok = g.codec->DispatchPass(cmd, apply, g.clean, g.residualOutput, nullptr, nullptr, nullptr,
-                                          g.composed, nullptr);
+    const bool ok =
+        g.codec->DispatchPass(cmd, apply, g.clean, g.residualOutput, nullptr, nullptr, nullptr, g.composed, nullptr);
     if (ok)
     {
         owner.Barrier(cmd, g.composed, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -603,10 +604,8 @@ auto DlssNr_Dx12::State::DeferredSrContext::After(ID3D12GraphicsCommandList* cmd
         DlssNr::CopyActiveColor(cmd, pair.output, g.composed, { g.outW, g.outH });
         owner.Barrier(cmd, pair.output, D3D12_RESOURCE_STATE_COPY_DEST, arrival);
         owner.Barrier(cmd, g.composed, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        Say("running: " + std::to_string(g.w) + "x" + std::to_string(g.h) +
-            " contribution -> private " + g.upscaler->Name() + " -> " +
-            std::to_string(g.outW) + "x" + std::to_string(g.outH) +
-            "; applied after SR");
+        Say("running: " + std::to_string(g.w) + "x" + std::to_string(g.h) + " contribution -> private " +
+            g.upscaler->Name() + " -> " + std::to_string(g.outW) + "x" + std::to_string(g.outH) + "; applied after SR");
     }
     else
     {
@@ -614,8 +613,7 @@ auto DlssNr_Dx12::State::DeferredSrContext::After(ID3D12GraphicsCommandList* cmd
         g.reset = true;
         Say("composition failed; clean frame retained");
     }
-    owner.Barrier(cmd, g.clean, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    owner.Barrier(cmd, g.clean, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     owner.Barrier(cmd, g.residualOutput, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 }

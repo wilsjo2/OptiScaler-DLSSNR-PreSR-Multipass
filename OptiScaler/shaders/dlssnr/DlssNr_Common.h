@@ -211,7 +211,7 @@ struct alignas(256) DlssNrConstants
     // to A/B against), 1 = apply the model's edit. Trailing scalar, mirrored in the shader cbuffer.
     uint32_t ApplyModel;
 
-    uint32_t Reserved; // Preserve the shared constant-buffer layout.
+    uint32_t Reserved;   // Preserve the shared constant-buffer layout.
     float ResidualScale; // Scene pre-exposure used to encode/decode the private residual carrier.
     // Optional colour-based final-composition mask. Not the runtime's semantic mask.
     uint32_t SkinProtection;
@@ -287,5 +287,4 @@ class DlssNr_Common
         constants.EnvironmentColour = config.DlssNrEnvironmentColour.value_or_default();
         return constants;
     }
-
 };

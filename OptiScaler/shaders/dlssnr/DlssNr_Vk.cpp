@@ -5,6 +5,8 @@
 
 #include "precompile/DlssNr_Shader_Vk.h"
 #include "precompile/dlssnr_finished_color_Shader_Vk.h"
+#include "precompile/dlssnr_spatial_Shader_Vk.h"
+#include "precompile/dlssnr_spatial_guides_Shader_Vk.h"
 #include <dlssnr/DlssNrFinished_Vk.h>
 
 #include <algorithm>
@@ -35,8 +37,8 @@ DlssNr_Vk::DlssNr_Vk(std::string InName, VkDevice InDevice, VkPhysicalDevice InP
     const VkDeviceSize alignment = std::max<VkDeviceSize>(props.limits.minUniformBufferOffsetAlignment, 1);
     _slotStride = ((sizeof(DlssNrConstants) + alignment - 1) / alignment) * alignment;
 
-    if (!CreateBufferResource(_device, _physicalDevice, &_constantBuffer, &_constantBufferMemory,
-                              _slotStride * kSlots, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+    if (!CreateBufferResource(_device, _physicalDevice, &_constantBuffer, &_constantBufferMemory, _slotStride * kSlots,
+                              VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))
     {
         LOG_ERROR("DLSS-NR Vulkan pass: could not allocate the constant ring");
@@ -55,14 +57,14 @@ DlssNr_Vk::DlssNr_Vk(std::string InName, VkDevice InDevice, VkPhysicalDevice InP
     // samplers for the reads: the shader declares its sampler separately, and a combined descriptor
     // satisfies a separately declared sampled image with the sampler half simply unused.
     std::vector<VkDescriptorSetLayoutBinding> bindings = {
-        CreateBinding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER),          // Params
-        CreateBinding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),  // gSource
-        CreateBinding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),  // gModel
-        CreateBinding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),  // gOriginal
-        CreateBinding(4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),  // gMotion
-        CreateBinding(5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),           // gTarget
-        CreateBinding(6, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),           // gKeep
-        CreateBinding(7, VK_DESCRIPTOR_TYPE_SAMPLER),                 // gLinear
+        CreateBinding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER),         // Params
+        CreateBinding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER), // gSource
+        CreateBinding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER), // gModel
+        CreateBinding(3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER), // gOriginal
+        CreateBinding(4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER), // gMotion
+        CreateBinding(5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),          // gTarget
+        CreateBinding(6, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE),          // gKeep
+        CreateBinding(7, VK_DESCRIPTOR_TYPE_SAMPLER),                // gLinear
     };
 
     CreateLayouts(bindings);
@@ -98,8 +100,15 @@ DlssNr_Vk::DlssNr_Vk(std::string InName, VkDevice InDevice, VkPhysicalDevice InP
         return;
     }
 
-    std::vector<char> finishedCode(dlssnr_finished_color_spv, dlssnr_finished_color_spv + sizeof(dlssnr_finished_color_spv));
+    std::vector<char> finishedCode(dlssnr_finished_color_spv,
+                                   dlssnr_finished_color_spv + sizeof(dlssnr_finished_color_spv));
     CreateComputePipeline(_device, _pipelineLayout, &_finishedPipeline, finishedCode);
+    std::vector<char> spatialCode(dlssnr_spatial_spv, dlssnr_spatial_spv + sizeof(dlssnr_spatial_spv));
+    std::vector<char> spatialGuidesCode(dlssnr_spatial_guides_spv,
+                                        dlssnr_spatial_guides_spv + sizeof(dlssnr_spatial_guides_spv));
+    if (!CreateComputePipeline(_device, _pipelineLayout, &_spatialPipeline, spatialCode) ||
+        !CreateComputePipeline(_device, _pipelineLayout, &_spatialGuidesPipeline, spatialGuidesCode))
+        LOG_WARN("DLSS-NR Vulkan: spatial compression shaders unavailable; ordinary NR remains available");
     _init = true;
     LOG_INFO("DLSS-NR Vulkan pass up: {} constant slots, stride {}", kSlots, (uint64_t) _slotStride);
 }
@@ -114,7 +123,12 @@ DlssNr_Vk::~DlssNr_Vk()
     }
     _finished.reset();
     _model.reset();
-    if (_finishedPipeline) vkDestroyPipeline(_device, _finishedPipeline, nullptr);
+    if (_finishedPipeline)
+        vkDestroyPipeline(_device, _finishedPipeline, nullptr);
+    if (_spatialPipeline)
+        vkDestroyPipeline(_device, _spatialPipeline, nullptr);
+    if (_spatialGuidesPipeline)
+        vkDestroyPipeline(_device, _spatialGuidesPipeline, nullptr);
     _dummy.Destroy(_device);
 }
 
@@ -135,7 +149,8 @@ bool DlssNr_Vk::CreateDummy(VkCommandBuffer cmdList)
 
 void DlssNr_Vk::WriteDescriptors(VkDescriptorSet set, VkDeviceSize constantOffset, VkImageView source,
                                  VkImageView model, VkImageView original, VkImageView motion, VkImageView target,
-                                 VkImageView keep, VkImageLayout sourceLayout, VkImageLayout motionLayout)
+                                 VkImageView keep, VkImageLayout sourceLayout, VkImageLayout motionLayout,
+                                 VkImageLayout modelLayout, VkImageLayout originalLayout)
 {
     VkDescriptorBufferInfo bufferInfo { _constantBuffer, constantOffset, sizeof(DlssNrConstants) };
 
@@ -154,8 +169,8 @@ void DlssNr_Vk::WriteDescriptors(VkDescriptorSet set, VkDeviceSize constantOffse
     };
 
     VkDescriptorImageInfo sourceInfo = readInfo(source, sourceLayout);
-    VkDescriptorImageInfo modelInfo = readInfo(model, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    VkDescriptorImageInfo originalInfo = readInfo(original, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    VkDescriptorImageInfo modelInfo = readInfo(model, modelLayout);
+    VkDescriptorImageInfo originalInfo = readInfo(original, originalLayout);
     VkDescriptorImageInfo motionInfo = readInfo(motion, motionLayout);
     VkDescriptorImageInfo targetInfo = writeInfo(target);
     VkDescriptorImageInfo keepInfo = writeInfo(keep);
@@ -237,6 +252,35 @@ bool DlssNr_Vk::Dispatch(VkCommandBuffer InCmdList, const DlssNrConstants& InCon
     return true;
 }
 
+bool DlssNr_Vk::DispatchSpatial(VkCommandBuffer cmd, const DlssNr::Spatial::Constants& constants, VkImageView source,
+                                VkImageView second, VkImageView third, VkImageView target, VkImageView keep,
+                                VkImageLayout sourceLayout, VkImageLayout secondLayout, VkImageLayout thirdLayout)
+{
+    static_assert(sizeof(DlssNr::Spatial::Constants) == sizeof(DlssNrConstants));
+    if (!SpatialReady() || cmd == VK_NULL_HANDLE || target == VK_NULL_HANDLE || !CreateDummy(cmd))
+        return false;
+
+    const uint32_t slot = _slot;
+    _slot = (_slot + 1) % kSlots;
+    const VkDeviceSize offset = _slotStride * slot;
+    std::memcpy((char*) _mappedConstantBuffer + offset, &constants, sizeof(constants));
+    WriteDescriptors(_descriptorSets[slot], offset, source, second, third, VK_NULL_HANDLE, target, keep, sourceLayout,
+                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, secondLayout, thirdLayout);
+
+    const VkPipeline pipeline = constants.mode == 101 ? _spatialGuidesPipeline : _spatialPipeline;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _pipelineLayout, 0, 1, &_descriptorSets[slot], 0,
+                            nullptr);
+    vkCmdDispatch(cmd, (constants.width + 7) / 8, (constants.height + 7) / 8, 1);
+
+    VkMemoryBarrier barrier { VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &barrier,
+                         0, nullptr, 0, nullptr);
+    return true;
+}
+
 VkImageInfo DlssNr_Vk::PrepareInput(VkCommandBuffer cmd, const VkImageInfo& nextOutput)
 {
     if (!nextOutput.Image || !nextOutput.Width || !nextOutput.Height)
@@ -282,15 +326,19 @@ bool DlssNr_Vk::Dispatch(VkCommandBuffer cmd, const VkImageInfo& colour, const V
         return false;
     if (!_model)
         _model = std::make_unique<DlssNr::ModelVk>(*this);
-    const bool ran = _model->Evaluate(cmd, colour, depth, motion, output, frame, instance, _physicalDevice, _device, inputLayout);
-    if (modelRan) *modelRan = ran;
+    const bool ran =
+        _model->Evaluate(cmd, colour, depth, motion, output, frame, instance, _physicalDevice, _device, inputLayout);
+    if (modelRan)
+        *modelRan = ran;
     return true;
 }
 
 void DlssNr_Vk::CaptureFinished(VkCommandBuffer cmd, const VkImageInfo& depth, const VkImageInfo& motion,
                                 const DlssNrFrameInfo_Vk& frame, VkInstance instance)
 {
-    if (!CanRender()) return;
-    if (!_finished) _finished = std::make_unique<DlssNr::FinishedVk>(*this, _device, _physicalDevice);
+    if (!CanRender())
+        return;
+    if (!_finished)
+        _finished = std::make_unique<DlssNr::FinishedVk>(*this, _device, _physicalDevice);
     _finished->Capture(cmd, depth, motion, frame, instance);
 }

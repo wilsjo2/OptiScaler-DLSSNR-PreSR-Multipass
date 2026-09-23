@@ -22,8 +22,8 @@ void DlssNr_Dx12::State::EncodeInput(EncodeContext& context)
         Barrier(cmdList, target, targetState, to);
         targetState = to;
     };
-    whitePoint = frame.WhitePointOverride > 0.0f ? frame.WhitePointOverride
-                                               : cfg.DlssNrWhitePointScale.value_or_default();
+    whitePoint =
+        frame.WhitePointOverride > 0.0f ? frame.WhitePointOverride : cfg.DlssNrWhitePointScale.value_or_default();
 
     const bool wasHeld = nr.heldActive;
     // Frame hold. Freeze the encode's input so a live setting change re-renders the same frame. This
@@ -59,8 +59,7 @@ void DlssNr_Dx12::State::EncodeInput(EncodeContext& context)
                     Barrier(cmdList, nr.heldColor, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                             D3D12_RESOURCE_STATE_COPY_DEST);
                     cmdList->CopyResource(nr.heldColor, target);
-                    Barrier(cmdList, nr.heldColor, D3D12_RESOURCE_STATE_COPY_DEST,
-                            D3D12_RESOURCE_STATE_COPY_SOURCE);
+                    Barrier(cmdList, nr.heldColor, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
                     TransitionTarget(priorTargetState);
 
                     nr.heldActive = true;
@@ -173,22 +172,21 @@ void DlssNr_Dx12::State::EncodeInput(EncodeContext& context)
     encodeParams.Height = height;
 
     TransitionTarget(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    shader.DispatchPass(cmdList, encodeParams, target, nullptr, nullptr, context.exposure, nullptr, nr.colorCopy,
-                        nr.hdrCopy);
+    context.encodeSucceeded = shader.DispatchPass(cmdList, encodeParams, target, nullptr, nullptr, context.exposure,
+                                                  nullptr, nr.colorCopy, nr.hdrCopy);
 
     if (targetSupportsUav)
         TransitionTarget(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     // The transitions double as the wait for the encode's writes.
     Barrier(cmdList, nr.colorCopy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    Barrier(cmdList, nr.hdrCopy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    Barrier(cmdList, nr.hdrCopy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
     // Below full resolution the model is shown a filtered shrink of the proxy; the edit it returns is
     // enlarged during the resolve while the frame underneath stays full size and untouched.
     modelInput = nr.colorCopy;
 
-    if (reduced && nr.colorSmall != nullptr)
+    if (reduced && !context.spatial && nr.colorSmall != nullptr)
     {
         bool built = false;
 
@@ -240,15 +238,13 @@ void DlssNr_Dx12::State::EncodeInput(EncodeContext& context)
             down.Mode = DlssNrMode_Downsample;
             down.Width = workWidth;
             down.Height = workHeight;
-            shader.DispatchPass(cmdList, down, modelInput, nullptr, nullptr, nullptr, nullptr, nr.colorSmall,
-                                nullptr);
+            shader.DispatchPass(cmdList, down, modelInput, nullptr, nullptr, nullptr, nullptr, nr.colorSmall, nullptr);
             Barrier(cmdList, nr.colorSmall, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
 
         modelInput = nr.colorSmall;
     }
-
 }
 
 DlssNrConstants DlssNr_Dx12::State::MakeResolveConstants(const EncodeContext& context, unsigned int effectivePasses)
@@ -311,9 +307,10 @@ DlssNrConstants DlssNr_Dx12::State::MakeResolveConstants(const EncodeContext& co
                  "{:.1f}x, colour transform {}, transfer {}, model {}x{}, passes {}, debug view {}, compare {}",
                  composeNow.whitePoint, composeNow.transfer, composeNow.colour, composeNow.maxRatio,
                  composeNow.passthrough != 0 ? "off (frame already tone mapped)" : "on (linear HDR)",
-                 composeNow.residual == 3 ? "lighting + colour" :
-                 composeNow.residual == 1 ? "matched residual" : "classic", composeNow.workW, composeNow.workH,
-                 composeNow.passes, composeNow.debugView, composeNow.compareMode);
+                 composeNow.residual == 3   ? "lighting + colour"
+                 : composeNow.residual == 1 ? "matched residual"
+                                            : "classic",
+                 composeNow.workW, composeNow.workH, composeNow.passes, composeNow.debugView, composeNow.compareMode);
     }
 
     return resolveParams;

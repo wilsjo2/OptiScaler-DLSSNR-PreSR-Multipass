@@ -52,6 +52,7 @@ class PrivateUpscalerDx12
 {
     struct Impl;
     std::unique_ptr<Impl> impl;
+
   public:
     explicit PrivateUpscalerDx12(PrivateUpscaler selected);
     ~PrivateUpscalerDx12();

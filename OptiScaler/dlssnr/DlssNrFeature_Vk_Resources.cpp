@@ -44,14 +44,14 @@ void ModelVk::Impl::Transition(VkCommandBuffer cmd, ImageVk& img, VkImageLayout 
     barrier.srcAccessMask = access(img.layout);
     barrier.dstAccessMask = access(to);
 
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr,
-                         0, nullptr, 1, &barrier);
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
+                         nullptr, 1, &barrier);
 
     img.layout = to;
 }
 
-void ModelVk::Impl::TransitionForeign(VkCommandBuffer cmd, VkImage image, VkImageSubresourceRange range, VkImageLayout from,
-                       VkImageLayout to)
+void ModelVk::Impl::TransitionForeign(VkCommandBuffer cmd, VkImage image, VkImageSubresourceRange range,
+                                      VkImageLayout from, VkImageLayout to)
 {
     if (image == VK_NULL_HANDLE || from == to)
         return;
@@ -67,8 +67,8 @@ void ModelVk::Impl::TransitionForeign(VkCommandBuffer cmd, VkImage image, VkImag
     barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
     barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
 
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr,
-                         0, nullptr, 1, &barrier);
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
+                         nullptr, 1, &barrier);
 }
 
 } // namespace DlssNr

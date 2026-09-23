@@ -2156,11 +2156,10 @@ bool IFeature_VkwDx12::Evaluate(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Parameter
         nrFrame.DepthInverted = DepthInverted();
         nrFrame.MotionVectorsLowResolution = LowResMV();
         nrFrame.RayReconstruction = GetUpscalerType() == Upscaler::DLSSD;
-        NeuralRendering->CaptureFinished(InCmdBuffer,
-            DlssNr::ParameterImage(InParameters, NVSDK_NGX_Parameter_Depth),
-            DlssNr::ParameterImage(InParameters, NVSDK_NGX_Parameter_MotionVectors), nrFrame, VulkanInstance);
+        NeuralRendering->CaptureFinished(InCmdBuffer, DlssNr::ParameterImage(InParameters, NVSDK_NGX_Parameter_Depth),
+                                         DlssNr::ParameterImage(InParameters, NVSDK_NGX_Parameter_MotionVectors),
+                                         nrFrame, VulkanInstance);
     }
-
 
     auto frame = _frameCount % VKDX12_BUFFER_COUNT;
     auto cmdList = Dx12CommandList[frame];
@@ -2198,10 +2197,9 @@ bool IFeature_VkwDx12::Evaluate(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Parameter
         if (!reportedNrOffer)
         {
             reportedNrOffer = true;
-            LOG_INFO("DLSS-NR: the Vulkan bridge reached the hand-off (upscale ok: {}, enabled: {})",
-                     dx12EvalResult, Config::Instance()->DlssNrEnabled.value_or_default());
+            LOG_INFO("DLSS-NR: the Vulkan bridge reached the hand-off (upscale ok: {}, enabled: {})", dx12EvalResult,
+                     Config::Instance()->DlssNrEnabled.value_or_default());
         }
-
 
     } while (false);
 

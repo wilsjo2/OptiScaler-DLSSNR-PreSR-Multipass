@@ -8,17 +8,20 @@ auto DlssNr_Dx12::State::FinishedPictureResetCommandList(ID3D12CommandList* cmd)
     lifetime.ResetRecording(cmd);
     deferredSr.lifetime.ResetRecording(cmd);
     captureFrames.ResetRecording(cmd);
-    if (enlarger) enlarger->lifetime.ResetRecording(cmd);
-    for (auto& old : retiredEnlargers) old->lifetime.ResetRecording(cmd);
+    if (enlarger)
+        enlarger->lifetime.ResetRecording(cmd);
+    for (auto& old : retiredEnlargers)
+        old->lifetime.ResetRecording(cmd);
     CollectEnlargers();
     ID3D12CommandList* real = nullptr;
-    auto* identity = Util::CheckForRealObject(__FUNCTION__, cmd, (IUnknown**)&real) ? real : cmd;
+    auto* identity = Util::CheckForRealObject(__FUNCTION__, cmd, (IUnknown**) &real) ? real : cmd;
     if (enlarger && !enlarger->submitted && enlarger->creation == identity)
     {
         enlarger->failed = true;
         enlargementStatus = "DLSS enlargement initialization was discarded; use Retry.";
     }
-    for (auto& model : nr.models) model.ResetRecording(cmd);
+    for (auto& model : nr.models)
+        model.ResetRecording(cmd);
     if (inputHold.captureCommands == cmd)
     {
         inputHold.active = false; // recording was discarded before submission
@@ -70,32 +73,36 @@ auto DlssNr_Dx12::State::FinishedPictureStatus() -> std::string
     return late.status;
 }
 
-auto DlssNr_Dx12::State::FinishedPictureSubmitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists) -> void
+auto DlssNr_Dx12::State::FinishedPictureSubmitted(ID3D12CommandQueue* queue, UINT count,
+                                                  ID3D12CommandList* const* lists) -> void
 {
     std::lock_guard<std::recursive_mutex> lock(mutex);
     lifetime.Submitted(queue, count, lists);
     deferredSr.lifetime.Submitted(queue, count, lists);
     captureFrames.Submitted(queue, count, lists);
-    if (enlarger) enlarger->lifetime.Submitted(queue, count, lists);
-    for (auto& old : retiredEnlargers) old->lifetime.Submitted(queue, count, lists);
+    if (enlarger)
+        enlarger->lifetime.Submitted(queue, count, lists);
+    for (auto& old : retiredEnlargers)
+        old->lifetime.Submitted(queue, count, lists);
     CollectEnlargers();
     if (enlarger && !enlarger->submitted)
     {
         ID3D12CommandQueue* real = nullptr;
-        auto* identity = Util::CheckForRealObject(__FUNCTION__, queue, (IUnknown**)&real) ? real : queue;
+        auto* identity = Util::CheckForRealObject(__FUNCTION__, queue, (IUnknown**) &real) ? real : queue;
         for (UINT i = 0; i < count; ++i)
         {
             ID3D12CommandList* realList = nullptr;
-            auto* list = Util::CheckForRealObject(__FUNCTION__, lists[i], (IUnknown**)&realList) ? realList : lists[i];
+            auto* list = Util::CheckForRealObject(__FUNCTION__, lists[i], (IUnknown**) &realList) ? realList : lists[i];
             if (list == enlarger->creation)
             {
                 enlarger->queue = identity;
                 enlarger->submitted = true;
-                LOG_INFO("NR DLSS enlargement initialization submitted on producer queue {}", (void*)identity);
+                LOG_INFO("NR DLSS enlargement initialization submitted on producer queue {}", (void*) identity);
             }
         }
     }
-    for (auto& model : nr.models) model.Submitted(queue, count, lists);
+    for (auto& model : nr.models)
+        model.Submitted(queue, count, lists);
     for (UINT i = 0; i < count; ++i)
         if (lists[i] == inputHold.captureCommands)
             inputHold.captureCommands = nullptr;
@@ -114,8 +121,8 @@ auto DlssNr_Dx12::State::FinishedPictureSubmitted(ID3D12CommandQueue* queue, UIN
                     slot.submitted = true;
                     late.producerQueue = queue;
                     ID3D12CommandQueue* realQueue = nullptr;
-                    slot.producerQueue = Util::CheckForRealObject(__FUNCTION__, queue, (IUnknown**) &realQueue)
-                                             ? realQueue : queue;
+                    slot.producerQueue =
+                        Util::CheckForRealObject(__FUNCTION__, queue, (IUnknown**) &realQueue) ? realQueue : queue;
                     if (FAILED(queue->Signal(slot.fence.Get(), slot.ready)))
                     {
                         // The copy already executed. Keep its unsignalled fence protecting
@@ -130,7 +137,7 @@ auto DlssNr_Dx12::State::FinishedPictureSubmitted(ID3D12CommandQueue* queue, UIN
 auto DlssNr_Dx12::State::FinishedColorSpace(IDXGISwapChain* swapchain, DXGI_FORMAT format) -> DXGI_COLOR_SPACE_TYPE
 {
     auto space = format == DXGI_FORMAT_R16G16B16A16_FLOAT ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709
-                                                        : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+                                                          : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
     UINT size = sizeof(space);
     swapchain->GetPrivateData(DlssNr::FinishedColorSpaceKey, &size, &space);
     return space;
@@ -145,9 +152,8 @@ auto DlssNr_Dx12::State::ApplyToFinishedPictureDx11(IDXGISwapChain* swapchain) -
         return;
     const bool heldPicture = Config::Instance()->DlssNrHoldFrame.value_or_default() && inputHold.active &&
                              late.heldValid && late.heldGeneration == inputHold.generation;
-    if (!heldPicture && std::none_of(late.slots.begin(), late.slots.end(), [](const auto& slot) {
-            return slot.pending && slot.submitted;
-        }))
+    if (!heldPicture && std::none_of(late.slots.begin(), late.slots.end(),
+                                     [](const auto& slot) { return slot.pending && slot.submitted; }))
         return;
     LateContext::ComPtr<IDXGISwapChain3> sc;
     LateContext::ComPtr<ID3D11Texture2D> picture;
@@ -167,8 +173,8 @@ auto DlssNr_Dx12::State::ApplyToFinishedPictureDx11(IDXGISwapChain* swapchain) -
         late.Say("The DirectX 11 finished-picture bridge is unavailable for this device or screen format.");
         return;
     }
-    const bool ran = ApplyFinishedColor(color, late.producerQueue.Get(),
-                                       FinishedColorSpace(swapchain, color->GetDesc().Format));
+    const bool ran =
+        ApplyFinishedColor(color, late.producerQueue.Get(), FinishedColorSpace(swapchain, color->GetDesc().Format));
     if (!late.dx11.End(picture.Get(), ran))
         late.Say("The DirectX 11 finished-picture transfer failed. Restart the game to retry.");
 }

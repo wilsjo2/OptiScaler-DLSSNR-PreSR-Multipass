@@ -10,8 +10,6 @@
 
 #include <dlssnr/DlssNr.h>
 
-
-
 #include "input/input_system.h"
 
 #include "font/Hack_Compressed.h"
@@ -1847,7 +1845,6 @@ void MenuCommon::UpdateFrameTimeAverages(RenderMenuContext& ctx)
 void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
 {
     DlssNr::RenderNrCompareTags();
-
 
     auto& state = ctx.state;
     auto config = ctx.config;

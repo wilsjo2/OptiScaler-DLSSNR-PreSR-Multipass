@@ -6,6 +6,8 @@
 #include "precompile/DlssNr_Shader.h"
 #include "precompile/dlssnr_residual_Shader.h"
 #include "precompile/dlssnr_finished_color_Shader.h"
+#include "precompile/dlssnr_spatial_Shader.h"
+#include "precompile/dlssnr_spatial_guides_Shader.h"
 
 namespace
 {
@@ -23,12 +25,17 @@ unsigned nrNotificationDepth = 0;
 void CollectRetiredNrOwners()
 {
     static bool collecting = false;
-    if (collecting || nrNotificationDepth) return;
+    if (collecting || nrNotificationDepth)
+        return;
     collecting = true;
     auto& owners = RetiredNrOwners();
     for (auto it = owners.begin(); it != owners.end();)
     {
-        if (!(*it)->ReadyToDestroy()) { ++it; continue; }
+        if (!(*it)->ReadyToDestroy())
+        {
+            ++it;
+            continue;
+        }
         auto finished = std::move(*it);
         it = owners.erase(it);
         finished.reset(); // May enqueue a child codec; list iterators remain valid.
@@ -39,7 +46,11 @@ void CollectRetiredNrOwners()
 struct NrNotificationScope
 {
     NrNotificationScope() { ++nrNotificationDepth; }
-    ~NrNotificationScope() { --nrNotificationDepth; CollectRetiredNrOwners(); }
+    ~NrNotificationScope()
+    {
+        --nrNotificationDepth;
+        CollectRetiredNrOwners();
+    }
 };
 DlssNr_Dx12* activeNrOwner = nullptr;
 void ActivateNrOwner(DlssNr_Dx12* owner)
@@ -49,8 +60,6 @@ void ActivateNrOwner(DlssNr_Dx12* owner)
     activeNrOwner = owner;
 }
 } // namespace
-
-
 
 // ---------------------------------------------------------------------------------------------
 // The pass itself. Everything above is what it is made of; everything below is the shape the rest
@@ -135,15 +144,14 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
 {
     std::lock_guard ownersLock(nrOwnersMutex);
     std::lock_guard stateLock(_state->mutex);
-    return DispatchCompute(InCmdList, InConstants, _pipelineState, InSource, InModel, InOriginal,
-                           InMotion, InPrevEdit, OutTarget, OutKeep, immutableSlot);
+    return DispatchCompute(InCmdList, InConstants, _pipelineState, InSource, InModel, InOriginal, InMotion, InPrevEdit,
+                           OutTarget, OutKeep, immutableSlot);
 }
 
 bool DlssNr_Dx12::DispatchCompute(ID3D12GraphicsCommandList* InCmdList, const DlssNrConstants& InConstants,
-                                 ID3D12PipelineState* pipeline, ID3D12Resource* InSource,
-                                 ID3D12Resource* InModel, ID3D12Resource* InOriginal,
-                                 ID3D12Resource* InMotion, ID3D12Resource* InPrevEdit,
-                                 ID3D12Resource* OutTarget, ID3D12Resource* OutKeep, uint32_t* immutableSlot)
+                                  ID3D12PipelineState* pipeline, ID3D12Resource* InSource, ID3D12Resource* InModel,
+                                  ID3D12Resource* InOriginal, ID3D12Resource* InMotion, ID3D12Resource* InPrevEdit,
+                                  ID3D12Resource* OutTarget, ID3D12Resource* OutKeep, uint32_t* immutableSlot)
 {
     _state->lifetime.Record(InCmdList);
     if (!_init || !pipeline || !InCmdList || !_device || !InSource || !OutTarget)
@@ -215,14 +223,16 @@ bool DlssNr_Dx12::DispatchCompute(ID3D12GraphicsCommandList* InCmdList, const Dl
 
 void DlssNr_Dx12::Retire(std::unique_ptr<DlssNr_Dx12> owner)
 {
-    if (!owner) return;
+    if (!owner)
+        return;
     if (::State::Instance().isShuttingDown)
     {
         owner.release(); // No locks, GPU calls or destructors under the loader lock.
         return;
     }
     std::lock_guard lock(nrOwnersMutex);
-    if (activeNrOwner == owner.get()) activeNrOwner = nullptr;
+    if (activeNrOwner == owner.get())
+        activeNrOwner = nullptr;
     DlssNr::ClearStatus(owner.get());
     {
         std::lock_guard stateLock(owner->_state->mutex);
@@ -236,13 +246,18 @@ bool DlssNr_Dx12::ReadyToDestroy()
 {
     std::lock_guard lock(_state->mutex);
     _state->CollectEnlargers();
-    if (_state->collectingEnlargers) return false;
-    if (!_state->retiredEnlargers.empty() || (_state->enlarger && !_state->enlarger->lifetime.Idle())) return false;
-    if (!_state->lifetime.Idle() || !_state->deferredSr.lifetime.Idle()) return false;
+    if (_state->collectingEnlargers)
+        return false;
+    if (!_state->retiredEnlargers.empty() || (_state->enlarger && !_state->enlarger->lifetime.Idle()))
+        return false;
+    if (!_state->lifetime.Idle() || !_state->deferredSr.lifetime.Idle())
+        return false;
     for (auto& model : _state->nr.models)
-        if (!model.Idle()) return false;
+        if (!model.Idle())
+            return false;
     for (const auto& slot : _state->late.slots)
-        if (slot.submitted && !_state->late.Finished(slot)) return false;
+        if (slot.submitted && !_state->late.Finished(slot))
+            return false;
     return _state->late.dx11.Idle();
 }
 
@@ -307,6 +322,44 @@ DlssNr_Dx12::~DlssNr_Dx12()
         _residualPipelineState->Release();
         _residualPipelineState = nullptr;
     }
+    if (_spatialPipelineState != nullptr)
+    {
+        _spatialPipelineState->Release();
+        _spatialPipelineState = nullptr;
+    }
+    if (_spatialGuidesPipelineState != nullptr)
+    {
+        _spatialGuidesPipelineState->Release();
+        _spatialGuidesPipelineState = nullptr;
+    }
+}
+
+bool DlssNr_Dx12::SpatialReady()
+{
+    std::lock_guard ownersLock(nrOwnersMutex);
+    std::lock_guard stateLock(_state->mutex);
+    if (!_init)
+        return false;
+    if (!_spatialPipelineState)
+        CreateComputePipeline(_device, &_spatialPipelineState, dlssnr_spatial_cso, sizeof(dlssnr_spatial_cso), nullptr);
+    if (!_spatialGuidesPipelineState)
+        CreateComputePipeline(_device, &_spatialGuidesPipelineState, dlssnr_spatial_guides_cso,
+                              sizeof(dlssnr_spatial_guides_cso), nullptr);
+    return _spatialPipelineState != nullptr && _spatialGuidesPipelineState != nullptr;
+}
+
+bool DlssNr_Dx12::DispatchSpatial(ID3D12GraphicsCommandList* cmd, const DlssNr::Spatial::Constants& constants,
+                                  ID3D12Resource* source, ID3D12Resource* depthOrAnswer, ID3D12Resource* motion,
+                                  ID3D12Resource* target, ID3D12Resource* secondary)
+{
+    static_assert(sizeof(DlssNr::Spatial::Constants) == sizeof(DlssNrConstants));
+    DlssNrConstants bytes {};
+    std::memcpy(&bytes, &constants, sizeof(bytes));
+    std::lock_guard ownersLock(nrOwnersMutex);
+    std::lock_guard stateLock(_state->mutex);
+    auto* pipeline = constants.mode == 101 ? _spatialGuidesPipelineState : _spatialPipelineState;
+    return DispatchCompute(cmd, bytes, pipeline, source, depthOrAnswer, motion, nullptr, nullptr, target, secondary,
+                           nullptr);
 }
 
 bool DlssNr_Dx12::DispatchResidualPass(ID3D12GraphicsCommandList* InCmdList, const DlssNrConstants& InConstants,
@@ -319,8 +372,8 @@ bool DlssNr_Dx12::DispatchResidualPass(ID3D12GraphicsCommandList* InCmdList, con
         CreateComputePipeline(_device, &_finishedColorPipelineState, dlssnr_finished_color_cso,
                               sizeof(dlssnr_finished_color_cso), nullptr);
     auto* pipeline = finishedColor ? _finishedColorPipelineState : _residualPipelineState;
-    return DispatchCompute(InCmdList, InConstants, pipeline, InSource, InModel, InOriginal,
-                           InMotion, nullptr, OutTarget, nullptr, nullptr);
+    return DispatchCompute(InCmdList, InConstants, pipeline, InSource, InModel, InOriginal, InMotion, nullptr,
+                           OutTarget, nullptr, nullptr);
 }
 
 bool DlssNr_Dx12::CreateBufferResource(ID3D12Device* device, ID3D12Resource* source, D3D12_RESOURCE_STATES state)
@@ -393,7 +446,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmd, ID3D12Resource* colou
             return false;
         _state->Barrier(cmd, colour, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
         _state->Barrier(cmd, output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
-        DlssNr::CopyActiveColor(cmd, output, colour, { (unsigned)target.Width, target.Height });
+        DlssNr::CopyActiveColor(cmd, output, colour, { (unsigned) target.Width, target.Height });
         _state->Barrier(cmd, colour, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         _state->Barrier(cmd, output, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     }
@@ -403,7 +456,7 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmd, ID3D12Resource* colou
 }
 
 void DlssNr_Dx12::BeginInputHold(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* params,
-                                const D3D12_RESOURCE_STATES* inputStates)
+                                 const D3D12_RESOURCE_STATES* inputStates)
 {
     std::lock_guard ownersLock(nrOwnersMutex);
     std::lock_guard lock(_state->mutex);
@@ -452,9 +505,8 @@ bool DlssNr_Dx12::ProcessSeam(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Paramete
     _state->Publish();
     return special;
 }
-void DlssNr_Dx12::DiagnosePipeline(unsigned stage, ID3D12GraphicsCommandList* cmd,
-                                  NVSDK_NGX_Parameter* params, ID3D12Resource* color,
-                                  uint32_t flags, bool rr, bool success)
+void DlssNr_Dx12::DiagnosePipeline(unsigned stage, ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* params,
+                                   ID3D12Resource* color, uint32_t flags, bool rr, bool success)
 {
     std::lock_guard ownersLock(nrOwnersMutex);
     std::lock_guard stateLock(_state->mutex);
@@ -466,13 +518,14 @@ void DlssNr_Dx12::DiagnosePipeline(unsigned stage, ID3D12GraphicsCommandList* cm
         static unsigned runs = 0;
         DWORD foregroundProcess = 0;
         GetWindowThreadProcessId(GetForegroundWindow(), &foregroundProcess);
-        const bool control = foregroundProcess == GetCurrentProcessId() &&
-                             (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+        const bool control = foregroundProcess == GetCurrentProcessId() && (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
         const bool gameplay = control && (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
         const bool photo = control && (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
-        const char* label = gameplay && !previousGameplay ? "gameplay" :
-                            photo && !previousPhoto ? "photomode" : nullptr;
-        previousGameplay = gameplay; previousPhoto = photo;
+        const char* label = gameplay && !previousGameplay ? "gameplay"
+                            : photo && !previousPhoto     ? "photomode"
+                                                          : nullptr;
+        previousGameplay = gameplay;
+        previousPhoto = photo;
         if (label && !state.pipelineCaptureRemaining && !nrCaptureOutstanding)
         {
             if (runs >= 2)
@@ -480,57 +533,66 @@ void DlssNr_Dx12::DiagnosePipeline(unsigned stage, ID3D12GraphicsCommandList* cm
             else
             {
                 ++runs;
-                SYSTEMTIME time {}; GetLocalTime(&time);
+                SYSTEMTIME time {};
+                GetLocalTime(&time);
                 char folder[100];
-                std::snprintf(folder, sizeof(folder), "%04u%02u%02u-%02u%02u%02u-%03u-%s-%u",
-                    time.wYear, time.wMonth, time.wDay, time.wHour, time.wMinute, time.wSecond,
-                    time.wMilliseconds, label, runs);
+                std::snprintf(folder, sizeof(folder), "%04u%02u%02u-%02u%02u%02u-%03u-%s-%u", time.wYear, time.wMonth,
+                              time.wDay, time.wHour, time.wMinute, time.wSecond, time.wMilliseconds, label, runs);
                 state.pipelineCaptureDirectory = Util::DllPath().parent_path() / "nr-pipeline-captures" / folder;
                 state.pipelineCaptureRemaining = 4;
                 LOG_INFO("NR pipeline capture armed: {} (four frames)", state.pipelineCaptureDirectory.string());
             }
         }
-        if (!state.pipelineCaptureRemaining || state.pipelineCapture) return;
+        if (!state.pipelineCaptureRemaining || state.pipelineCapture)
+            return;
         auto job = std::make_unique<DlssNr::PipelineCaptureFrame>();
         if (!job->Init(_device))
-        { state.pipelineCaptureRemaining = 0; LOG_ERROR("NR pipeline capture allocation failed"); return; }
+        {
+            state.pipelineCaptureRemaining = 0;
+            LOG_ERROR("NR pipeline capture allocation failed");
+            return;
+        }
         job->directory = state.pipelineCaptureDirectory / std::to_string(4 - state.pipelineCaptureRemaining);
         job->metadata << "stage_semantics before_nr=scene_linear_input after_nr=NR_composed_RR_input "
                          "after_rr=upscaler_output_before_postprocessing\n"
-                      << "game_frame " << ::State::Instance().frameCount << " command_list " << cmd
-                      << " parameters " << params << " rr " << rr << " feature_flags " << flags << '\n';
+                      << "game_frame " << ::State::Instance().frameCount << " command_list " << cmd << " parameters "
+                      << params << " rr " << rr << " feature_flags " << flags << '\n';
         const auto& cfg = *Config::Instance();
-        job->metadata << "nr_passes " << cfg.DlssNrPasses.value_or_default()
-                      << " working_scale " << cfg.DlssNrWorkingScale.value_or_default()
-                      << " nr_history_reset " << state.nr.reset
-                      << " hold " << cfg.DlssNrHoldFrame.value_or_default() << '\n';
-        for (const char* key : { NVSDK_NGX_Parameter_Reset, NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width,
-             NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, NVSDK_NGX_Parameter_OutWidth,
-             NVSDK_NGX_Parameter_OutHeight, NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_X,
-             NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_Y, NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X,
-             NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y })
+        job->metadata << "nr_passes " << cfg.DlssNrPasses.value_or_default() << " working_scale "
+                      << cfg.DlssNrWorkingScale.value_or_default() << " nr_history_reset " << state.nr.reset << " hold "
+                      << cfg.DlssNrHoldFrame.value_or_default() << '\n';
+        for (const char* key :
+             { NVSDK_NGX_Parameter_Reset, NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width,
+               NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, NVSDK_NGX_Parameter_OutWidth,
+               NVSDK_NGX_Parameter_OutHeight, NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_X,
+               NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_Y, NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_X,
+               NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y })
         {
-            unsigned value = 0; auto result = params->Get(key, &value);
+            unsigned value = 0;
+            auto result = params->Get(key, &value);
             job->metadata << key << ' ' << value << " get_result " << unsigned(result) << '\n';
         }
-        for (const char* key : { NVSDK_NGX_Parameter_MV_Scale_X, NVSDK_NGX_Parameter_MV_Scale_Y,
-             NVSDK_NGX_Parameter_Jitter_Offset_X, NVSDK_NGX_Parameter_Jitter_Offset_Y,
-             NVSDK_NGX_Parameter_DLSS_Pre_Exposure, NVSDK_NGX_Parameter_DLSS_Exposure_Scale,
-             NVSDK_NGX_Parameter_FrameTimeDeltaInMsec })
+        for (const char* key :
+             { NVSDK_NGX_Parameter_MV_Scale_X, NVSDK_NGX_Parameter_MV_Scale_Y, NVSDK_NGX_Parameter_Jitter_Offset_X,
+               NVSDK_NGX_Parameter_Jitter_Offset_Y, NVSDK_NGX_Parameter_DLSS_Pre_Exposure,
+               NVSDK_NGX_Parameter_DLSS_Exposure_Scale, NVSDK_NGX_Parameter_FrameTimeDeltaInMsec })
         {
-            float value = 0; auto result = params->Get(key, &value);
+            float value = 0;
+            auto result = params->Get(key, &value);
             job->metadata << key << ' ' << value << " get_result " << unsigned(result) << '\n';
         }
         // Record descriptors of optional RR inputs without assuming their presence.
         for (const char* key : { "DLSS.Input.DiffuseAlbedo", "DLSS.Input.SpecularAlbedo", "GBuffer.Normals",
-             "GBuffer.Roughness", "MotionVectorsReflection", "DLSSD.SpecularHitDistance",
-             "DLSS.Input.ColorBeforeParticles", "DLSSD.DiffuseHitDistance" })
+                                 "GBuffer.Roughness", "MotionVectorsReflection", "DLSSD.SpecularHitDistance",
+                                 "DLSS.Input.ColorBeforeParticles", "DLSSD.DiffuseHitDistance" })
         {
             auto* resource = state.GetResource(params, key, key);
             job->metadata << key << " resource " << resource;
             if (resource)
-            { auto desc = resource->GetDesc(); job->metadata << " width " << desc.Width << " height " << desc.Height
-                                                           << " format " << desc.Format; }
+            {
+                auto desc = resource->GetDesc();
+                job->metadata << " width " << desc.Width << " height " << desc.Height << " format " << desc.Format;
+            }
             job->metadata << '\n';
         }
         state.pipelineCapture = job.release();
@@ -538,16 +600,19 @@ void DlssNr_Dx12::DiagnosePipeline(unsigned stage, ID3D12GraphicsCommandList* cm
         state.lifetime.Record(cmd);
         const auto inputs = DlssNr::ResolveInputStates_Dx12(false);
         state.pipelineCapture->Copy(cmd, _device, "before_nr", color, inputs.color);
-        state.pipelineCapture->Copy(cmd, _device, "motion", state.GetResource(params,
-            NVSDK_NGX_Parameter_MotionVectors, "DLSSD.MotionVectors"), inputs.motion);
-        state.pipelineCapture->Copy(cmd, _device, "depth", state.GetResource(params,
-            NVSDK_NGX_Parameter_Depth, "DLSSD.Depth"), inputs.depth);
-        state.pipelineCapture->Copy(cmd, _device, "exposure", state.GetResource(params,
-            NVSDK_NGX_Parameter_ExposureTexture, "DLSSD.ExposureTexture"), inputs.exposure);
+        state.pipelineCapture->Copy(cmd, _device, "motion",
+                                    state.GetResource(params, NVSDK_NGX_Parameter_MotionVectors, "DLSSD.MotionVectors"),
+                                    inputs.motion);
+        state.pipelineCapture->Copy(cmd, _device, "depth",
+                                    state.GetResource(params, NVSDK_NGX_Parameter_Depth, "DLSSD.Depth"), inputs.depth);
+        state.pipelineCapture->Copy(
+            cmd, _device, "exposure",
+            state.GetResource(params, NVSDK_NGX_Parameter_ExposureTexture, "DLSSD.ExposureTexture"), inputs.exposure);
         return;
     }
     auto* job = state.pipelineCapture;
-    if (!job) return;
+    if (!job)
+        return;
     job->metadata << "stage " << stage << " success " << success << '\n';
     if (stage == 1)
     {
@@ -555,17 +620,21 @@ void DlssNr_Dx12::DiagnosePipeline(unsigned stage, ID3D12GraphicsCommandList* cm
         job->Copy(cmd, _device, "after_nr", color, DlssNr::ResolveInputStates_Dx12(false).color);
         return;
     }
-    if (success) job->Copy(cmd, _device, "after_rr", color, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    if (success)
+        job->Copy(cmd, _device, "after_rr", color, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     job->End(cmd);
     state.pipelineCapture = nullptr;
     --state.pipelineCaptureRemaining;
-    state.lifetime.Retire([job]
-    {
-        if (job->Write()) LOG_INFO("NR pipeline capture saved: {}", job->directory.string());
-        else LOG_WARN("NR pipeline capture discarded or write failed: {}", job->directory.string());
-        delete job;
-        --nrCaptureOutstanding;
-    });
+    state.lifetime.Retire(
+        [job]
+        {
+            if (job->Write())
+                LOG_INFO("NR pipeline capture saved: {}", job->directory.string());
+            else
+                LOG_WARN("NR pipeline capture discarded or write failed: {}", job->directory.string());
+            delete job;
+            --nrCaptureOutstanding;
+        });
 }
 
 void DlssNr_Dx12::ResetFinishedCommands(ID3D12CommandList* cmd) { _state->FinishedPictureResetCommandList(cmd); }

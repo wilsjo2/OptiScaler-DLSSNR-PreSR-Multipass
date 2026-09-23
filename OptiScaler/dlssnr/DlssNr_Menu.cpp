@@ -32,17 +32,17 @@ static void RenderPlacement(Config* config)
             ImGui::TextWrapped("%s", DlssNr::FinishedPictureStatus().c_str());
     }
 
-    const auto placement = ResolvePlacement(config->DlssNrRunBeforeSr.value_or_default(),
-                                            config->DlssNrDeferredDlss.value_or_default(),
-                                            config->DlssNrResidualAcrossRr.value_or_default(), finishedPicture);
+    const auto placement =
+        ResolvePlacement(config->DlssNrRunBeforeSr.value_or_default(), config->DlssNrDeferredDlss.value_or_default(),
+                         config->DlssNrResidualAcrossRr.value_or_default(), finishedPicture);
     if (placement.deferred)
     {
         ImGui::TextWrapped("Private upscale: %s", DlssNr::DeferredDlssStatus().c_str());
-        ImGui::TextWrapped(finishedPicture
-            ? "The game processes clean input through SR/RR and its effects. The separately upscaled NR edit is applied to the finished picture."
-            : "The game processes clean input through SR/RR. The separately upscaled NR edit is applied after upscale.");
+        ImGui::TextWrapped(finishedPicture ? "The game processes clean input through SR/RR and its effects. The "
+                                             "separately upscaled NR edit is applied to the finished picture."
+                                           : "The game processes clean input through SR/RR. The separately upscaled NR "
+                                             "edit is applied after upscale.");
     }
-
 }
 
 static void RenderStatus(Config* config)
@@ -79,10 +79,12 @@ static void RenderStatus(Config* config)
             ImGui::TextWrapped("NR needs the D3D12 bridge on D3D11. Choose an upscaler marked w/Dx12 and restart.");
         }
         else if (nativeVk && ResolvePlacement(config->DlssNrRunBeforeSr.value_or_default(),
-                     config->DlssNrDeferredDlss.value_or_default(),
-                     config->DlssNrResidualAcrossRr.value_or_default(), finishedPicture).deferred)
+                                              config->DlssNrDeferredDlss.value_or_default(),
+                                              config->DlssNrResidualAcrossRr.value_or_default(), finishedPicture)
+                                 .deferred)
         {
-            ImGui::TextWrapped("The private edit-upscale path requires DirectX 12 or its bridge. Disable separate edit upscaling to use native Vulkan NR.");
+            ImGui::TextWrapped("The private edit-upscale path requires DirectX 12 or its bridge. Disable separate edit "
+                               "upscaling to use native Vulkan NR.");
         }
         else
             ImGui::TextUnformatted("Waiting for the upscaler to run.");
@@ -146,8 +148,7 @@ void RenderMenu(Config* config, float menuResScale)
         if (PipelineUi::CheckboxWrapped("Enable Neural Rendering", &enabled, toggleWidth))
             config->DlssNrEnabled = enabled;
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "Enable NR processing.");
+            ImGui::SetTooltip("Enable NR processing.");
 
         bool applyModel = config->DlssNrApplyModel.value_or_default();
         if (PipelineUi::CheckboxWrapped("Apply model", &applyModel, toggleWidth))
@@ -173,7 +174,7 @@ void RenderMenu(Config* config, float menuResScale)
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip(placement.deferred ? "The separate-edit path always generates before upscale."
-                                               : "Run NR before the game's upscaler, including RR.");
+                                                 : "Run NR before the game's upscaler, including RR.");
 
         if (PipelineUi::CheckboxWrapped("Apply NR to the finished picture", &finished, toggleWidth))
         {
@@ -181,7 +182,8 @@ void RenderMenu(Config* config, float menuResScale)
             DlssNr::RetryAfterFailure();
         }
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Apply NR after game effects and HUD. Early generation carries the edit through a separate upscaler.");
+            ImGui::SetTooltip(
+                "Apply NR after game effects and HUD. Early generation carries the edit through a separate upscaler.");
 
         placement = ResolvePlacement(config->DlssNrRunBeforeSr.value_or_default(),
                                      config->DlssNrDeferredDlss.value_or_default(),
@@ -196,8 +198,9 @@ void RenderMenu(Config* config, float menuResScale)
                 config->DlssNrRunBeforeSr = deferred;
         }
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Keep the game's SR/RR input clean and upscale only the NR edit with a separate non-RR backend."
-                              "\nApply after upscale, or at presentation when finished-picture mode is enabled.");
+            ImGui::SetTooltip(
+                "Keep the game's SR/RR input clean and upscale only the NR edit with a separate non-RR backend."
+                "\nApply after upscale, or at presentation when finished-picture mode is enabled.");
         ImGui::Spacing();
 
         placement = ResolvePlacement(config->DlssNrRunBeforeSr.value_or_default(),
@@ -209,11 +212,13 @@ void RenderMenu(Config* config, float menuResScale)
             int backend = (int) GetPrivateUpscaler(config->DlssNrPrivateUpscaler.value_or_default());
             if (ImGui::Combo("Private NR upscaler", &backend, "DLSS\0FSR 2.2\0FSR (FidelityFX)\0XeSS\0"))
                 config->DlssNrPrivateUpscaler = backend;
-            HelpMarker("Upscales only the NR edit, with or without game RR. FSR (FidelityFX) and XeSS need their runtimes.");
+            HelpMarker(
+                "Upscales only the NR edit, with or without game RR. FSR (FidelityFX) and XeSS need their runtimes.");
         }
 
         PipelineUi::View view;
-        view.privateUpscaler = PrivateUpscalerName(GetPrivateUpscaler(config->DlssNrPrivateUpscaler.value_or_default()));
+        view.privateUpscaler =
+            PrivateUpscalerName(GetPrivateUpscaler(config->DlssNrPrivateUpscaler.value_or_default()));
         view.enabled = enabled;
         view.applyModel = config->DlssNrApplyModel.value_or_default();
         view.passes = config->DlssNrPasses.value_or_default();

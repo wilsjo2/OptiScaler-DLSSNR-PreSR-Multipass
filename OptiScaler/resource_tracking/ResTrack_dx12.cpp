@@ -107,19 +107,20 @@ static PFN_DrawInstanced o_DrawInstanced = nullptr;
 static PFN_DrawIndexedInstanced o_DrawIndexedInstanced = nullptr;
 static PFN_Reset o_Reset = nullptr;
 static PFN_ClearState o_ClearState = nullptr;
-using PFN_LateReset = HRESULT(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*, ID3D12CommandAllocator*, ID3D12PipelineState*);
+using PFN_LateReset = HRESULT(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*, ID3D12CommandAllocator*,
+                                                  ID3D12PipelineState*);
 static PFN_LateReset o_LateReset = nullptr;
 static HRESULT STDMETHODCALLTYPE hkLateReset(ID3D12GraphicsCommandList* cmd, ID3D12CommandAllocator* allocator,
                                              ID3D12PipelineState* pipeline)
 {
     const auto result = o_LateReset(cmd, allocator, pipeline);
-    if (SUCCEEDED(result)) DlssNr::FinishedPictureResetCommandList(cmd);
+    if (SUCCEEDED(result))
+        DlssNr::FinishedPictureResetCommandList(cmd);
     return result;
 }
 
 using PFN_ExecuteCommandLists = void(STDMETHODCALLTYPE*)(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*);
 static PFN_ExecuteCommandLists o_ExecuteCommandLists = nullptr;
-
 
 static PFN_OMSetRenderTargets o_OMSetRenderTargets = nullptr;
 static PFN_SetGraphicsRootDescriptorTable o_SetGraphicsRootDescriptorTable = nullptr;
@@ -733,7 +734,8 @@ void ResTrack_Dx12::hkCreateUnorderedAccessView(ID3D12Device* This, ID3D12Resour
 
 #pragma endregion
 
-static void STDMETHODCALLTYPE hkNrExecuteCommandLists(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists)
+static void STDMETHODCALLTYPE hkNrExecuteCommandLists(ID3D12CommandQueue* queue, UINT count,
+                                                      ID3D12CommandList* const* lists)
 {
     o_ExecuteCommandLists(queue, count, lists);
     DlssNr::FinishedPictureSubmitted(queue, count, lists);
@@ -2600,20 +2602,24 @@ void ResTrack_Dx12::HookLateNrQueue(ID3D12Device* device)
     static std::mutex hookMutex;
     std::lock_guard<std::mutex> lock(hookMutex);
     HookNrQueue(device);
-    if (o_LateReset) return;
+    if (o_LateReset)
+        return;
     ID3D12CommandAllocator* allocator = nullptr;
     ID3D12GraphicsCommandList* cmd = nullptr;
     if (SUCCEEDED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator))))
     {
-        if (SUCCEEDED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator, nullptr, IID_PPV_ARGS(&cmd))))
+        if (SUCCEEDED(
+                device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator, nullptr, IID_PPV_ARGS(&cmd))))
         {
             ID3D12GraphicsCommandList* real = nullptr;
-            if (!CheckForRealObject(__FUNCTION__, cmd, (IUnknown**)&real)) real = cmd;
-            o_LateReset = (PFN_LateReset)(*(void***)real)[10];
+            if (!CheckForRealObject(__FUNCTION__, cmd, (IUnknown**) &real))
+                real = cmd;
+            o_LateReset = (PFN_LateReset) (*(void***) real)[10];
             DetourTransactionBegin();
             DetourUpdateThread(GetCurrentThread());
-            DetourAttach(&(PVOID&)o_LateReset, hkLateReset);
-            if (DetourTransactionCommit() != NO_ERROR) o_LateReset = nullptr;
+            DetourAttach(&(PVOID&) o_LateReset, hkLateReset);
+            if (DetourTransactionCommit() != NO_ERROR)
+                o_LateReset = nullptr;
             cmd->Close();
             cmd->Release();
         }
@@ -2822,9 +2828,6 @@ void ResTrack_Dx12::ReleaseDeviceHooks()
     if (o_LateReset != nullptr)
         DetourDetach(&(PVOID&) o_LateReset, hkLateReset);
 
-
-
-
     auto detourResult = DetourTransactionCommit();
     if (detourResult != NO_ERROR)
     {
@@ -2914,8 +2917,6 @@ void ResTrack_Dx12::ReleaseHooks()
 
     if (o_LateReset != nullptr)
         DetourDetach(&(PVOID&) o_LateReset, hkLateReset);
-
-
 
     auto detourResult = DetourTransactionCommit();
     if (detourResult != NO_ERROR)

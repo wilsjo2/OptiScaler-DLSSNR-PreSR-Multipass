@@ -306,7 +306,8 @@ void DxgiFactoryHooks::HookToFactory(IDXGIFactory* pFactory)
         {
             o_CreateSwapChainForComposition = (PFN_CreateSwapChainForComposition) factory2VTable[24];
             if (o_CreateSwapChainForComposition != nullptr)
-                DetourAttach(&(PVOID&) o_CreateSwapChainForComposition, DxgiFactoryHooks::CreateSwapChainForComposition);
+                DetourAttach(&(PVOID&) o_CreateSwapChainForComposition,
+                             DxgiFactoryHooks::CreateSwapChainForComposition);
         }
     }
 
@@ -443,8 +444,8 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
     if (localDesc.BufferDesc.Height < 100 || localDesc.BufferDesc.Width < 100)
     {
         LOG_WARN("Overlay call! Width: {}, Height: {}, Format: {}, Count: {}, Hwnd: {:X}, Windowed: {}",
-                 pDesc->BufferDesc.Width, pDesc->BufferDesc.Height, (UINT) pDesc->BufferDesc.Format,
-                 pDesc->BufferCount, (SIZE_T) pDesc->OutputWindow, pDesc->Windowed);
+                 pDesc->BufferDesc.Width, pDesc->BufferDesc.Height, (UINT) pDesc->BufferDesc.Format, pDesc->BufferCount,
+                 (SIZE_T) pDesc->OutputWindow, pDesc->Windowed);
 
         ScopedSkipDxgiLoadChecks skipDxgiLoadChecks {};
         ScopedSkipParentWrapping skipParentWrapping {};
@@ -1299,18 +1300,15 @@ HRESULT DxgiFactoryHooks::CreateSwapChainForCoreWindow(IDXGIFactory2* realFactor
     return result;
 }
 
-
 HRESULT DxgiFactoryHooks::CreateSwapChainForComposition(IDXGIFactory2* realFactory, IUnknown* pDevice,
                                                         const DXGI_SWAP_CHAIN_DESC1* pDesc,
-                                                        IDXGIOutput* pRestrictToOutput,
-                                                        IDXGISwapChain1** ppSwapChain)
+                                                        IDXGIOutput* pRestrictToOutput, IDXGISwapChain1** ppSwapChain)
 {
     // Always call the trampoline, including pass-through/error cases. Calling the detoured virtual
     // method here re-enters this hook. Keep the composition descriptor intact: notably, a desktop
     // VSync override must not turn its FLIP_SEQUENTIAL swap effect into FLIP_DISCARD.
-    const bool passThrough = State::Instance().vulkanCreatingSC || _skipFGSwapChainCreation ||
-                             pDevice == nullptr || pDesc == nullptr || ppSwapChain == nullptr ||
-                             pDesc->Width < 100 || pDesc->Height < 100;
+    const bool passThrough = State::Instance().vulkanCreatingSC || _skipFGSwapChainCreation || pDevice == nullptr ||
+                             pDesc == nullptr || ppSwapChain == nullptr || pDesc->Width < 100 || pDesc->Height < 100;
     if (pDesc != nullptr && (pDesc->Width < 100 || pDesc->Height < 100))
         LOG_WARN("Composition overlay/helper call! Width: {}, Height: {}", pDesc->Width, pDesc->Height);
 

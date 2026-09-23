@@ -22,9 +22,9 @@ class DLSSDFeature : public virtual IFeature
     // "Creating DLSS feature" -- no 500ms init delay in between, because no init happened -- and a
     // silent fall back to FSR.
     //
-    // Found on the DLSS side, where Bannerlord hit it; identical here. The proxy's own InitDx11/InitDx12/InitVulkan are already
-    // idempotent and already keep a flag apiece, so these exist only to skip the deliberate delay
-    // between init and feature creation, and they have to be counted the same way the proxy counts.
+    // Found on the DLSS side, where Bannerlord hit it; identical here. The proxy's own InitDx11/InitDx12/InitVulkan are
+    // already idempotent and already keep a flag apiece, so these exist only to skip the deliberate delay between init
+    // and feature creation, and they have to be counted the same way the proxy counts.
     inline static bool _dlssdInitedDx11 = false;
     inline static bool _dlssdInitedDx12 = false;
     inline static bool _dlssdInitedVk = false;

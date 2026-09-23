@@ -163,13 +163,13 @@ std::string UpscalerToCode(Upscaler upscaler)
 Upscaler CodeToUpscaler(const std::string& code)
 {
     static const std::unordered_map<std::string, Upscaler> mapping = {
-        { "xess", Upscaler::XeSS },   { "xess_12", Upscaler::XeSS_on12 },
-        { "fsr21", Upscaler::FSR21 }, { "fsr21_12", Upscaler::FSR21_on12 },
-        { "fsr22", Upscaler::FSR22 }, { "fsr22_12", Upscaler::FSR22_on12 },
-        { "ffx", Upscaler::FFX },     { "ffx_12", Upscaler::FFX_on12 },
-        { "dlss", Upscaler::DLSS },   { "dlssd", Upscaler::DLSSD },
-        { "dlss_12", Upscaler::DLSS_on12 },
-        { "fsr31", Upscaler::FSR31 }, { "fsr31_12", Upscaler::FFX_on12 }, // for compat reasons
+        { "xess", Upscaler::XeSS },         { "xess_12", Upscaler::XeSS_on12 },
+        { "fsr21", Upscaler::FSR21 },       { "fsr21_12", Upscaler::FSR21_on12 },
+        { "fsr22", Upscaler::FSR22 },       { "fsr22_12", Upscaler::FSR22_on12 },
+        { "ffx", Upscaler::FFX },           { "ffx_12", Upscaler::FFX_on12 },
+        { "dlss", Upscaler::DLSS },         { "dlssd", Upscaler::DLSSD },
+        { "dlss_12", Upscaler::DLSS_on12 }, { "fsr31", Upscaler::FSR31 },
+        { "fsr31_12", Upscaler::FFX_on12 }, // for compat reasons
     };
 
     auto it = mapping.find(code);
