@@ -1,0 +1,55 @@
+name: One-shot updated PR109 release
+
+on:
+  push:
+    branches:
+      - fix/highlight-guard-brightening-only
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: contains(github.event.head_commit.message, '[release-pr109-updated]')
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: false
+
+      - name: Enable long paths
+        shell: powershell
+        run: git config --global core.longpaths true
+
+      - name: Checkout submodules
+        shell: powershell
+        run: git submodule update --init --recursive
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build package
+        shell: powershell
+        run: ./package_release.ps1 -Version highlight-guard-pr109-updated-20260926
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: highlight-guard-pr109-updated-20260926
+          name: Highlight Guard + updated PR109
+          body: |
+            Build from fix/highlight-guard-brightening-only with the updated PR #109 fixes.
+            Includes MatchGuides, corrected RenderMotionScale behavior at 100% model resolution, Vulkan parity, and the existing Highlight/Darkening Guard changes from this branch.
+          files: release/OptiScaler-NR-highlight-guard-pr109-updated-20260926.zip
+          fail_on_unmatched_files: true
+
+# retry-after-pr109-deps
+
+# retry-after-state-sync
+
+# retry-after-spatial-backend
+
+# retry-after-spatial-config
+
+# retry-after-vk-spatial

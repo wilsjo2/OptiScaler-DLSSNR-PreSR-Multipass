@@ -280,7 +280,10 @@ void RenderBlend(Config* config)
     }
 
     Slider("Highlight guard", config->DlssNrMaxRatio, 1.0f, 8.0f, "%.1fx", 2.0f);
-    HelpMarker("Limit pixel brightening and darkening.");
+    HelpMarker("Maximum brightening multiplier. Only excessive brightening is limited.");
+
+    Slider("Darkening guard", config->DlssNrMaxDarkening, 0.0f, 100.0f, "%.0f%%", 100.0f);
+    HelpMarker("Maximum luminance reduction. 100% leaves darkening uncapped; 50% prevents pixels from becoming darker than half their original luminance; 0% prevents darkening.");
 }
 
 void RenderInspect(Config* config)

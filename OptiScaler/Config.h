@@ -286,6 +286,17 @@ class Config
     CustomOptional<float> DlssNrEnvironmentColour { 1.0f };
     CustomOptional<bool> DlssNrShowSkinMask { false };
     CustomOptional<bool> DlssNrUnlockPasses { false };
+    // Below-native WorkingScale: resample depth and motion to the model's working size, so the
+    // guides and the colour it reprojects agree pixel for pixel. Off hands the model full-size
+    // guides for a smaller colour, which is what flickered at every scale below 100%.
+    CustomOptional<bool> DlssNrMatchGuides { true };
+    // The model's motion-vector scale converts the game's units to pixels of the motion texture the
+    // model is handed (the matched working-size resample, or the game's own region), measured
+    // against the size the vectors come in: the render size for low-resolution vectors, the output
+    // size otherwise (the DLSS-enlargement path's formula). Off restores the old conversion,
+    // working size / frame size, which halved every vector below 100% in a game upscaling 2x with
+    // low-resolution vectors.
+    CustomOptional<bool> DlssNrRenderMotionScale { true };
     // Passes 2..30 inherit pass 1, except LocalTone defaults to zero.
     struct NrPassOverrides
     {
@@ -308,8 +319,12 @@ class Config
     // Freeze NR input for tuning. See dlssnr/design/frame-hold.md.
     CustomOptional<bool> DlssNrHoldFrame { false };
 
-    // Maximum pixel brightening/darkening ratio.
+    // Maximum pixel brightening ratio.
     CustomOptional<float> DlssNrMaxRatio { 2.0f };
+
+    // Maximum luminance reduction allowed from the NR result, in percent.
+    // 100 means darkening is uncapped; 0 prevents any darkening.
+    CustomOptional<float> DlssNrMaxDarkening { 100.0f };
 
     // Reduced-resolution output: 0 classic, 1 matched residual, 2 matched residual + DLSS.
     CustomOptional<uint32_t> DlssNrTransfer { 1 };
@@ -331,6 +346,18 @@ class Config
 
     // Model width/height scale; composition remains at the input size.
     CustomOptional<float> DlssNrWorkingScale { 1.0f };
+
+    CustomOptional<bool> DlssNrSpatialCompression { false };
+    CustomOptional<float> DlssNrSpatialCenterX { 80.0f };
+    CustomOptional<float> DlssNrSpatialCenterY { 80.0f };
+    CustomOptional<float> DlssNrSpatialWorkX { 90.0f };
+    CustomOptional<float> DlssNrSpatialWorkY { 90.0f };
+    CustomOptional<float> DlssNrSpatialOffsetX { 0.0f };
+    CustomOptional<float> DlssNrSpatialOffsetY { 0.0f };
+    CustomOptional<float> DlssNrSpatialShiftX { 0.0f };
+    CustomOptional<float> DlssNrSpatialShiftY { 0.0f };
+    CustomOptional<bool> DlssNrSpatialShowCenter { false };
+    CustomOptional<bool> DlssNrSpatialShowWork { false };
 
     // Independent downsampling filter for NR model scales above 100%.
     CustomOptional<Scaler> DlssNrScalingDownscaler { Scaler::Lanczos3 };

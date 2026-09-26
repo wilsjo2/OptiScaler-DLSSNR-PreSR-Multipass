@@ -69,7 +69,7 @@ void ModelVk::Impl::ReleaseModels()
 }
 
 bool ModelVk::Impl::CreateModel(VkCommandBuffer commandBuffer, unsigned int passIndex, unsigned int width,
-                 unsigned int height, const Config& config)
+                                unsigned int height, const Config& config)
 {
     auto& model = state.models[passIndex];
     if (model.feature)
@@ -104,8 +104,7 @@ bool ModelVk::Impl::CreateModel(VkCommandBuffer commandBuffer, unsigned int pass
         for (unsigned int other = 0; other < DlssNr::MaxPassCount; ++other)
         {
             const auto* existing = state.models[other].feature;
-            if (other != passIndex && existing &&
-                (existing == model.feature || existing->Id == model.feature->Id))
+            if (other != passIndex && existing && (existing == model.feature || existing->Id == model.feature->Id))
             {
                 model.feature = nullptr; // owned by the other layer; do not double-release
                 Fail("the NVIDIA NGX driver reused a feature instead of creating an independent NR pass");
@@ -124,10 +123,10 @@ bool ModelVk::Impl::CreateModel(VkCommandBuffer commandBuffer, unsigned int pass
 }
 
 NVSDK_NGX_Result ModelVk::Impl::EvaluateModel(VkCommandBuffer commandBuffer, unsigned int passIndex,
-                              NVSDK_NGX_Resource_VK* colour, NVSDK_NGX_Resource_VK* depth,
-                              NVSDK_NGX_Resource_VK* motion, NVSDK_NGX_Resource_VK* output,
-                              unsigned int width, unsigned int height, const GuideRegions& guides,
-                              bool depthInverted, float mvX, float mvY, const Config& config)
+                                              NVSDK_NGX_Resource_VK* colour, NVSDK_NGX_Resource_VK* depth,
+                                              NVSDK_NGX_Resource_VK* motion, NVSDK_NGX_Resource_VK* output,
+                                              unsigned int width, unsigned int height, const GuideRegions& guides,
+                                              bool depthInverted, float mvX, float mvY, const Config& config)
 {
     auto& model = state.models[passIndex];
     auto* parameters = model.parameters;
@@ -184,6 +183,14 @@ void ModelVk::Impl::Shutdown()
     state.passClamp.Destroy(state.device);
     state.proxy.Destroy(state.device);
     state.proxySmall.Destroy(state.device);
+    state.depthSmall.Destroy(state.device);
+    state.motionSmall.Destroy(state.device);
+    state.spatialProxy.Destroy(state.device);
+    state.spatialDepth.Destroy(state.device);
+    state.spatialMotion.Destroy(state.device);
+    state.spatialProxyUnpacked.Destroy(state.device);
+    state.spatialAnswerUnpacked.Destroy(state.device);
+    state.spatialProxyNative.Destroy(state.device);
     state.outputNative.Destroy(state.device);
     state.keep.Destroy(state.device);
     state.exposureMeter.Destroy(state.device);
@@ -191,6 +198,7 @@ void ModelVk::Impl::Shutdown()
 
     state.superUp.reset();
     state.superDown.reset();
+    state.spatialDownProxy.reset();
     state.nrScaler = Scaler::Count;
 
     if (state.queryPool != VK_NULL_HANDLE && state.device != VK_NULL_HANDLE)
@@ -207,9 +215,21 @@ void ModelVk::Impl::Shutdown()
     state.height = 0;
     state.ngxInitialised = false;
     state.reset = true;
+    state.spatialLayout = {};
+    state.spatialAttemptLayout = {};
+    state.spatialColourFormat = VK_FORMAT_UNDEFINED;
+    state.spatialDepthFormat = VK_FORMAT_UNDEFINED;
+    state.spatialMotionFormat = VK_FORMAT_UNDEFINED;
+    state.spatialDepthWidth = state.spatialDepthHeight = 0;
+    state.spatialMotionWidth = state.spatialMotionHeight = 0;
+    state.spatialDisabled = false;
+    state.spatialRan = false;
+    state.spatialStatus.clear();
 }
 
-bool ModelVk::Impl::PrepareModels(VkCommandBuffer cmdBuffer, const DlssNrFrameInfo_Vk& frame, uint32_t width, uint32_t height, uint32_t workWidth, uint32_t workHeight, float workScale, unsigned int passes)
+bool ModelVk::Impl::PrepareModels(VkCommandBuffer cmdBuffer, const DlssNrFrameInfo_Vk& frame, uint32_t width,
+                                  uint32_t height, uint32_t workWidth, uint32_t workHeight, float workScale,
+                                  unsigned int passes, const Spatial::Layout& spatial)
 {
     auto& cfg = *Config::Instance();
     const auto instance = state.instance;
@@ -217,7 +237,7 @@ bool ModelVk::Impl::PrepareModels(VkCommandBuffer cmdBuffer, const DlssNrFrameIn
     const auto device = state.device;
     const bool beforeSr = frame.BeforeUpscale;
     const bool rayReconstruction = frame.RayReconstruction;
-    const bool reduced = workWidth != width || workHeight != height;
+    const bool reduced = !spatial.active && (workWidth != width || workHeight != height);
     if (!InitDriver(instance, physicalDevice, device))
         return false;
 
@@ -265,8 +285,8 @@ bool ModelVk::Impl::PrepareModels(VkCommandBuffer cmdBuffer, const DlssNrFrameIn
     for (unsigned int pass = 0; pass < passes; ++pass)
         profileChanged |= state.builtSettings[pass] != Profiles::PassSettings(cfg, pass);
     if (state.width != width || state.height != height || state.workWidth != workWidth ||
-        state.workHeight != workHeight || state.beforeSr != beforeSr ||
-        state.rayReconstruction != rayReconstruction || profileChanged)
+        state.workHeight != workHeight || state.beforeSr != beforeSr || state.rayReconstruction != rayReconstruction ||
+        profileChanged || ((state.spatialLayout.requested || spatial.requested) && state.spatialLayout != spatial))
     {
         // This block releases the feature and frees the surfaces below IMMEDIATELY. A frame-size
         // change is already fenced by the game -- it recreates the swapchain around it -- but moving
@@ -288,22 +308,50 @@ bool ModelVk::Impl::PrepareModels(VkCommandBuffer cmdBuffer, const DlssNrFrameIn
         const VkFormat working = VK_FORMAT_R16G16B16A16_SFLOAT;
 
         state.proxySmall.Destroy(state.device);
+        state.depthSmall.Destroy(state.device);
+        state.motionSmall.Destroy(state.device);
+        state.spatialProxy.Destroy(state.device);
+        state.spatialDepth.Destroy(state.device);
+        state.spatialMotion.Destroy(state.device);
+        state.spatialProxyUnpacked.Destroy(state.device);
+        state.spatialAnswerUnpacked.Destroy(state.device);
+        state.spatialProxyNative.Destroy(state.device);
         state.outputNative.Destroy(state.device);
 
         // output is the model's target, so it is the working size. proxy and keep are full: proxy is
         // the source the downsample reads, keep is the untouched frame the resolve composites onto.
         // outputNative is the native buffer the supersample down-leg averages the answer into.
+        // depthSmall / motionSmall hold the matched guides below native; they are made whether or
+        // not MatchGuides is on, so the switch can be flipped at run time without a resize.
+        const bool belowNative = reduced && workWidth < width;
         const bool ok = CreateImage(state.output, workWidth, workHeight, working) &&
                         (passes == 1 || (CreateImage(state.scratch, workWidth, workHeight, working) &&
                                          CreateImage(state.passClamp, workWidth, workHeight, working))) &&
                         CreateImage(state.proxy, width, height, working) &&
                         CreateImage(state.keep, width, height, working) &&
                         (!reduced || CreateImage(state.proxySmall, workWidth, workHeight, working)) &&
+                        (!belowNative ||
+                         (CreateImage(state.depthSmall, workWidth, workHeight, VK_FORMAT_R32_SFLOAT) &&
+                          CreateImage(state.motionSmall, workWidth, workHeight, VK_FORMAT_R32G32B32A32_SFLOAT))) &&
                         (workScale <= 1.0f || CreateImage(state.outputNative, width, height, working));
 
         if (!ok)
         {
             Fail("the pass could not allocate its own surfaces");
+            return false;
+        }
+
+        if (spatial.active &&
+            (!CreateImage(state.spatialProxy, workWidth, workHeight, working) ||
+             !CreateImage(state.spatialDepth, workWidth, workHeight, VK_FORMAT_R32_SFLOAT) ||
+             !CreateImage(state.spatialMotion, workWidth, workHeight, VK_FORMAT_R32G32B32A32_SFLOAT) ||
+             !CreateImage(state.spatialProxyUnpacked, spatial.ordinaryW, spatial.ordinaryH, working) ||
+             !CreateImage(state.spatialAnswerUnpacked, spatial.ordinaryW, spatial.ordinaryH, working) ||
+             (workScale > 1.0f && !CreateImage(state.spatialProxyNative, width, height, working))))
+        {
+            state.spatialDisabled = true;
+            state.spatialStatus = "Spatial compression unavailable: could not allocate packed surfaces";
+            LOG_WARN("DLSS-NR Vulkan: {}", state.spatialStatus);
             return false;
         }
 
@@ -314,6 +362,7 @@ bool ModelVk::Impl::PrepareModels(VkCommandBuffer cmdBuffer, const DlssNrFrameIn
         state.beforeSr = beforeSr;
         state.rayReconstruction = rayReconstruction;
         state.activePasses = passes;
+        state.spatialLayout = spatial;
         for (unsigned int pass = 0; pass < passes; ++pass)
             state.builtSettings[pass] = Profiles::PassSettings(cfg, pass);
         state.reset = true;
@@ -325,10 +374,19 @@ bool ModelVk::Impl::PrepareModels(VkCommandBuffer cmdBuffer, const DlssNrFrameIn
         if (state.models[pass].feature)
             continue;
         if (!CreateModel(cmdBuffer, pass, workWidth, workHeight, cfg))
+        {
+            if (spatial.active)
+            {
+                state.spatialDisabled = true;
+                state.spatialStatus = "Spatial compression unavailable: the driver rejected the packed model";
+                state.failed = false;
+                state.reason = "";
+            }
             return false;
+        }
 
-        LOG_INFO("DLSS-NR Vulkan: pass {} built at {}x{} (frame {}x{}, {} SR)", pass + 1, workWidth, workHeight,
-                 width, height, beforeSr ? "before" : "after");
+        LOG_INFO("DLSS-NR Vulkan: pass {} built at {}x{} (frame {}x{}, {} SR)", pass + 1, workWidth, workHeight, width,
+                 height, beforeSr ? "before" : "after");
         created = true;
         state.reset = true;
     }

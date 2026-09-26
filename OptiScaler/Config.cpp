@@ -346,6 +346,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrTransferStrength.set_from_config(readFloat("DlssNr", "TransferStrength"));
             DlssNrColourStrength.set_from_config(readFloat("DlssNr", "ColourStrength"));
             DlssNrMaxRatio.set_from_config(readFloat("DlssNr", "MaxRatio"));
+            DlssNrMaxDarkening.set_from_config(readFloat("DlssNr", "MaxDarkening"));
             DlssNrTransfer.set_from_config(readUInt("DlssNr", "Transfer"));
 
             DlssNrDebugView.set_from_config(readUInt("DlssNr", "DebugView"));
@@ -356,6 +357,17 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrCompareTags.set_from_config(readBool("DlssNr", "CompareTags"));
             DlssNrTagScale.set_from_config(readFloat("DlssNr", "TagScale"));
             DlssNrWorkingScale.set_from_config(readFloat("DlssNr", "WorkingScale"));
+            DlssNrSpatialCompression.set_from_config(readBool("DlssNr", "SpatialCompression"));
+            DlssNrSpatialCenterX.set_from_config(readFloat("DlssNr", "SpatialCenterX"));
+            DlssNrSpatialCenterY.set_from_config(readFloat("DlssNr", "SpatialCenterY"));
+            DlssNrSpatialWorkX.set_from_config(readFloat("DlssNr", "SpatialWorkX"));
+            DlssNrSpatialWorkY.set_from_config(readFloat("DlssNr", "SpatialWorkY"));
+            DlssNrSpatialOffsetX.set_from_config(readFloat("DlssNr", "SpatialOffsetX"));
+            DlssNrSpatialOffsetY.set_from_config(readFloat("DlssNr", "SpatialOffsetY"));
+            DlssNrSpatialShiftX.set_from_config(readFloat("DlssNr", "SpatialShiftX"));
+            DlssNrSpatialShiftY.set_from_config(readFloat("DlssNr", "SpatialShiftY"));
+            DlssNrSpatialShowCenter.set_from_config(readBool("DlssNr", "SpatialShowCenter"));
+            DlssNrSpatialShowWork.set_from_config(readBool("DlssNr", "SpatialShowWork"));
 
             if (auto v = readEnum<Scaler>("DlssNr", "ScalingDownscaler"))
                 DlssNrScalingDownscaler.set_from_config(*v);
@@ -387,6 +399,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrEnvironmentColour.set_from_config(readFloat("DlssNr", "EnvironmentColour"));
             DlssNrShowSkinMask.set_from_config(readBool("DlssNr", "ShowSkinMask"));
             DlssNrUnlockPasses.set_from_config(readBool("DlssNr", "UnlockPasses"));
+            DlssNrMatchGuides.set_from_config(readBool("DlssNr", "MatchGuides"));
+            DlssNrRenderMotionScale.set_from_config(readBool("DlssNr", "RenderMotionScale"));
             for (unsigned int i = 0; i < std::size(DlssNrPassOverrides); ++i)
             {
                 auto& pass = DlssNrPassOverrides[i];
@@ -1282,6 +1296,8 @@ bool Config::SaveIni(std::filesystem::path destination)
     ini.SetValue("DlssNr", "ColourStrength",
                  GetFloatValue(Instance()->DlssNrColourStrength.value_for_config()).c_str());
     ini.SetValue("DlssNr", "MaxRatio", GetFloatValue(Instance()->DlssNrMaxRatio.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "MaxDarkening",
+                 GetFloatValue(Instance()->DlssNrMaxDarkening.value_for_config()).c_str());
     ini.SetValue("DlssNr", "Transfer", GetIntValue(Instance()->DlssNrTransfer.value_for_config()).c_str());
 
     ini.SetValue("DlssNr", "DebugView", GetIntValue(Instance()->DlssNrDebugView.value_for_config()).c_str());
@@ -1297,6 +1313,28 @@ bool Config::SaveIni(std::filesystem::path destination)
     ini.SetValue("DlssNr", "TagScale",
                  GetFloatValue(Instance()->DlssNrTagScale.value_for_config()).c_str());
     ini.SetValue("DlssNr", "WorkingScale", GetFloatValue(Instance()->DlssNrWorkingScale.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "SpatialCompression",
+                 GetBoolValue(Instance()->DlssNrSpatialCompression.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "SpatialCenterX",
+                 GetFloatValue(Instance()->DlssNrSpatialCenterX.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "SpatialCenterY",
+                 GetFloatValue(Instance()->DlssNrSpatialCenterY.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "SpatialWorkX",
+                 GetFloatValue(Instance()->DlssNrSpatialWorkX.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "SpatialWorkY",
+                 GetFloatValue(Instance()->DlssNrSpatialWorkY.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "SpatialOffsetX",
+                 GetFloatValue(Instance()->DlssNrSpatialOffsetX.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "SpatialOffsetY",
+                 GetFloatValue(Instance()->DlssNrSpatialOffsetY.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "SpatialShiftX",
+                 GetFloatValue(Instance()->DlssNrSpatialShiftX.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "SpatialShiftY",
+                 GetFloatValue(Instance()->DlssNrSpatialShiftY.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "SpatialShowCenter",
+                 GetBoolValue(Instance()->DlssNrSpatialShowCenter.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "SpatialShowWork",
+                 GetBoolValue(Instance()->DlssNrSpatialShowWork.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ScalingDownscaler", GetIntValue(Instance()->DlssNrScalingDownscaler).c_str());
 
     ini.SetValue("DlssNr", "Passes", GetIntValue(Instance()->DlssNrPasses.value_for_config()).c_str());
@@ -1334,6 +1372,8 @@ bool Config::SaveIni(std::filesystem::path destination)
     ini.SetValue("DlssNr", "EnvironmentColour", GetFloatValue(Instance()->DlssNrEnvironmentColour.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ShowSkinMask", GetBoolValue(Instance()->DlssNrShowSkinMask.value_for_config()).c_str());
     ini.SetValue("DlssNr", "UnlockPasses", GetBoolValue(Instance()->DlssNrUnlockPasses.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "MatchGuides", GetBoolValue(Instance()->DlssNrMatchGuides.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "RenderMotionScale", GetBoolValue(Instance()->DlssNrRenderMotionScale.value_for_config()).c_str());
     for (unsigned int i = 0; i < std::size(Instance()->DlssNrPassOverrides); ++i)
     {
         auto& pass = Instance()->DlssNrPassOverrides[i];

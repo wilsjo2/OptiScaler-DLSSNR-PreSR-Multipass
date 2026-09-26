@@ -28,8 +28,17 @@ enum DlssNrMode : uint32_t
     DlssNrMode_EncodeProxyResidual = 9,
     DlssNrMode_Meter = 3,
     DlssNrMode_AutoExposure = 11,
-    DlssNrMode_ResizePrivateGuides = 10
+    DlssNrMode_ResizePrivateGuides = 10,
+    DlssNrMode_EncodeResizeField = 12
 };
+
+inline bool DlssNrUsesDlssEnlargement(uint32_t transfer) { return transfer == 2 || transfer == 4; }
+
+// The spatial mode is used until the caller has supplied an enlarged DLSS carrier.
+inline uint32_t DlssNrSpatialTransfer(uint32_t transfer)
+{
+    return DlssNrUsesDlssEnlargement(transfer) ? transfer - 1 : std::min(transfer, 3u);
+}
 
 // Finished-colour shader's exposure-normalised brightness response, -12..12 stops.
 constexpr uint32_t kDlssNrHdrCurveBins = 48;
@@ -201,7 +210,9 @@ struct alignas(256) DlssNrConstants
     // to A/B against), 1 = apply the model's edit. Trailing scalar, mirrored in the shader cbuffer.
     uint32_t ApplyModel;
 
-    uint32_t Reserved; // Preserve the shared constant-buffer layout.
+    // Reuses the former Reserved slot, so the 256-byte shared constant-buffer layout and all
+    // subsequent offsets remain unchanged. Percentage: 100 = uncapped darkening, 0 = no darkening.
+    float MaxDarkening;
     float ResidualScale; // Scene pre-exposure used to encode/decode the private residual carrier.
     // Optional colour-based final-composition mask. Not the runtime's semantic mask.
     uint32_t SkinProtection;
@@ -261,7 +272,8 @@ class DlssNr_Common
         constants.ColourStrength = config.DlssNrColourStrength.value_or_default();
         constants.DebugView = config.DlssNrDebugView.value_or_default();
         constants.MaxRatio = config.DlssNrMaxRatio.value_or_default();
-        constants.Transfer = std::min(config.DlssNrTransfer.value_or_default(), 1u);
+        constants.MaxDarkening = std::clamp(config.DlssNrMaxDarkening.value_or_default(), 0.0f, 100.0f);
+        constants.Transfer = DlssNrSpatialTransfer(config.DlssNrTransfer.value_or_default());
         constants.DebugScale = config.DlssNrWhitePointScale.value_or_default();
         constants.CompareMode = config.DlssNrCompare.value_or_default();
         constants.CompareSplit = config.DlssNrCompareSplit.value_or_default();
