@@ -53,6 +53,13 @@ struct VkState
     // scale slider. Unused (and never created) at scale 1, so the default path is unchanged.
     ImageVk proxySmall;
 
+    // Below-native working size, MatchGuides: depth and motion resampled to the working size so
+    // the model's guides agree with the colour it is given (R32F, and RGBA32F for motion since RG32F
+    // storage writes need shaderStorageImageExtendedFormats; NGX reads xy). The D3D12 path's
+    // depthSmall / motionSmall. Never created at scale >= 1.
+    ImageVk depthSmall;
+    ImageVk motionSmall;
+
     // Spatial compression has its own packed model input and typed packed guides. Vulkan
     // stores motion in RGBA32F to avoid requiring shaderStorageImageExtendedFormats for
     // RG32F storage writes; NGX reads its xy channels. The two ordinary-size images hold
@@ -111,6 +118,7 @@ struct ModelVk::Impl
     VkState state;
     bool reported = false;
     bool warnedVkSuper = false;
+    bool warnedMatchGuides = false;
     bool saidEncoding = false;
     bool warnedDeferred = false;
     std::mutex mutex;

@@ -286,6 +286,17 @@ class Config
     CustomOptional<float> DlssNrEnvironmentColour { 1.0f };
     CustomOptional<bool> DlssNrShowSkinMask { false };
     CustomOptional<bool> DlssNrUnlockPasses { false };
+    // Below-native WorkingScale: resample depth and motion to the model's working size, so the
+    // guides and the colour it reprojects agree pixel for pixel. Off hands the model full-size
+    // guides for a smaller colour, which is what flickered at every scale below 100%.
+    CustomOptional<bool> DlssNrMatchGuides { true };
+    // The model's motion-vector scale converts the game's units to pixels of the motion texture the
+    // model is handed (the matched working-size resample, or the game's own region), measured
+    // against the size the vectors come in: the render size for low-resolution vectors, the output
+    // size otherwise (the DLSS-enlargement path's formula). Off restores the old conversion,
+    // working size / frame size, which halved every vector below 100% in a game upscaling 2x with
+    // low-resolution vectors.
+    CustomOptional<bool> DlssNrRenderMotionScale { true };
     // Passes 2..30 inherit pass 1, except LocalTone defaults to zero.
     struct NrPassOverrides
     {

@@ -118,5 +118,7 @@ class DlssNr_Vk : public Shader_Vk
                   VkImageLayout InSourceLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                   VkImageLayout InMotionLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, bool finishedColor = false,
                   // Initialize to UINT32_MAX; identical bindings/constants within one model chain only.
-                  uint32_t* immutableSlot = nullptr);
+                  uint32_t* immutableSlot = nullptr,
+                  // The guide resample (mode 10) reads the game's motion vectors through the model slot.
+                  VkImageLayout InModelLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 };

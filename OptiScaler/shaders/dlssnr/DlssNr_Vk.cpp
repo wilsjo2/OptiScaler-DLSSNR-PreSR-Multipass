@@ -201,7 +201,8 @@ void DlssNr_Vk::WriteDescriptors(VkDescriptorSet set, VkDeviceSize constantOffse
 bool DlssNr_Vk::Dispatch(VkCommandBuffer InCmdList, const DlssNrConstants& InConstants, uint32_t InThreadsX,
                          uint32_t InThreadsY, VkImageView InSource, VkImageView InModel, VkImageView InOriginal,
                          VkImageView InMotion, VkImageView InTarget, VkImageView InKeep, VkImageLayout InSourceLayout,
-                         VkImageLayout InMotionLayout, bool finishedColor, uint32_t* immutableSlot)
+                         VkImageLayout InMotionLayout, bool finishedColor, uint32_t* immutableSlot,
+                         VkImageLayout InModelLayout)
 {
     if (!CanRender() || InCmdList == VK_NULL_HANDLE || (finishedColor && !_finishedPipeline))
         return false;
@@ -224,7 +225,7 @@ bool DlssNr_Vk::Dispatch(VkCommandBuffer InCmdList, const DlssNrConstants& InCon
         std::memcpy((char*) _mappedConstantBuffer + offset, &InConstants, sizeof(DlssNrConstants));
 
         WriteDescriptors(_descriptorSets[slot], offset, InSource, InModel, InOriginal, InMotion, InTarget, InKeep,
-                         InSourceLayout, InMotionLayout);
+                         InSourceLayout, InMotionLayout, InModelLayout);
         if (immutableSlot)
             *immutableSlot = slot;
     }
