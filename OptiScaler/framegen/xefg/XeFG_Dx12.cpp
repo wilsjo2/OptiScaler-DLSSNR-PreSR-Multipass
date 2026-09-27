@@ -6,11 +6,33 @@
 
 #include <nvapi/fakenvapi.h>
 
+#include <dlssnr/DlssNrFeature_Dx12.h>
+#include <dlssnr/DlssNr_FinishedConsumer.h>
+
 #include <magic_enum.hpp>
 
 #include <DirectXMath.h>
 
+#include <atomic>
+#include <limits>
+
 using namespace DirectX;
+
+namespace
+{
+// First 8 NR_XEFG_SKIP lines per process stay INFO - cold start and loading are where a skip
+// is a signal worth reading - and every skip afterwards is the same line at debug level, so a
+// steady-state skip never floods the owner log. One budget is shared by every skip site so the
+// per-process cap is a cap on the whole vocabulary.
+void LogNrXefgSkip(uint64_t generation, uint64_t frame, const char* reason)
+{
+    static std::atomic<uint32_t> skipInfoLines { 0 };
+    if (skipInfoLines.fetch_add(1, std::memory_order_relaxed) < 8)
+        LOG_INFO("NR_XEFG_SKIP generation={} frame={} reason={}", generation, frame, reason);
+    else
+        LOG_DEBUG("NR_XEFG_SKIP generation={} frame={} reason={}", generation, frame, reason);
+}
+} // namespace
 
 void XeFG_Dx12::xefgLogCallback(const char* message, xefg_swapchain_logging_level_t level, void* userData)
 {
@@ -442,6 +464,10 @@ bool XeFG_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQu
     _gameCommandQueue = realQueue;
     _swapChain = *swapChain;
     _hwnd = hwnd;
+    _proxyFormat = desc->BufferDesc.Format;
+
+    // A new app-facing proxy: fresh handoff generation, stale captures closed.
+    ResetNrHandoff();
 
     return true;
 }
@@ -611,6 +637,10 @@ bool XeFG_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* cmdQ
     _gameCommandQueue = realQueue;
     _swapChain = *swapChain;
     _hwnd = hwnd;
+    _proxyFormat = desc->Format;
+
+    // A new app-facing proxy: fresh handoff generation, stale captures closed.
+    ResetNrHandoff();
 
     return true;
 }
@@ -626,6 +656,12 @@ void XeFG_Dx12::CreateContext(ID3D12Device* device, FG_Constants& fgConstants)
     {
         _fgContext = _swapChainContext;
         _lastDispatchedFrame = 0;
+        // A new FG context is a discontinuity like activation: _fgContext is nulled only by
+        // DestroyFGContext, whose Deactivate() resets the handoff only when it actually
+        // deactivated, and NR keeps queuing pending captures while no FG context exists - so the
+        // recreated context starts from a fresh generation with every stale capture closed, never
+        // the destroyed era's leftovers.
+        ResetNrHandoff();
     }
 
     if (_isActive)
@@ -656,6 +692,11 @@ void XeFG_Dx12::Activate()
         {
             _isActive = true;
             _lastDispatchedFrame = 0;
+            // FG activation is a discontinuity: fresh handoff generation.
+            ResetNrHandoff();
+            // The owned handoff consumes captures only while it is active AND unpaused; the
+            // per-present publication below keeps this honest through a pause.
+            PublishFinishedConsumerState(!IsPaused());
         }
 
         LOG_INFO("SetEnabled: true, result: {} ({})", magic_enum::enum_name(result), (UINT) result);
@@ -701,6 +742,10 @@ void XeFG_Dx12::Deactivate()
         _waitingNewFrameData = false;
 
         LOG_INFO("SetEnabled: false, result: {} ({})", magic_enum::enum_name(result), (UINT) result);
+
+        // FG deactivation is a discontinuity: fresh handoff generation.
+        if (!_isActive)
+            ResetNrHandoff();
     }
 }
 
@@ -1381,7 +1426,211 @@ bool XeFG_Dx12::Present()
 
     _fgFramePresentId++;
 
-    return Dispatch();
+    // Owned NR handoff: the finished application picture. Dispatch() above prepares this frame's
+    // interpolation (constants, present id, tagged resources) on the SDK context; NR composed here
+    // on the XeFG-retained application queue is ordered before interpolation and before FGHooks
+    // forwards the original proxy Present. The active-state guard earlier in this function is
+    // commented out and Dispatch() itself can Deactivate FG on a tagging error, so the handoff
+    // re-checks the active state explicitly before touching the finished picture.
+    const bool dispatched = Dispatch();
+
+    // Publish the consumer state this frame actually offers: the handoff runs only while the
+    // feature is active and unpaused, so a paused/reactivating provider must not admit captures
+    // (they would stay owned until the pause ends and could be selected stale).
+    const bool consumes = dispatched && IsActive() && !IsPaused();
+    PublishFinishedConsumerState(consumes);
+
+    if (consumes)
+        OwnedNrHandoff();
+
+    return dispatched;
+}
+
+// Swapchain recreation / FG discontinuity: a fresh handoff generation. The tracker drops identity
+// and interval state - nothing is applied and nothing is released; in-flight GPU ownership stays
+// with NR - and the old generation's pending captures are closed so they can never become a later
+// frame's NR input (fences still protect reuse).
+void XeFG_Dx12::ResetNrHandoff()
+{
+    ++_nrGeneration;
+    _nrHandoff.Reset(_nrGeneration);
+    // A fresh generation has no consumer until XeFG activates: captures armed now would stay owned
+    // with nothing to compose them, so the arm path is told to refuse them. Activate()/Present()
+    // publish the usable state again.
+    if (ClaimsFinishedConsumer())
+        DlssNr::PublishFinishedConsumer(DlssNr::FinishedConsumer::XeFGWaiting);
+    DlssNr::XeFGCloseCaptures(std::numeric_limits<uint64_t>::max());
+}
+
+// The registered app-facing proxy owns the consumer state. A stale instance that is no longer
+// current must never publish (it would clobber the live owner's state).
+bool XeFG_Dx12::OwnsFinishedConsumer() const
+{
+    return DlssNr::FinishedConsumerIsOwner(_swapChain, State::Instance().currentFGSwapchain);
+}
+
+// During proxy creation the registered swapchain may not be published yet; claiming is allowed
+// only while no other owner exists.
+bool XeFG_Dx12::ClaimsFinishedConsumer() const
+{
+    return DlssNr::FinishedConsumerMayPublish(_swapChain, State::Instance().currentFGSwapchain);
+}
+
+// Publish the consumer state for this instance's *usable* handoff. `consumes` must be the same
+// predicate that decides whether OwnedNrHandoff runs this present.
+void XeFG_Dx12::PublishFinishedConsumerState(bool consumes)
+{
+    if (!OwnsFinishedConsumer())
+        return;
+    if (consumes)
+    {
+        DlssNr::PublishFinishedConsumer(DlssNr::FinishedConsumer::XeFGAvailable);
+        return;
+    }
+    // Available -> Waiting (pause/deactivate): the captures armed for this consumer must not
+    // survive the pause and be selected stale later, so close every interval and start a fresh
+    // generation before refusing admission. ResetNrHandoff publishes Waiting itself.
+    if (DlssNr::CurrentFinishedConsumer() == DlssNr::FinishedConsumer::XeFGAvailable)
+        ResetNrHandoff();
+    else
+        DlssNr::PublishFinishedConsumer(DlssNr::FinishedConsumer::XeFGWaiting);
+}
+
+// Owned NR handoff for the finished application picture. Runs once per accepted application frame
+// at the end of Present(): game rendering and provider UI submissions are complete and Dispatch()
+// tagged this frame, so the app-facing proxy's current backbuffer is the finished application
+// picture. The seam's decision core (dlssnr/DlssNr_XeFGHandoff.h, the identity/capture-interval
+// tracker) is fed the capture-lifecycle facts and called exactly once; NR composes on the
+// XeFG-retained application queue (_gameCommandQueue, NEVER State.currentCommandQueue), so it is
+// ordered before interpolation. There is no Present-side CPU wait and no new cross-queue wait: a
+// producer that is not submitted or not ready is skipped with a named reason and closed.
+void XeFG_Dx12::OwnedNrHandoff()
+{
+    auto& config = *Config::Instance();
+
+    if (State::Instance().isShuttingDown || _swapChain == nullptr || _gameCommandQueue == nullptr)
+        return;
+
+    // Owning application proxy only: this feature's app-facing proxy must be the registered FG
+    // swapchain (an older XeFG proxy instance being presented by the game is passed through
+    // untouched; FGPresent likewise reports only the owning proxy's present). The interop check
+    // matches the generic path: an interop swapchain never takes the finished-picture route.
+    if (_swapChain != State::Instance().currentFGSwapchain ||
+        State::Instance().swapchainInteropApi != SwapchainInteropApi::None)
+        return;
+
+    // The finished-picture placement only; when it is off the handoff stays silent, exactly like
+    // the generic path (shaders/dlssnr/DlssNr_Late.inl ApplyToFinishedPicture).
+    if (!config.DlssNrEnabled.value_or_default() || !config.DlssNrFinishedPicture.value_or_default())
+        return;
+
+    // Swapchain/buffer/colour-space queries BEFORE any NR lock: FG Present can submit commands
+    // while holding its own lock (the ApplyToFinishedPicture ordering rule).
+    Microsoft::WRL::ComPtr<IDXGISwapChain3> chain;
+    Microsoft::WRL::ComPtr<ID3D12Resource> picture;
+    if (FAILED(_swapChain->QueryInterface(IID_PPV_ARGS(&chain))) ||
+        FAILED(chain->GetBuffer(chain->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&picture))))
+    {
+        // A decided present always reports APPLY or SKIP: the acquisition failure is a named skip,
+        // not a silent return.
+        LogNrXefgSkip(_nrGeneration, _lastDispatchedFrame, "buffer_acquisition_failed");
+        return;
+    }
+
+    // Colour metadata: the app-facing carrier is authoritative for the owning proxy, then the
+    // proxy's recorded key, then the format-derived encoding. The lookup starts from a fixed
+    // G22/709 SDR baseline and only overrides it from recorded keys (SetPrivateData): an HDR10
+    // proxy that never called SetColorSpace1 composes as SDR, the same fallback rule as the
+    // generic path (DlssNr_Late.inl ApplyToFinishedPicture), and an FP16 proxy is refused outright
+    // at the wiring-level refusal below, so it never composes scRGB-derived data.
+    DXGI_COLOR_SPACE_TYPE colorSpace = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+    UINT colorSpaceSize = sizeof(colorSpace);
+    chain->GetPrivateData(DlssNr::FinishedColorSpaceKey, &colorSpaceSize, &colorSpace);
+
+    FGHooks::FGColorSpaceCarrier carrier {};
+    if (FGHooks::GetFGColorSpaceCarrier(carrier) && carrier.valid && carrier.current() &&
+        carrier.proxy == chain.Get() && SUCCEEDED(carrier.result))
+        colorSpace = carrier.colorSpace;
+
+    // Wiring-level colour refusals (Handoff never returns these; see the WIRING NOTES in
+    // DlssNr_XeFGHandoff.h): the XeFG SDK supports HDR10, not FP16/scRGB, a space NR cannot
+    // compose is refused by the same rule the generic compose path applies, and a proxy whose
+    // creation format was never captured has no colour metadata to compose with.
+    DlssNr::XeFGHandoff::SkipReason refusal = DlssNr::XeFGHandoff::SkipReason::None;
+    if (_proxyFormat == DXGI_FORMAT_R16G16B16A16_FLOAT || (colorSpace != DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 &&
+                                                           colorSpace != DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 &&
+                                                           colorSpace != DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709))
+        refusal = DlssNr::XeFGHandoff::SkipReason::UnsupportedColorSpace;
+    else if (_proxyFormat == DXGI_FORMAT_UNKNOWN)
+        refusal = DlssNr::XeFGHandoff::SkipReason::MissingColorSpace;
+
+    // The accepted frame id is the id this Present site already holds - NOT GetDispatchIndex,
+    // which reads the display counter.
+    const uint64_t frame = _lastDispatchedFrame;
+
+    DlssNr::XeFGCapture facts {};
+    DlssNr::XeFGHandoff::SkipReason reason = DlssNr::XeFGHandoff::SkipReason::None;
+    bool colourRefusal = refusal != DlssNr::XeFGHandoff::SkipReason::None;
+
+    if (!colourRefusal)
+    {
+        // Capture-lifecycle facts from NR (under the NR locks) feed the decision core, then the
+        // tracker is called once for this accepted application frame.
+        const bool tracked = DlssNr::XeFGPendingCapture(picture.Get(), _gameCommandQueue, colorSpace, facts);
+        if (tracked)
+        {
+            const uint64_t serial = _nrHandoff.OpenInterval(frame);
+            if (facts.submitted)
+                _nrHandoff.Submitted(serial);
+            if (facts.ready)
+                _nrHandoff.Ready(serial);
+        }
+
+        DlssNr::XeFGHandoff::Identity identity {};
+        identity.generation = _nrGeneration;
+        identity.frameId = frame;
+        const auto outcome = _nrHandoff.Handoff(identity);
+
+        if (outcome.applied)
+        {
+            // Compose with real-game-frame semantics on the XeFG-retained application queue.
+            if (DlssNr::ApplyXeFGPicture(picture.Get(), _gameCommandQueue, colorSpace))
+            {
+                // interval= is the tracker capture-interval serial (DlssNr_XeFGHandoff.h
+                // OpenInterval), a different space from NR's Late slot serial.
+                LOG_INFO("NR_XEFG_APPLY generation={} frame={} interval={} same_queue={} submitted={}", _nrGeneration,
+                         frame, outcome.slot, facts.sameQueue ? 1 : 0, facts.submitted ? 1 : 0);
+
+                FGHooks::RecordXeFGHandoff(_nrGeneration, frame, _swapChainContext);
+                return;
+            }
+
+            // The facts were a snapshot and composition re-validated to nothing runnable.
+            reason = DlssNr::XeFGHandoff::SkipReason::NoCurrentCapture;
+        }
+        else
+        {
+            reason = outcome.reason;
+        }
+    }
+    else
+    {
+        reason = refusal;
+    }
+
+    // The single skip site: the refused capture is closed here so it never becomes a later frame's
+    // NR input (R2; the DlssNr_XeFGHandoff.h WIRING NOTES). A colour refusal persists until the proxy
+    // state changes, and a no_current_capture skip cannot name the capture that stalled - the frame's
+    // facts may be untracked (serial 0) while older NR-store leftovers are still pending - so both
+    // close every pending capture; any other tracker refusal names exactly the capture that was
+    // offered.
+    const bool closeAllCaptures = colourRefusal || reason == DlssNr::XeFGHandoff::SkipReason::NoCurrentCapture;
+    DlssNr::XeFGCloseCaptures(closeAllCaptures ? std::numeric_limits<uint64_t>::max() : facts.serial);
+    LogNrXefgSkip(_nrGeneration, frame, DlssNr::XeFGHandoff::SkipReasonName(reason));
+
+    // A skipped handoff still decided this present: FGPresent reports the SDK present status for the
+    // accepted frame after the original proxy Present.
+    FGHooks::RecordXeFGHandoff(_nrGeneration, frame, _swapChainContext);
 }
 
 bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
@@ -1649,11 +1898,19 @@ bool XeFG_Dx12::ReleaseSwapchain(HWND hwnd)
 
     LOG_DEBUG("");
 
+    // Ownership is captured before any nested teardown clears State::currentFGSwapchain. Only the
+    // registered owner may change the consumer state, and only once the release has actually torn
+    // the proxy down: a nested DestroyFGContext -> Deactivate -> ResetNrHandoff publishes Waiting
+    // on the way, so Generic must come after it.
+    const bool owned = OwnsFinishedConsumer();
+    bool aborted = false;
+
     if (Config::Instance()->FGUseMutexForSwapchain.value_or_default())
     {
         if (Mutex.getOwner() == 1)
         {
             LOG_WARN("Skipping Mutex we are already in ReleaseSwapchain");
+            aborted = true; // An aborted reentrant release must not publish anything.
             return true;
         }
 
@@ -1683,6 +1940,11 @@ bool XeFG_Dx12::ReleaseSwapchain(HWND hwnd)
         LOG_TRACE("Releasing Mutex: {}", Mutex.getOwner());
         Mutex.unlockThis(1);
     }
+
+    // The owning app-facing proxy is gone: no XeFG-owned consumer remains, so the finished picture
+    // returns to its generic route. Published after the nested teardown above.
+    if (DlssNr::ReleasePublishesGeneric(owned, aborted))
+        DlssNr::PublishFinishedConsumer(DlssNr::FinishedConsumer::Generic);
 
     return true;
 }

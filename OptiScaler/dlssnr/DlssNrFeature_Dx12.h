@@ -63,6 +63,32 @@ void FinishedPictureSubmitted(ID3D12CommandQueue* queue, UINT count, ID3D12Comma
 void ApplyToFinishedPicture(IDXGISwapChain* swapchain, ID3D12CommandQueue* queue);
 void FinishedPictureColorSpace(IDXGISwapChain* swapchain, DXGI_COLOR_SPACE_TYPE colorSpace);
 
+// Finished-picture colour-space record shared by the generic route and the XeFG owned
+// handoff. Same GUID as Late::colorSpaceKey (shaders/dlssnr/DlssNr_Late.inl): one record,
+// read by both paths.
+inline constexpr GUID FinishedColorSpaceKey = {
+    0x34a31e7b, 0x84c5, 0x44ef, { 0xa7, 0x4d, 0x6b, 0xd3, 0x60, 0x8c, 0xe5, 0x22 }
+};
+
+// XeFG owned application-frame handoff. The Present-site wiring in
+// framegen/xefg/XeFG_Dx12.cpp drives these on the XeFG-retained application queue (never
+// State.currentCommandQueue): the capture facts are queried first, the composition runs only
+// after the handoff core (dlssnr/DlssNr_XeFGHandoff.h) accepted the frame.
+// Swapchain/buffer/colour-space queries must happen before these calls - they take the NR
+// locks (see ApplyToFinishedPicture for the ordering rule).
+struct XeFGCapture
+{
+    bool exists = false;    // a pending capture matches this finished picture
+    bool submitted = false; // its producer command list was executed
+    bool ready = false;     // same application queue, or its readiness fence completed
+    bool sameQueue = false; // the capture's producer queue is the application queue
+    uint64_t serial = 0;    // the pending capture's slot serial
+};
+bool XeFGPendingCapture(ID3D12Resource* picture, ID3D12CommandQueue* queue, DXGI_COLOR_SPACE_TYPE space,
+                        XeFGCapture& facts);
+bool ApplyXeFGPicture(ID3D12Resource* picture, ID3D12CommandQueue* queue, DXGI_COLOR_SPACE_TYPE space);
+void XeFGCloseCaptures(uint64_t throughSerial);
+
 // Asks the model whether it will work on Direct3D 11 at all, once, and logs the answer.
 //
 // The bridge exists because of a claim nobody tested: "the model refuses on DX11, it answers

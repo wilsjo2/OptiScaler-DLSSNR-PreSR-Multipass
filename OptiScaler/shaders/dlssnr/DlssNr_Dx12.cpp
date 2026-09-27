@@ -11,6 +11,9 @@
 #include <DirectXMath.h>
 
 #include <dlssnr/DlssNr_Capture.h>
+#include <dlssnr/DlssNr_FinishedConsumer.h>
+#include <dlssnr/DlssNr_FinishedReady.h>
+#include <dlssnr/DlssNr_QueueIdentity.h>
 #include <dlssnr/DlssNr_Proxy.h>
 #include <dlssnr/DlssNr_ExposureScan.h>
 
