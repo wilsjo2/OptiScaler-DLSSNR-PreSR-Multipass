@@ -1538,10 +1538,9 @@ void XeFG_Dx12::OwnedNrHandoff()
     if (State::Instance().isShuttingDown || _swapChain == nullptr || _gameCommandQueue == nullptr)
         return;
 
-    // Owning application proxy only: this feature's app-facing proxy must be the registered FG
-    // swapchain (an older XeFG proxy instance being presented by the game is passed through
-    // untouched; FGPresent likewise reports only the owning proxy's present). The interop check
-    // matches the generic path: an interop swapchain never takes the finished-picture route.
+    // The feature's app-facing proxy must be the registered FG swapchain. FGPresent
+    // separately rejects a foreign incoming chain before it can invoke this feature.
+    // Native interop alone takes the finished-picture route.
     if (_swapChain != State::Instance().currentFGSwapchain ||
         State::Instance().swapchainInteropApi != SwapchainInteropApi::None)
         return;

@@ -1135,7 +1135,12 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
     auto& state = State::Instance();
     auto config = Config::Instance();
 
-    if (state.isShuttingDown)
+    // The backend checks the live feature's chain, not the incoming chain. A stale
+    // incoming XeFG present must not drive its feature, callbacks or generic NR.
+    const bool nonOwnerXeFGPresent =
+        state.activeFgOutput == FGOutput::XeFG && This != state.currentFGSwapchain;
+
+    if (state.isShuttingDown || nonOwnerXeFGPresent)
     {
         if (pPresentParameters == nullptr)
             return o_FGSCPresent(This, SyncInterval, Flags);
