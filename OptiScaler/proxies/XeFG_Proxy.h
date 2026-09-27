@@ -4,6 +4,7 @@
 #include "Util.h"
 #include "Config.h"
 #include "Logger.h"
+#include "XeFGUnlock.h"
 
 #include <proxies/Ntdll_Proxy.h>
 #include <proxies/KernelBase_Proxy.h>
@@ -172,6 +173,11 @@ class XeFGProxy
             return false;
 
         _dll = libxefgModule;
+
+        // Patch the provider in memory before anything calls into it - the MFG
+        // gate is evaluated during swapchain init, so it has to happen here.
+        // A failure just leaves the provider as Intel shipped it.
+        XeFGUnlock::Apply(_dll);
 
         {
             ScopedSkipDxgiLoadChecks skipDxgiLoadChecks {};
