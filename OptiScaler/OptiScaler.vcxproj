@@ -432,9 +432,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="dlssnr\DlssNr_FinishedReady.h" />
     <ClInclude Include="dlssnr\DlssNr_QueueIdentity.h" />
     <ClInclude Include="dlssnr\DlssNr_XeFGHandoff.h" />
-    <ClCompile Include="dlssnr\DlssNr_XeFGHandoff.cpp">
-      <PrecompiledHeader>NotUsing</PrecompiledHeader>
-    </ClCompile>
+    <ClCompile Include="dlssnr\DlssNr_XeFGHandoff.cpp" />
     <ClInclude Include="dlssnr\DlssNr_ExposureScan.h" />
     <ClInclude Include="shaders\render_ui\precompile\render_ui_pm_PShader.h" />
     <ClInclude Include="shaders\render_ui\precompile\render_ui_pm_VShader.h" />

@@ -6,11 +6,11 @@
 // so every definition must stay inline. This translation unit exists so the real
 // project (MSBuild Release x64) compiles the unit before the Present-site wiring
 // of todo 10 includes it in XeFG_Dx12.cpp, and it pins the small ABI/type
-// contract the seam relies on. It deliberately includes no pch.h (the project
-// marks it PrecompiledHeader=NotUsing) so the seam runner can compile it
-// standalone exactly as the project does.
+// contract the seam relies on. The project uses its normal PCH; the standalone
+// seam runner supplies a lightweight PCH shim when compiling this anchor.
 // ============================================================================
 
+#include "pch.h"
 #include "DlssNr_XeFGHandoff.h"
 
 #include <type_traits>

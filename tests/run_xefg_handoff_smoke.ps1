@@ -141,7 +141,10 @@ if ($null -eq $probeExe)
 
 $sources = @($smoke)
 if (Test-Path -LiteralPath $coreSource) { $sources += $coreSource }
-$exe = Compile-Smoke @('/DNR_XEFG_HANDOFF_PRESENT=1', "/I$repo/OptiScaler") $sources 'xefg_handoff_smoke'
+# The anchor uses the project's full PCH in MSBuild. Keep compiling the real
+# anchor here, but resolve its PCH include to a lightweight standalone shim.
+Set-Content -LiteralPath (Join-Path $out 'pch.h') -Value '#pragma once' -Encoding ascii
+$exe = Compile-Smoke @('/DNR_XEFG_HANDOFF_PRESENT=1', "/I$out", "/I$repo/OptiScaler") $sources 'xefg_handoff_smoke'
 if ($null -eq $exe)
 {
     Write-Host 'XEFG handoff seam: GREEN-mode compilation failed'
