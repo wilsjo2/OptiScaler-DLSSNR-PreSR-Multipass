@@ -83,6 +83,59 @@ OptiScaler into pass-through mode, which means no menu and no Neural Rendering.
 Do not install the RenoDX DLSS add-on merely to obtain its compatibility runtime. This OptiScaler
 fork drives `nvngx_dlssnr.dll` itself, and two Neural Rendering injectors can conflict.
 
+## ReShade first with XeFG finished-picture NR (optional)
+
+This is a narrow, reversible ASI load-order option, not a default or a fix for every injector stack.
+It assumes the 64-bit Ultimate ASI Loader (UAL) v9.7.4 is already installed as `winmm.dll`, with
+`ReShade.asi` and `OptiScaler.asi` beside the real game executable. Don't replace another loader to
+follow this recipe. Close the game and launcher first. Save byte-for-byte backups and hashes of the
+loader, both ASIs, `winmm.ini`, `OptiScaler.ini`, any relevant ReShade INIs and any UAL INIs you inspect.
+
+Check UAL settings in this order, relative to the executable: `winmm.ini`, `global.ini`,
+`scripts/global.ini`, `plugins/global.ini`, `update/global.ini`. Later global files can override an
+earlier setting. Proceed only if `winmm.ini` has no `[globalsets] loadextraplugins` key (or no
+`[globalsets]` section), none of the four later files has a conflicting key, and the installation
+has no existing extra-plugin list, dependency on UAL's implicit `modloader/modloader.asi`, or
+competing loaders. Otherwise stop and resolve the existing configuration individually; never
+replace another plugin's list or assume the first INI wins. UAL separates extra plugins with `|`,
+not commas. Its default extra plugin is `modloader/modloader.asi`, so setting this key replaces that
+default. No `winmm.ini` is supplied as a packaged load-order override.
+
+Only in that simple case, add the missing section or key to your local `winmm.ini`:
+
+```ini
+[globalsets]
+loadextraplugins=ReShade.asi
+```
+
+UAL loads explicit extras before its ordinary ASI search. Check that ReShade initializes first and
+that both ASIs still load. To opt into finished-picture NR, obtain the compatible NR runtime as
+above and edit your own `OptiScaler.ini`, not the release default:
+
+```ini
+[DlssNr]
+Enabled=true
+FinishedPicture=true
+Passes=2
+```
+
+Keep XeFG active for its finished-picture handoff, then check NR in a rendered scene, not just in
+the menu. The shipped NR setting stays off, `FinishedPicture=false`, and `[XeFG] UnlockMFG=auto`
+means unlock is off by default. Unlock is a separate opt-in: an unrecognised XeFG provider build is
+refused before patching, and a failed patch rolls back rather than enabling an unsupported provider.
+This setup doesn't turn unlock on or promise a higher frame multiplier.
+
+A **historical** owner-game R12 run with earlier game-local binaries logged 1,096 NR applies, all
+`same_queue=1 submitted=1`, and zero device mismatches after ReShade initialized first; the owner
+also reported seeing the effect. The earlier R12 run logged zero applies and 22 device mismatches.
+At the same time as load order changed, the local NR settings changed from auto values to the
+explicit values above. This isn't a load-order-only causal comparison, nor gameplay verification
+of this new upstream build. Submitted frames alone don't prove what appeared on screen.
+
+If the result is wrong, close the game and launcher. Restore the original bytes of every edited
+INI and replaced DLL/ASI from your backups, or remove only files you know you created where none
+existed. Check the restored hashes before restarting. Don't delete another mod's loader or INI.
+
 ## Individual pass controls
 
 Under **DLSS Neural Rendering → Model passes**, expand Pass 1, Pass 2, or Pass 3. Each contains
