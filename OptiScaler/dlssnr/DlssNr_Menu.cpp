@@ -119,6 +119,36 @@ static bool InheritedProfileCombo(const char* label, CustomOptional<uint32_t, No
     return true;
 }
 
+template <typename Option> static void NrModelCombo(Option* opt, bool allowInherit)
+{
+    static const char* names[] = { "Automatic", "Original", "Optimized" };
+    const bool inherited = allowInherit && !opt->has_value();
+    const uint32_t preset = opt->has_value() ? opt->value() : 0u;
+    const char* preview = inherited                      ? "Inherit pass 1"
+                          : preset < IM_ARRAYSIZE(names) ? names[preset]
+                                                         : "Unavailable preset";
+
+    if (ImGui::BeginCombo("NR model", preview))
+    {
+        if (allowInherit && ImGui::Selectable("Inherit pass 1", inherited))
+            *opt = std::optional<uint32_t> {};
+        for (uint32_t value = 0; value < IM_ARRAYSIZE(names); ++value)
+        {
+            const bool selected = !inherited && preset == value;
+            if (ImGui::Selectable(names[value], selected))
+                *opt = value;
+            if (selected)
+                ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    HelpMarker("Automatic: use the installed NR runtime's default model.\n"
+               "Original: use the original model (preset 1).\n"
+               "Optimized: use the smaller FP8 model (preset 2), included in NR 310.9.16.0.\n"
+               "Older runtimes fall back to their default when a model is unavailable.\n"
+               "Changing the model rebuilds this pass and resets its history.");
+}
+
 void RenderMenu(Config* config, float menuResScale)
 {
 
@@ -482,6 +512,7 @@ void RenderMenu(Config* config, float menuResScale)
 
         if (ImGui::TreeNodeEx("Pass 1", ImGuiTreeNodeFlags_DefaultOpen))
         {
+            NrModelCombo(&config->DlssNrPreset, false);
             int style = (int) std::min(config->DlssNrStyle.value_or_default(), 2u);
             if (ImGui::Combo("Style", &style, styles, IM_ARRAYSIZE(styles)))
                 config->DlssNrStyle = (uint32_t) style;
@@ -502,6 +533,7 @@ void RenderMenu(Config* config, float menuResScale)
         if (ImGui::TreeNodeEx("Pass 2", ImGuiTreeNodeFlags_DefaultOpen))
         {
             ImGui::TextWrapped("Defaults: inherit Pass 1; Local tone = 0. Reset restores these defaults.");
+            NrModelCombo(&config->DlssNrPass2Preset, true);
             InheritedProfileCombo("Style", &config->DlssNrPass2Style, inheritedStyles, IM_ARRAYSIZE(inheritedStyles));
             DeferredSlider("Intensity", &config->DlssNrPass2Intensity, 0.0f, 2.0f,
                            config->DlssNrIntensity.value_or_default(), "%.2f", true);
@@ -523,6 +555,7 @@ void RenderMenu(Config* config, float menuResScale)
         if (ImGui::TreeNodeEx("Pass 3", ImGuiTreeNodeFlags_DefaultOpen))
         {
             ImGui::TextWrapped("Defaults: inherit Pass 1; Local tone = 0. Reset restores these defaults.");
+            NrModelCombo(&config->DlssNrPass3Preset, true);
             InheritedProfileCombo("Style", &config->DlssNrPass3Style, inheritedStyles, IM_ARRAYSIZE(inheritedStyles));
             DeferredSlider("Intensity", &config->DlssNrPass3Intensity, 0.0f, 2.0f,
                            config->DlssNrIntensity.value_or_default(), "%.2f", true);
@@ -565,21 +598,6 @@ void RenderMenu(Config* config, float menuResScale)
             ImGui::TreePop();
         }
 
-        if (ImGui::TreeNode("Advanced preset hints (effect unverified)"))
-        {
-            ImGui::TextWrapped("Experimental model hints; visual effect unverified. Use Style to select a profile.");
-            static const char* presets[] = { "Default", "Preset 1", "Preset 2", "Preset 3" };
-            static const char* inheritedPresets[] = { "Auto (inherit pass 1)", "Default", "Preset 1", "Preset 2",
-                                                      "Preset 3" };
-            int preset = (int) std::min(config->DlssNrPreset.value_or_default(), 3u);
-            if (ImGui::Combo("Pass 1 preset hint", &preset, presets, IM_ARRAYSIZE(presets)))
-                config->DlssNrPreset = (uint32_t) preset;
-            InheritedProfileCombo("Pass 2 preset hint", &config->DlssNrPass2Preset, inheritedPresets,
-                                  IM_ARRAYSIZE(inheritedPresets));
-            InheritedProfileCombo("Pass 3 preset hint", &config->DlssNrPass3Preset, inheritedPresets,
-                                  IM_ARRAYSIZE(inheritedPresets));
-            ImGui::TreePop();
-        }
         ImGui::TextWrapped(
             "Pass settings apply to SR and RR on DX12 and native Vulkan. The driver-proxy backend supports one pass.");
 

@@ -86,7 +86,7 @@ fork drives `nvngx_dlssnr.dll` itself, and two Neural Rendering injectors can co
 ## Individual pass controls
 
 Under **DLSS Neural Rendering → Model passes**, expand Pass 1, Pass 2, or Pass 3. Each contains
-Style, Intensity, Local structure, Local tone, Skin structure, and Auto skin mask. Sliders commit
+NR model, Style, Intensity, Local structure, Local tone, Skin structure, and Auto skin mask. Sliders commit
 when released to avoid rebuilding the model on every movement. Set the model pass count to 2 or 3
 to activate later passes; editing inactive passes prepares their settings without running them.
 
@@ -98,9 +98,26 @@ following local structure. The corresponding INI keys are `Pass2Intensity`, `Pas
 Use `auto` for the default behavior. Styles retain `Pass2Style` / `Pass3Style`.
 
 These controls apply to D3D12 multipass and its bridges, both before/after SR and after native RR.
-Native Vulkan and the driver-proxy backend remain single-pass. Preset hints are still transmitted
-at model creation, but a changed hint is not proof of a changed model. They are preserved under
-**Advanced preset hints (effect unverified)** and in the INI for compatibility.
+Native Vulkan and the driver-proxy backend remain single-pass.
+
+**NR model** selects the model inside the installed `nvngx_dlssnr.dll`, independently of Style:
+
+| Selection | Preset | Behavior |
+| --- | --- | --- |
+| Automatic | `0` | Use the installed runtime's default model. |
+| Original | `1` | Use the original neural rendering model. |
+| Optimized | `2` | Use the smaller FP8 model included in NR 310.9.16.0. |
+
+In the inspected 310.8.0.0 DLL, only Original is embedded. The 310.9.16.0 DLL contains both models
+and defaults to Optimized. An unavailable preset falls back to the DLL's shipping default, so
+selecting Optimized with the older DLL still runs Original. This selection does not establish
+GPU/driver compatibility with a particular DLL build.
+
+Passes 2 and 3 also offer **Inherit pass 1** (`Pass2Preset=auto` / `Pass3Preset=auto`). Explicit
+Automatic (`0`) follows the runtime default independently of pass 1. Pass 1 uses `Preset=auto`
+or `Preset=0` for Automatic. Existing numeric INI values remain untouched until a selection is
+changed. Changing the model uses the existing guarded feature rebuild and resets that pass's
+history; extra passes beyond pass 3 continue to use pass 1's model.
 
 ## Padded DLSS input sizes
 
