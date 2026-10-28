@@ -111,18 +111,32 @@ int main() try
 
     using namespace DlssNr::StreamlinePicture;
     Expect(!Wrap("slHookPresent", Plugin<1>::Get, true), "Local wrapping enabled without KCD2 quirk");
+    auto nativeCreateLegacy = reinterpret_cast<decltype(&Plugin<0>::Create)>(Wrap("slHookCreateSwapChain", Plugin<0>::Get));
     State::Instance().gameQuirks.enabled = true;
     State::Instance().activeFgNvngx = FGNvngxReplacement::Other;
     Expect(!Wrap("slHookPresent", Plugin<1>::Get, true), "Local wrapping enabled for replacement FG");
     State::Instance().activeFgNvngx = FGNvngxReplacement::None;
-    Expect(!Wrap("slHookCreateSwapChain", Plugin<0>::Get), "Native legacy path changed outside KCD2");
     auto nativePresent = reinterpret_cast<decltype(&Plugin<0>::Present)>(Wrap("slHookPresent", Plugin<0>::Get));
     auto localPresent = reinterpret_cast<decltype(&Plugin<1>::Present1)>(Wrap("slHookPresent1", Plugin<1>::Get, true));
     auto localPresentLegacy = reinterpret_cast<decltype(&Plugin<1>::Present)>(Wrap("slHookPresent", Plugin<1>::Get, true));
     auto nativeCreate = reinterpret_cast<decltype(&Plugin<0>::CreateHwnd)>(Wrap("slHookCreateSwapChainForHwnd", Plugin<0>::Get));
     auto localCreate = reinterpret_cast<decltype(&Plugin<1>::Create)>(Wrap("slHookCreateSwapChain", Plugin<1>::Get, true));
-    Expect(nativePresent && localPresent && localPresentLegacy && nativeCreate && localCreate, "Missing presentation/creation wrapper");
+    Expect(nativePresent && localPresent && localPresentLegacy && nativeCreate && nativeCreateLegacy && localCreate, "Missing presentation/creation wrapper");
     bool skip = false;
+    ComPtr<IDXGISwapChain> nativeLegacyChain;
+    Plugin<0>::handled = false;
+    Check(nativeCreateLegacy(nullptr, queue.Get(), nullptr, &nativeLegacyChain, skip));
+    Expect(!RenderQueue(nativeLegacyChain.Get()), "Unhandled legacy create registered a render queue");
+    nativeLegacyChain.Reset();
+    Plugin<0>::handled = true;
+    skip = false;
+    Check(nativeCreateLegacy(nullptr, queue.Get(), nullptr, &nativeLegacyChain, skip));
+    Expect(RenderQueue(nativeLegacyChain.Get()).Get() == queue.Get(), "Native legacy create lost the render queue");
+    expectedPicture = Plugin<0>::picture.Get();
+    Plugin<0>::expectedEdits = edits + 1;
+    skip = false;
+    Check(nativePresent(nativeLegacyChain.Get(), 0, 0, skip));
+    Check(nativeLegacyChain->SetPrivateDataInterface(renderQueueKey, nullptr));
     ComPtr<IDXGISwapChain1> nativeChain;
     Check(nativeCreate(nullptr, queue.Get(), nullptr, nullptr, nullptr, nullptr, &nativeChain, skip));
     ComPtr<IDXGISwapChain> localChain;
@@ -157,8 +171,8 @@ int main() try
     State::Instance().isShuttingDown = true;
     Check(localPresent(localChain.Get(), 0, 0, nullptr, skip));
     State::Instance().isShuttingDown = false;
-    Expect(Plugin<0>::calls == 6 && Plugin<1>::calls == 12, "Lost or duplicated an original present");
-    puts("PASS: KCD2-only real FG gate; local legacy + native Hwnd registration; separate plugin buffers; "
+    Expect(Plugin<0>::calls == 7 && Plugin<1>::calls == 12, "Lost or duplicated an original present");
+    puts("PASS: KCD2-only local FG gate; local/native legacy + native Hwnd registration; separate plugin buffers; "
          "PQ/10-bit metadata; edit before FG; skip/disabled/shutdown guards");
     return 0;
 }

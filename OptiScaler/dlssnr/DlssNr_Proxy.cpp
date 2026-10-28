@@ -30,7 +30,8 @@ void DestroyState(ProxyState& state)
 {
     if (state.feature != nullptr)
     {
-        if (state.compatibility) state.compatibility->Release(state.feature);
+        if (state.compatibility)
+            state.compatibility->Release(state.feature);
         else if (NVNGXProxy::D3D12_ReleaseFeature() != nullptr)
             NVNGXProxy::D3D12_ReleaseFeature()(state.feature);
     }
@@ -137,8 +138,8 @@ unsigned int Context::Impl::Prepare(ID3D12GraphicsCommandList* cmdList, ID3D12De
         // GetParameters API, GetCapabilityParameters transfers ownership to the caller.
         NgxDiagnostics::Scope nrCapabilityTrace;
         const auto allocated = NVNGXProxy::D3D12_GetCapabilityParameters()(&state.params);
-        LOG_INFO("NR diagnostic capability parameters: result=0x{:08X} params={}",
-                 (unsigned)allocated, (void*)state.params);
+        LOG_INFO("NR diagnostic capability parameters: result=0x{:08X} params={}", (unsigned) allocated,
+                 (void*) state.params);
         if (allocated != NVSDK_NGX_Result_Success || state.params == nullptr)
         {
             DestroyState(state);
@@ -159,9 +160,9 @@ unsigned int Context::Impl::Prepare(ID3D12GraphicsCommandList* cmdList, ID3D12De
         SetCreationParameters(state.params, settings, width, height);
 
         lifetime.Record(cmdList);
-        auto created =
-            NVNGXProxy::D3D12_CreateFeature()(cmdList, (NVSDK_NGX_Feature) 18, state.params, &state.feature);
-        LOG_INFO("NR diagnostic CreateFeature(18): result=0x{:08X} handle={}", (unsigned)created, (void*)state.feature);
+        auto created = NVNGXProxy::D3D12_CreateFeature()(cmdList, (NVSDK_NGX_Feature) 18, state.params, &state.feature);
+        LOG_INFO("NR diagnostic CreateFeature(18): result=0x{:08X} handle={}", (unsigned) created,
+                 (void*) state.feature);
         if (NVSDK_NGX_FAILED(created) && !state.feature)
         {
             state.compatibility = CompatibilityRuntime::TryOpen(device);
@@ -169,8 +170,8 @@ unsigned int Context::Impl::Prepare(ID3D12GraphicsCommandList* cmdList, ID3D12De
             {
                 SetCreationParameters(state.params, settings, width, height);
                 created = state.compatibility->Create(cmdList, state.params, &state.feature);
-                LOG_INFO("NR compatibility: CreateFeature(18) result=0x{:08X} handle={}",
-                         (unsigned)created, (void*)state.feature);
+                LOG_INFO("NR compatibility: CreateFeature(18) result=0x{:08X} handle={}", (unsigned) created,
+                         (void*) state.feature);
             }
         }
         NgxDiagnostics::RuntimeReport(cmdList, device, "after CreateFeature(18)");
@@ -200,19 +201,19 @@ unsigned int Context::Impl::Prepare(ID3D12GraphicsCommandList* cmdList, ID3D12De
     return (unsigned int) NVSDK_NGX_Result_Success;
 }
 
-unsigned int Context::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device,
-                          const Frame& frame, const ModelSettings& settings, uint64_t submissionEpoch,
-                          bool* evaluated)
+unsigned int Context::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, const Frame& frame,
+                          const ModelSettings& settings, uint64_t submissionEpoch, bool* evaluated)
 {
     auto& state = _impl->state;
     auto& lifetime = _impl->lifetime;
     if (evaluated)
         *evaluated = false;
-    if (!frame.color || !frame.depth || !frame.motion || !frame.output ||
-        !frame.guides.depth.valid() || !frame.guides.motion.valid())
+    if (!frame.color || !frame.depth || !frame.motion || !frame.output || !frame.guides.depth.valid() ||
+        !frame.guides.motion.valid())
         return 0;
     bool ready = false;
-    const auto prepared = Prepare(cmdList, device, frame.size.width, frame.size.height, settings, submissionEpoch, &ready);
+    const auto prepared =
+        Prepare(cmdList, device, frame.size.width, frame.size.height, settings, submissionEpoch, &ready);
     if (prepared != NVSDK_NGX_Result_Success || !ready)
         return prepared;
 
@@ -242,8 +243,9 @@ unsigned int Context::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Device* devi
     DlssNr::SetModelTuning(params, settings);
 
     lifetime.Record(cmdList);
-    const auto result = state.compatibility ? state.compatibility->Evaluate(cmdList, state.feature, params)
-                                           : NVNGXProxy::D3D12_EvaluateFeature()(cmdList, state.feature, params, nullptr);
+    const auto result = state.compatibility
+                            ? state.compatibility->Evaluate(cmdList, state.feature, params)
+                            : NVNGXProxy::D3D12_EvaluateFeature()(cmdList, state.feature, params, nullptr);
 
     if (result == NVSDK_NGX_Result_Success)
     {

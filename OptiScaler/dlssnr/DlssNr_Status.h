@@ -21,6 +21,8 @@ struct StatusSnapshot
     std::string failureReason;
     std::optional<double> gpuTime;
     unsigned long long frames = 0;
+    std::string spatialStatus;
+    bool spatialActive = false;
 };
 
 struct ControlRequests

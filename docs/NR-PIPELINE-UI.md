@@ -11,7 +11,7 @@ Click a chart box to open its settings. Linear routes use one column; a separate
 | Prepare NR input | Model resolution, scaling filters, enlargement, HDR mapping and exposure |
 | Exposure calibration | Scan candidate, white-point anchors, inversion and trim |
 | NR model | Pass count and per-pass style, intensity, local structure/tone, skin structure and auto mask |
-| Apply NR edit | Detail/colour strength, highlight guard and optional skin/environment filter |
+| Apply NR edit | Detail/colour strength, highlight guard, optional skin/environment and halo filters; stale-history rejection on the RR residual path |
 | Inspect NR | Hold, comparisons, wipe/zoom, labels and debug views |
 
 Ordinary routes run prepare → model → compose together before or after SR/RR. Finished-picture mode puts them after effects/HUD. Separate-edit routes leave the game input clean and join after SR/RR or at presentation. Depth/motion are guides, not colour stages; the chart does not configure FG.

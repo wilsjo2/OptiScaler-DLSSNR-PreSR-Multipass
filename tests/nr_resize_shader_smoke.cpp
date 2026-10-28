@@ -134,6 +134,12 @@ try
                     c.Transfer=0;
                     expect(difference(reconstructed,run(c,proxy,answer,original))<1e-6f,"Native/supersampled path changed");
                 }
+                if (hdr && colour==0 && percent<100)
+                {
+                    c.Transfer=5;
+                    expect(difference(run(c,proxy,answer,original),reference)<.0005f,
+                           "Edge-aware enlargement changed a uniform HDR lighting edit");
+                }
                 ++cases;
             }
         }
@@ -146,8 +152,60 @@ try
     Image brightAnswer {25,2,std::vector<Pixel>(50,Pixel{.3f,.2f,.1f,1})};
     expect(difference(run(black,blackProxy,brightAnswer,blackFrame),blackFrame)==0,
            "Relative reconstruction created light at true black");
-    std::printf("PASS: %u resize fixtures; max reconstruction error %.7f, old resize mismatch %.7f\n",cases,worst,legacyHalo);
-    expect(DlssNrSpatialTransfer(2)==1 && DlssNrSpatialTransfer(4)==3 && DlssNrSpatialTransfer(0)==0,
+    black.Transfer=5;
+    expect(difference(run(black,blackProxy,brightAnswer,blackFrame),blackFrame)==0,
+           "Edge-aware enlargement created light at true black");
+
+    // A dark-side edit next to an unchanged bright surface must not spill across the edge.
+    Image edge {32,8,std::vector<Pixel>(256)}, proxy {8,2,std::vector<Pixel>(16)};
+    for (unsigned y=0; y<8; ++y) for (unsigned x=0; x<32; ++x)
+        edge.pixels[y*32+x] = x<16 ? Pixel{.1f,.1f,.1f,.4f} : Pixel{.8f,.8f,.8f,.8f};
+    for (unsigned y=0; y<2; ++y) for (unsigned x=0; x<8; ++x)
+        proxy.pixels[y*8+x] = edge.pixels[x*4];
+    auto answer=proxy, expected=edge;
+    for (auto* img : {&answer,&expected}) for (unsigned y=0; y<img->h; ++y)
+        for (unsigned x=0; x<img->w/2; ++x)
+        {
+            auto& p=img->pixels[y*img->w+x];
+            p.r=p.g=p.b=srgb(linear(p.r)*.5f);
+        }
+    auto ec=black; ec.Width=32; ec.Height=8; ec.Transfer=3;
+    const float smoothError=difference(run(ec,proxy,answer,edge),expected);
+    ec.Transfer=5;
+    const float edgeError=difference(run(ec,proxy,answer,edge),expected);
+    expect(smoothError>.01f && edgeError<.001f, "Edge-aware filter did not stop cross-edge edit leakage");
+    expect(difference(run(ec,proxy,proxy,edge),edge)<1e-6f,"Edge-aware no-edit reconstruction changed the frame");
+    expect(difference(run(ec,edge,expected,edge),expected)<1e-6f,"Edge-aware native-size path changed");
+
+    // Halo correction must lift narrow dark rims while retaining broad shading and alpha.
+    Image haloProxy {64,8,std::vector<Pixel>(512)};
+    for (unsigned y=0; y<8; ++y) for (unsigned x=0; x<64; ++x)
+        haloProxy.pixels[y*64+x]=x<32 ? Pixel{.04f,.04f,.04f,.3f} : Pixel{.7f,.7f,.7f,.9f};
+    const auto broad=modelAnswer(haloProxy,true,.8f,0);
+    auto rims=broad;
+    for (unsigned y=0; y<8; ++y) for (unsigned x=31; x<=34; ++x)
+    {
+        auto& p=rims.pixels[y*64+x];
+        p.r=p.g=p.b=srgb(linear(p.r)*.6f);
+    }
+    DlssNrConstants hc {}; hc.Mode=DlssNrMode_SuppressHalo; hc.Width=64; hc.Height=8; hc.HaloRadius=2;
+    expect(difference(run(hc,haloProxy,rims,haloProxy),rims)==0,"Disabled halo filter changed output");
+    hc.HaloSuppression=hc.HaloBrightSuppression=1;
+    expect(difference(run(hc,haloProxy,broad,haloProxy),broad)<1e-6f,"Halo filter removed broad shading");
+    expect(difference(run(hc,haloProxy,haloProxy,haloProxy),haloProxy)<1e-6f,"Halo filter changed an unedited image");
+    const auto corrected=run(hc,haloProxy,rims,haloProxy);
+    for (unsigned x : {31u,32u})
+    {
+        expect(corrected.pixels[x].r>rims.pixels[x].r+.001f,"Halo filter did not lift a dark rim");
+        expect(corrected.pixels[x].r<=broad.pixels[x].r+.0001f,"Halo filter overshot broad lighting");
+    }
+    for (size_t i=0; i<rims.pixels.size(); ++i)
+        expect(std::isfinite(corrected.pixels[i].r) && corrected.pixels[i].a==rims.pixels[i].a,
+               "Halo filter lost alpha or produced invalid output");
+    std::printf("PASS: %u resize fixtures; max error %.7f; edge leakage %.7f -> %.7f; halo preservation\n",
+                cases,worst,smoothError,edgeError);
+    expect(DlssNrSpatialTransfer(2)==1 && DlssNrSpatialTransfer(4)==3 && DlssNrSpatialTransfer(0)==0 &&
+           DlssNrSpatialTransfer(5)==5,
            "Transfer routing changed");
     return 0;
 }

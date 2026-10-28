@@ -38,11 +38,22 @@ inline HWND FindCompositionWindow()
     const HWND foreground = GetForegroundWindow();
     if (IsCompositionWindow(foreground))
         return foreground;
-    struct Search { HWND window = nullptr; unsigned int count = 0; } search;
-    EnumWindows([](HWND window, LPARAM context) -> BOOL {
-        auto& found = *reinterpret_cast<Search*>(context);
-        if (IsCompositionWindow(window)) { found.window = window; ++found.count; }
-        return TRUE;
-    }, reinterpret_cast<LPARAM>(&search));
+    struct Search
+    {
+        HWND window = nullptr;
+        unsigned int count = 0;
+    } search;
+    EnumWindows(
+        [](HWND window, LPARAM context) -> BOOL
+        {
+            auto& found = *reinterpret_cast<Search*>(context);
+            if (IsCompositionWindow(window))
+            {
+                found.window = window;
+                ++found.count;
+            }
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&search));
     return search.count == 1 ? search.window : nullptr;
 }

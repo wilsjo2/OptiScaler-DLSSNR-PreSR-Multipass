@@ -71,11 +71,14 @@ struct Status
 Status LastStatus();
 bool EnabledForSession();
 
+// Session and GPU eligibility, independent of whether a provider was already patched.
+bool Enabled();
+
 // The method [DLSSG] AdaTemporalFix selects right now: Retarget unless it names Ptx. The overlay compares
 // it with Status::TemporalAttempted to show that a change needs a restart.
 TemporalMethod ConfiguredTemporalMethod();
 
-// Applies the patches once per process. Silent and harmless when the config option is off, when
+// Applies the patches once per loaded provider. Silent and harmless when the config option is off, when
 // nvngx_dlssg.dll is not loaded, or when a signature does not match exactly once.
 void TryApply(HMODULE module = nullptr);
 bool Pending();

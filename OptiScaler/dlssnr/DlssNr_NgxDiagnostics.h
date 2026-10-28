@@ -15,4 +15,4 @@ class Scope
     Scope& operator=(const Scope&) = delete;
 };
 void RuntimeReport(ID3D12GraphicsCommandList* commands, ID3D12Device* device, const char* phase);
-}
+} // namespace DlssNr::NgxDiagnostics

@@ -45,6 +45,30 @@ static void SetVkObjectName(VkDevice device, VkInstance instance, VkObjectType o
     vkSetDebugUtilsObjectNameEXT(device, &info);
 }
 
+// Do not use a partial list: Present can refer to any image in the swapchain.
+static bool GetMenuSwapchainImages(VkDevice device, VkSwapchainKHR swapchain, std::vector<VkImage>& images)
+{
+    images.clear();
+    for (unsigned attempt = 0; attempt < 3; ++attempt)
+    {
+        uint32_t count = 0;
+        auto result = vkGetSwapchainImagesKHR(device, swapchain, &count, nullptr);
+        if (result != VK_SUCCESS || count < 2)
+            return false; // ImGui requires at least two images.
+        images.resize(count);
+        result = vkGetSwapchainImagesKHR(device, swapchain, &count, images.data());
+        if (result == VK_SUCCESS && count >= 2 && count <= images.size())
+        {
+            images.resize(count);
+            return true;
+        }
+        images.clear();
+        if (result != VK_INCOMPLETE)
+            return false;
+    }
+    return false;
+}
+
 static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance instance, HWND hwnd,
                                 const VkSwapchainCreateInfoKHR* pCreateInfo, VkSwapchainKHR* pSwapchain)
 {
@@ -86,26 +110,18 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
 
     VkResult result;
 
-    // Get swapchain image count.
-    result = vkGetSwapchainImagesKHR(device, *pSwapchain, &_scImageCount, NULL);
-    if (result != VK_SUCCESS)
-    {
-        LOG_ERROR("vkGetSwapchainImagesKHR error: {0:X}", (UINT) result);
+    std::vector<VkImage> images;
+    _scImageCount = 0;
+    if (!GetMenuSwapchainImages(device, *pSwapchain, images))
         return;
-    }
-
-    VkImage images[8];
-    result = vkGetSwapchainImagesKHR(device, *pSwapchain, &_scImageCount, images);
-    if (result != VK_SUCCESS)
-    {
-        LOG_ERROR("vkGetSwapchainImagesKHR error: {0:X}", (UINT) result);
-        return;
-    }
+    _scImageCount = static_cast<uint32_t>(images.size());
 
     // Alloc ImGui frame structure/semaphores for every image.
     // For convenience, I am using ImGui_ImplVulkanH_Frame in imgui_impl_vulkan.h
     if (!_vulkanObjectsCreated)
     {
+        IM_FREE(_ImVulkan_Frames);
+        IM_FREE(_ImVulkan_Semaphores);
         _ImVulkan_Frames = (ImGui_ImplVulkanH_Frame*) IM_ALLOC(sizeof(ImGui_ImplVulkanH_Frame) * _scImageCount);
         _ImVulkan_Semaphores = (VkSemaphore*) IM_ALLOC(sizeof(VkSemaphore) * _scImageCount);
     }
@@ -120,8 +136,8 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
         // get queues
         if (count > 0)
         {
-            VkQueueFamilyProperties queues[8];
-            vkGetPhysicalDeviceQueueFamilyProperties(pd, &count, queues);
+            std::vector<VkQueueFamilyProperties> queues(count);
+            vkGetPhysicalDeviceQueueFamilyProperties(pd, &count, queues.data());
 
             // find graphic queue
             for (uint32_t i = 0; i < count; i++)
@@ -363,7 +379,7 @@ static void CreateVulkanObjects(VkDevice device, VkPhysicalDevice pd, VkInstance
         _ImVulkan_Info.Queue = queue;
         _ImVulkan_Info.DescriptorPool = pool;
         _ImVulkan_Info.Subpass = 0;
-        _ImVulkan_Info.MinImageCount = pCreateInfo->minImageCount;
+        _ImVulkan_Info.MinImageCount = std::clamp(pCreateInfo->minImageCount, 2u, _scImageCount);
         _ImVulkan_Info.ImageCount = _scImageCount;
         _ImVulkan_Info.Allocator = NULL;
         _ImVulkan_Info.RenderPass = _vkRenderPass;
@@ -495,6 +511,12 @@ void MenuOverlayVk::DestroyVulkanObjects(bool shutdown)
         }
     }
 
+    IM_FREE(_ImVulkan_Frames);
+    IM_FREE(_ImVulkan_Semaphores);
+    _ImVulkan_Frames = nullptr;
+    _ImVulkan_Semaphores = nullptr;
+    _scImageCount = 0;
+    _vulkanObjectsCreated = false;
     _ImVulkan_Info = {};
 
     _vkCleanMutex.unlock();
@@ -512,6 +534,9 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
 
     if (pPresentInfo->swapchainCount == 0)
         return false;
+
+    if (_scImageCount < 2 || pPresentInfo->pImageIndices == nullptr || pPresentInfo->pImageIndices[0] >= _scImageCount)
+        return true;
 
     // std::lock_guard<std::mutex> lock(_vkPresentMutex);
     LOG_DEBUG("rendering menu, swapchain count: {0}", pPresentInfo->swapchainCount);

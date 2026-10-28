@@ -1674,6 +1674,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="shaders\dlssnr\DlssNr_Dx12_DeferredSr.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="shaders\dlssnr\DlssNr_Dx12_DenoiseFirst.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="shaders\dlssnr\DlssNr_Dx12_Enlarge.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="shaders\dlssnr\DlssNr_Dx12_FinishedCompose.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="shaders\dlssnr\DlssNr_Dx12_FinishedQueue.cpp"><Filter>Source Files</Filter></ClCompile>

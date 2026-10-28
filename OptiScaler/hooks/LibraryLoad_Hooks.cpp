@@ -114,7 +114,9 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
     // copy (models\dlssg\...\<hash>.bin) as well as the game's nvngx_dlssg.dll, which the .bin branch
     // below would otherwise load without patching.
 #if defined(OPTISCALER_RTX40_MFG)
-    if (MfgUnlock::Provider::IsProviderPath(normalizedPath) && MfgUnlock::Pending())
+    // Keep watching provider loads after a local probe has been patched: NGX may
+    // subsequently select its OTA provider. TryApply handles duplicates per module.
+    if (MfgUnlock::Provider::IsProviderPath(normalizedPath) && MfgUnlock::Enabled())
     {
         auto snippet = NtdllProxy::LoadLibraryExW_Ldr(lpLibFullPath, NULL, 0);
         if (snippet)

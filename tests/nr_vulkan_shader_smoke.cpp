@@ -89,7 +89,8 @@ try
         check(vkBindBufferMemory(device, b.buffer, b.memory, 0));
         check(vkMapMemory(device, b.memory, 0, size, 0, &b.mapped)); return b;
     };
-    auto readback = buffer((VkDeviceSize) allocationWidth * allocationHeight * 16, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    auto readback = buffer((VkDeviceSize) allocationWidth * allocationHeight * 16,
+                           VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
     std::array<Buffer, 2> uniforms { buffer(sizeof(DlssNrConstants), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT),
                                    buffer(sizeof(DlssNrConstants), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT) };
     DlssNrConstants constants {}; constants.Width = width; constants.Height = height;
@@ -272,6 +273,44 @@ try
     if (!std::isfinite(pixels[0]) || std::abs(pixels[0] - white) > 0.001f)
         throw std::runtime_error("Vulkan automatic exposure mismatch");
     std::cout << "PASS: production Vulkan automatic exposure and pre-exposure normalization\n";
+    // A dark model rim beside a bright pixel exercises the new mode and trailing constants.
+    constants={}; constants.Mode=DlssNrMode_SuppressHalo; constants.Width=32; constants.Height=1;
+    constants.HaloSuppression=constants.HaloBrightSuppression=1; constants.HaloRadius=1;
+    std::memcpy(uniforms[1].mapped,&constants,sizeof(constants));
+    VkDescriptorImageInfo haloSource {sampler,images[0].info.ImageView,VK_IMAGE_LAYOUT_GENERAL};
+    VkWriteDescriptorSet haloWrite {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    haloWrite.dstSet=sets[1]; haloWrite.dstBinding=1; haloWrite.descriptorCount=1;
+    haloWrite.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; haloWrite.pImageInfo=&haloSource;
+    vkUpdateDescriptorSets(device,1,&haloWrite,0,nullptr);
+    const float upload[12]={.8f,.8f,.8f,.4f, .7f,.7f,.7f,.4f, .02f,.02f,.02f,.4f};
+    std::memcpy(readback.mapped,upload,sizeof(upload));
+    const VkClearColorValue haloBase {{.04f,.04f,.04f,.4f}}, haloBroad {{.032f,.032f,.032f,.4f}};
+    check(vkResetCommandPool(device,commandPool,0)); check(vkBeginCommandBuffer(cmd,&begin));
+    vkCmdClearColorImage(cmd,images[0].info.Image,VK_IMAGE_LAYOUT_GENERAL,&haloBase,1,&range);
+    vkCmdClearColorImage(cmd,images[3].info.Image,VK_IMAGE_LAYOUT_GENERAL,&haloBroad,1,&range);
+    vkCmdClearColorImage(cmd,images[4].info.Image,VK_IMAGE_LAYOUT_GENERAL,&sentinel,1,&range);
+    memoryBarrier(VK_ACCESS_TRANSFER_WRITE_BIT,VK_ACCESS_TRANSFER_WRITE_BIT);
+    for (unsigned i=0; i<3; ++i)
+    {
+        VkBufferImageCopy point {}; point.bufferOffset=i*16;
+        point.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};
+        point.imageOffset={i==2 ? 15 : 16,0,0}; point.imageExtent={1,1,1};
+        vkCmdCopyBufferToImage(cmd,readback.buffer,images[i==0 ? 0 : 3].info.Image,VK_IMAGE_LAYOUT_GENERAL,1,&point);
+    }
+    memoryBarrier(VK_ACCESS_TRANSFER_WRITE_BIT,VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+    vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,pipeline);
+    vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,pipelineLayout,0,1,&sets[1],0,nullptr);
+    vkCmdDispatch(cmd,4,1,1);
+    memoryBarrier(VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT,
+                  VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
+    vkCmdCopyImageToBuffer(cmd,images[4].info.Image,VK_IMAGE_LAYOUT_GENERAL,readback.buffer,1,&copy);
+    memoryBarrier(VK_ACCESS_TRANSFER_WRITE_BIT,VK_ACCESS_HOST_READ_BIT);
+    check(vkEndCommandBuffer(cmd)); check(vkQueueSubmit(queue,1,&submit,VK_NULL_HANDLE)); check(vkQueueWaitIdle(queue));
+    const float rim=pixels[15*4];
+    if (!std::isfinite(rim) || rim<=.0205f || rim>.0321f ||
+        std::abs(pixels[15*4+3]-.4f)>.0001f || std::abs(pixels[0]-.032f)>.0001f || pixels[32*4]!=7)
+        throw std::runtime_error("Vulkan halo correction, alpha or bounds mismatch");
+    std::cout << "PASS: production Vulkan halo correction lifts the rim and preserves broad shading, alpha and bounds\n";
     vkDestroyCommandPool(device, commandPool, nullptr); vkDestroyDescriptorPool(device, pool, nullptr);
     vkDestroySampler(device, sampler, nullptr); vkDestroyPipeline(device, pipeline, nullptr);
     vkDestroyShaderModule(device, shader, nullptr); vkDestroyPipelineLayout(device, pipelineLayout, nullptr);

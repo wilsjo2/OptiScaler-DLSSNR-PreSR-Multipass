@@ -50,6 +50,8 @@ HMODULE GetCallerModule(void* returnAddress);
 MonitorInfo GetMonitorInfoForWindow(HWND hwnd);
 MonitorInfo GetMonitorInfoForOutput(IDXGIOutput* pOutput);
 int GetActiveRefreshRate(HWND hwnd);
+// Returns a borrowed pointer; the QueryInterface reference is already released.
+// The caller must keep the proxy alive and must not Release the returned pointer.
 bool CheckForRealObject(std::string functionName, IUnknown* pObject, IUnknown** ppRealObject);
 void GetDeviceRemovedReason(ID3D11Device* pDevice);
 void GetDeviceRemovedReason(ID3D12Device* pDevice);

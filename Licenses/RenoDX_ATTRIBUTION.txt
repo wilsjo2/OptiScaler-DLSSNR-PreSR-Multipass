@@ -33,6 +33,22 @@ from RenoDX's DLSS 5 Neural Rendering addon. Specifically:
 This is their design. It was reimplemented here with different names and
 comments, which does not make it original work, and it is credited as theirs.
 
+Lecram's quality filters
+-----------------------
+
+The edge-aware log-RGB enlargement and halo correction in dlssnr_quality.hlsli,
+and the optional history rejection in dlssnr_residual.hlsl, adapt Lecram's
+(PEQHUB) look_upsample, look_band and look_compose shaders. The preserved source
+is under the same MIT licence below:
+
+https://github.com/Yukikaze20170315/RenoDX-DLSS5-Generic/tree/9bb6c0fec57ecb28c77938f3feb8155433396d93
+
+The enlargement uses the existing NR proxy for its low-resolution guide. Halo
+correction uses two sparse, brightness-guided neighbourhoods in one pass. The
+history check is fitted to OptiScaler's existing signed RR residual buffer;
+its alpha channel stores input luminance. These are adaptations, not an exact
+copy of Lecram's full pipeline.
+
 What is not derived from it
 ---------------------------
 

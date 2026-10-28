@@ -77,3 +77,24 @@ Enable `[Log] LogToFile=true` and `LogLevel=2`, then enter a rendered scene.
 - **Unexpected model size:** inspect active/target/model dimensions and fallback messages; [padded input](docs/PADDED-PRESR.md) explains supported rectangles.
 
 Follow [upstream OptiFG guidance](https://github.com/optiscaler/OptiScaler/wiki/OptiFG) for frame generation. NR success alone does not establish FG compatibility. See [tested games and remaining issues](docs/NR-UPSTREAM-REVIEW.md).
+
+
+## NR model selection
+
+Under **DLSS Neural Rendering -> Model -> Edit pass**, **NR model** selects the model
+inside the installed `nvngx_dlssnr.dll`, independently of Style:
+
+- **Automatic (0):** use the installed runtime's default.
+- **Original (1):** use the original model.
+- **Optimized (2):** use the smaller FP8 model included in NR 310.9.16.0.
+
+The runtime inspection reported in [PR #128](https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass/pull/128)
+found Original in 310.8.0.0 and both models in 310.9.16.0, with Optimized as the newer
+runtime's default. Unavailable presets fall back to the runtime's shipping default;
+model selection does not establish GPU or driver compatibility.
+
+Passes 2 and 3 also offer **Inherit pass 1** (`Pass2Preset=auto` / `Pass3Preset=auto`).
+Explicit **Automatic (0)** follows the runtime default independently of pass 1.
+Passes 4 onward inherit pass 1's model. Existing INI values and defaults are preserved;
+unknown values display **Unavailable preset** until changed. Model changes use the
+existing guarded rebuild and reset the affected pass's history.

@@ -32,17 +32,17 @@ static void RenderPlacement(Config* config)
             ImGui::TextWrapped("%s", DlssNr::FinishedPictureStatus().c_str());
     }
 
-    const auto placement = ResolvePlacement(config->DlssNrRunBeforeSr.value_or_default(),
-                                            config->DlssNrDeferredDlss.value_or_default(),
-                                            config->DlssNrResidualAcrossRr.value_or_default(), finishedPicture);
+    const auto placement =
+        ResolvePlacement(config->DlssNrRunBeforeSr.value_or_default(), config->DlssNrDeferredDlss.value_or_default(),
+                         config->DlssNrResidualAcrossRr.value_or_default(), finishedPicture);
     if (placement.deferred)
     {
         ImGui::TextWrapped("Private upscale: %s", DlssNr::DeferredDlssStatus().c_str());
-        ImGui::TextWrapped(finishedPicture
-            ? "The game processes clean input through SR/RR and its effects. The separately upscaled NR edit is applied to the finished picture."
-            : "The game processes clean input through SR/RR. The separately upscaled NR edit is applied after upscale.");
+        ImGui::TextWrapped(finishedPicture ? "The game processes clean input through SR/RR and its effects. The "
+                                             "separately upscaled NR edit is applied to the finished picture."
+                                           : "The game processes clean input through SR/RR. The separately upscaled NR "
+                                             "edit is applied after upscale.");
     }
-
 }
 
 static void RenderStatus(Config* config)
@@ -79,10 +79,12 @@ static void RenderStatus(Config* config)
             ImGui::TextWrapped("NR needs the D3D12 bridge on D3D11. Choose an upscaler marked w/Dx12 and restart.");
         }
         else if (nativeVk && ResolvePlacement(config->DlssNrRunBeforeSr.value_or_default(),
-                     config->DlssNrDeferredDlss.value_or_default(),
-                     config->DlssNrResidualAcrossRr.value_or_default(), finishedPicture).deferred)
+                                              config->DlssNrDeferredDlss.value_or_default(),
+                                              config->DlssNrResidualAcrossRr.value_or_default(), finishedPicture)
+                                 .deferred)
         {
-            ImGui::TextWrapped("The private edit-upscale path requires DirectX 12 or its bridge. Disable separate edit upscaling to use native Vulkan NR.");
+            ImGui::TextWrapped("The private edit-upscale path requires DirectX 12 or its bridge. Disable separate edit "
+                               "upscaling to use native Vulkan NR.");
         }
         else
             ImGui::TextUnformatted("Waiting for the upscaler to run.");
@@ -146,8 +148,7 @@ void RenderMenu(Config* config, float menuResScale)
         if (PipelineUi::CheckboxWrapped("Enable Neural Rendering", &enabled, toggleWidth))
             config->DlssNrEnabled = enabled;
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "Enable NR processing.");
+            ImGui::SetTooltip("Enable NR processing.");
 
         bool applyModel = config->DlssNrApplyModel.value_or_default();
         if (PipelineUi::CheckboxWrapped("Apply model", &applyModel, toggleWidth))
@@ -163,8 +164,9 @@ void RenderMenu(Config* config, float menuResScale)
                                           config->DlssNrDeferredDlss.value_or_default(),
                                           config->DlssNrResidualAcrossRr.value_or_default(), finished);
         bool generateBefore = placement.beforeUpscale;
+        const bool denoiseFirstOn = config->DlssNrDenoiseFirst.value_or_default();
         ImGui::SameLine(toggleRight);
-        ImGui::BeginDisabled(placement.deferred);
+        ImGui::BeginDisabled(placement.deferred || denoiseFirstOn);
         if (PipelineUi::CheckboxWrapped("Generate model before upscale", &generateBefore, toggleWidth))
         {
             config->DlssNrRunBeforeSr = generateBefore;
@@ -173,7 +175,8 @@ void RenderMenu(Config* config, float menuResScale)
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip(placement.deferred ? "The separate-edit path always generates before upscale."
-                                               : "Run NR before the game's upscaler, including RR.");
+                              : denoiseFirstOn   ? "Denoise first decides the placement while it is on."
+                                                 : "Run NR before the game's upscaler, including RR.");
 
         if (PipelineUi::CheckboxWrapped("Apply NR to the finished picture", &finished, toggleWidth))
         {
@@ -181,7 +184,8 @@ void RenderMenu(Config* config, float menuResScale)
             DlssNr::RetryAfterFailure();
         }
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Apply NR after game effects and HUD. Early generation carries the edit through a separate upscaler.");
+            ImGui::SetTooltip(
+                "Apply NR after game effects and HUD. Early generation carries the edit through a separate upscaler.");
 
         placement = ResolvePlacement(config->DlssNrRunBeforeSr.value_or_default(),
                                      config->DlssNrDeferredDlss.value_or_default(),
@@ -196,24 +200,111 @@ void RenderMenu(Config* config, float menuResScale)
                 config->DlssNrRunBeforeSr = deferred;
         }
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Keep the game's SR/RR input clean and upscale only the NR edit with a separate non-RR backend."
-                              "\nApply after upscale, or at presentation when finished-picture mode is enabled.");
+            ImGui::SetTooltip(
+                "Keep the game's SR/RR input clean and upscale only the NR edit with a separate non-RR backend."
+                "\nApply after upscale, or at presentation when finished-picture mode is enabled.");
         ImGui::Spacing();
 
+        // Denoise first. Written for people who did not design it: what it does, what it costs, what each knob is.
         placement = ResolvePlacement(config->DlssNrRunBeforeSr.value_or_default(),
                                      config->DlssNrDeferredDlss.value_or_default(),
                                      config->DlssNrResidualAcrossRr.value_or_default(), finished);
+        const bool denoiseBlocked = placement.deferred || finished;
+        bool denoiseFirst = config->DlssNrDenoiseFirst.value_or_default();
+        ImGui::BeginDisabled(denoiseBlocked);
+        if (PipelineUi::CheckboxWrapped("Denoise at native, then NR, then upscale", &denoiseFirst, toggleWidth))
+            config->DlssNrDenoiseFirst = denoiseFirst;
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip(
+                denoiseBlocked
+                    ? "Turn off the separate-edit and finished-picture options first."
+                    : "Runs the game's own upscaler once more at the render resolution (Ray Reconstruction if the game "
+                      "uses it, otherwise DLSS) so NR is shown a clean, denoised, steady image instead of the noisy "
+                      "jittered one.\nNR edits that image; the second step below decides how the edit reaches the "
+                      "screen.\nNative DirectX 12 only. Costs one extra upscaler pass per frame.");
+        if (denoiseFirst && !denoiseBlocked)
+        {
+            ScopedIndent denoiseIndent {};
+            int step = std::clamp(config->DlssNrDenoiseFirstStep.value_or_default(), 0, 2);
+            if (ImGui::Combo("Second step", &step,
+                             "Game upscaler again, jitter zeroed\0Private DLSS SR, jitter zeroed\0Edit onto the raw "
+                             "render, then the game upscaler\0"))
+                config->DlssNrDenoiseFirstStep = step;
+            HelpMarker(
+                "Game upscaler again: the game's upscaler receives the NR'd clean image. Simple, but the second pass "
+                "gets no real sub-pixel samples, so it can look softer than native.\n\n"
+                "Private DLSS SR: the same, but a separate plain DLSS pass does the upscale and replaces the output. "
+                "Avoids running Ray Reconstruction twice.\n\n"
+                "Edit onto the raw render: only NR's change is taken from the clean image, lined up with the raw "
+                "render's jitter and added onto it. The game's upscaler then sees real samples carrying the edit. "
+                "Sharpest in theory; Ray Reconstruction may soften part of the edit.");
+            if (step == 2)
+            {
+                int edit = config->DlssNrDenoiseFirstEdit.value_or_default() == 1 ? 1 : 0;
+                if (ImGui::Combo("Edit as", &edit, "Difference (added)\0Ratio (multiplied)\0"))
+                    config->DlssNrDenoiseFirstEdit = edit;
+                HelpMarker("Ratio multiplies each raw pixel by NR / clean, so every noisy sample keeps its own hue "
+                           "and only its brightness and tint move. Recommended.\nDifference adds NR - clean as an "
+                           "absolute amount. On samples that came back dark that amount outweighs the sample, which "
+                           "recolours them and roughly doubles the colour noise the upscaler receives.");
+                if (edit == 1)
+                {
+                    bool fireflies = config->DlssNrDenoiseFirstFireflyGuard.value_or_default();
+                    if (ImGui::Checkbox("Do not multiply fireflies", &fireflies))
+                        config->DlssNrDenoiseFirstFireflyGuard = fireflies;
+                    HelpMarker("A raw sample far brighter than the clean value is a path-tracing firefly, not a lit "
+                               "pixel. Multiplying it by the ratio makes it brighter, and when the camera is still "
+                               "the game's Ray Reconstruction can keep such sparkles in shadows. With this on, those "
+                               "samples get the absolute change their pixel would have had instead. Turn off to "
+                               "compare.");
+                }
+
+                bool shift = config->DlssNrDenoiseFirstShift.value_or_default();
+                if (ImGui::Checkbox("Shift the edit by the frame's jitter", &shift))
+                    config->DlssNrDenoiseFirstShift = shift;
+                HelpMarker("The clean image sits on a steady pixel grid; the raw render is offset by a sub-pixel "
+                           "jitter that changes every frame. Shifting the edit by that jitter lines the two up. "
+                           "Turn off only to compare.");
+                if (shift)
+                {
+                    bool flip = config->DlssNrDenoiseFirstFlipJitter.value_or_default();
+                    if (ImGui::Checkbox("Flip the jitter direction", &flip))
+                        config->DlssNrDenoiseFirstFlipJitter = flip;
+                    HelpMarker("Engines disagree on which way the jitter value points. The wrong direction doubles "
+                               "the misalignment instead of removing it. If edges look worse with the shift on than "
+                               "off, flip this.");
+                    int kernel = std::clamp(config->DlssNrDenoiseFirstKernel.value_or_default(), 0, 2);
+                    if (ImGui::Combo("Edit resampling", &kernel, "Bilinear\0Catmull-Rom\0Lanczos 2\0"))
+                        config->DlssNrDenoiseFirstKernel = kernel;
+                    HelpMarker("How the edit is interpolated at the shifted position. Bilinear is soft and never "
+                               "overshoots. Catmull-Rom is sharp with little overshoot. Lanczos 2 is the sharpest "
+                               "and can ring around hard edges.");
+                    bool clampEdit = config->DlssNrDenoiseFirstNeighbourhoodClamp.value_or_default();
+                    if (ImGui::Checkbox("Clamp the edit to its neighbours", &clampEdit))
+                        config->DlssNrDenoiseFirstNeighbourhoodClamp = clampEdit;
+                    HelpMarker("Limits the interpolated edit to the range of the four nearest source pixels. Removes "
+                               "ringing from the sharper kernels at the cost of a little sharpness.");
+                }
+            }
+            ImGui::TextWrapped("Denoise first: %s", DlssNr::DenoiseFirstStatus().c_str());
+            ImGui::Spacing();
+        }
+
+        // placement is current: nothing it depends on changes in the denoise-first block above.
         const bool nativePrivateVk = feature && feature->Api() == API::Vulkan && !feature->IsWithDx12();
         if (placement.deferred && !nativePrivateVk)
         {
             int backend = (int) GetPrivateUpscaler(config->DlssNrPrivateUpscaler.value_or_default());
             if (ImGui::Combo("Private NR upscaler", &backend, "DLSS\0FSR 2.2\0FSR (FidelityFX)\0XeSS\0"))
                 config->DlssNrPrivateUpscaler = backend;
-            HelpMarker("Upscales only the NR edit, with or without game RR. FSR (FidelityFX) and XeSS need their runtimes.");
+            HelpMarker(
+                "Upscales only the NR edit, with or without game RR. FSR (FidelityFX) and XeSS need their runtimes.");
         }
 
         PipelineUi::View view;
-        view.privateUpscaler = PrivateUpscalerName(GetPrivateUpscaler(config->DlssNrPrivateUpscaler.value_or_default()));
+        view.privateUpscaler =
+            PrivateUpscalerName(GetPrivateUpscaler(config->DlssNrPrivateUpscaler.value_or_default()));
         view.enabled = enabled;
         view.applyModel = config->DlssNrApplyModel.value_or_default();
         view.passes = config->DlssNrPasses.value_or_default();

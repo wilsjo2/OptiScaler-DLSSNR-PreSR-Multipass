@@ -42,6 +42,8 @@ cbuffer Params : register(b0)
     float gPreExposure, gExposureTrim, gExposureProtection;
     uint gExposureAnchorCount, gExposureSourceWidth, gExposureSourceHeight, gExposurePadding;
     float4 gExposureAnchors[4];
+    float gHaloSuppression, gHaloBrightSuppression, gHaloRadius;
+    uint gHistoryRejectionUnused;
 };
 
 // Hue-preserving gamut compression toward the D65 neutral axis.
@@ -441,6 +443,7 @@ float3 CubeScaleResidual(float3 P, float3 T)
 }
 
 #include "dlssnr_resize.hlsli"
+#include "dlssnr_quality.hlsli"
 
 groupshared float4 gExposureReduce[64];
 
@@ -594,6 +597,12 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
 
     if (id.x >= gWidth || id.y >= gHeight)
         return;
+
+    if (gMode == 13)
+    {
+        gTarget[id.xy] = NrSuppressHalo(int2(id.xy));
+        return;
+    }
 
     // Normalised, so the source may be any size relative to this dispatch.
     float2 uv = (float2(id.xy) + 0.5) / float2(gWidth, gHeight);
@@ -849,12 +858,14 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID, uint3 gr
     uint proxyW, proxyH;
     gSource.GetDimensions(proxyW, proxyH);
     const bool modelRanSmall = proxyW != gWidth || proxyH != gHeight;
-    if ((gTransfer == 3 || gTransfer == 4) && (proxyW < gWidth || proxyH < gHeight))
+    if ((gTransfer == 3 || gTransfer == 4 || gTransfer == 5) &&
+        (proxyW < gWidth || proxyH < gHeight))
     {
         proxy = gPassthrough != 0 ? saturate(original)
                 : (gReversibleMode == 0 ? saturate(SoftKnee(original))
                    : gReversibleMode >= 3 ? HybridEncode(original) : NeutwoEncode(original));
-        model = NrReconstructModel(proxy, cmpUv, modelSample.rgb);
+        model = gTransfer == 5 ? NrEdgeAwareModel(proxy, cmpUv)
+                               : NrReconstructModel(proxy, cmpUv, modelSample.rgb);
         modelDirect = model;
         proxyLuma = dot(proxy, kLuma);
     }

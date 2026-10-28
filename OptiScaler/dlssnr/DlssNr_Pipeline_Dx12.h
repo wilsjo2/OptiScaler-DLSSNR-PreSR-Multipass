@@ -33,7 +33,7 @@ struct InputStates_Dx12
 // Shared arrival-state policy for NR input copies and private upscaler guides.
 InputStates_Dx12 ResolveInputStates_Dx12(bool interop);
 bool CanRunBeforeUpscale_Dx12(NVSDK_NGX_Parameter* parameters);
-}
+} // namespace DlssNr
 
 // These adapters only translate NGX inputs and resource states. The shader owns all NR resources/history.
 ShaderPass_Dx12 MakeDlssNrPass(DlssNr_Dx12& shader, ID3D12Device* device, ID3D12GraphicsCommandList* commandList,

@@ -42,17 +42,13 @@
 #include "DlssNr_ResidualPair.h"
 #include "../output_scaling/OS_Dx12.h"
 
-
 using DlssNr::Profiles::PassSettings;
-
 
 struct DlssNr_Dx12::State
 {
 
     // NGX result names for diagnostics.
     const char* NgxResultName(unsigned int r);
-
-
 
     using NrState = DlssNr::Detail::ModelStateDx12;
     NrState nr;
@@ -77,9 +73,10 @@ struct DlssNr_Dx12::State
     std::string enlargementStatus;
     void ReleaseEnlarger();
     void CollectEnlargers();
-    ID3D12Resource* EnlargeMatchedResidual(ID3D12GraphicsCommandList* cmd, ID3D12Device* device,
-        ID3D12Resource* proxy, ID3D12Resource* answer, ID3D12Resource* depth, ID3D12Resource* motion,
-        const DlssNrFrameInfo& frame, const DlssNrConstants& resolve, bool reset, ID3D12CommandQueue* queue);
+    ID3D12Resource* EnlargeMatchedResidual(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, ID3D12Resource* proxy,
+                                           ID3D12Resource* answer, ID3D12Resource* depth, ID3D12Resource* motion,
+                                           const DlssNrFrameInfo& frame, const DlssNrConstants& resolve, bool reset,
+                                           ID3D12CommandQueue* queue);
 
     // What the pass costs on the GPU, for the breakdown in the overlay.
     std::unique_ptr<DlssNrGpuTime> gpuTime;
@@ -109,12 +106,10 @@ struct DlssNr_Dx12::State
             ID3D12Resource* frozen = nullptr;
             D3D12_RESOURCE_DESC desc {};
         };
-        std::array<Texture, 4> textures {{
-            { NVSDK_NGX_Parameter_Color, "DLSSD.Color" },
-            { NVSDK_NGX_Parameter_Depth, "DLSSD.Depth" },
-            { NVSDK_NGX_Parameter_MotionVectors, "DLSSD.MotionVectors" },
-            { NVSDK_NGX_Parameter_ExposureTexture, "DLSSD.ExposureTexture" }
-        }};
+        std::array<Texture, 4> textures { { { NVSDK_NGX_Parameter_Color, "DLSSD.Color" },
+                                            { NVSDK_NGX_Parameter_Depth, "DLSSD.Depth" },
+                                            { NVSDK_NGX_Parameter_MotionVectors, "DLSSD.MotionVectors" },
+                                            { NVSDK_NGX_Parameter_ExposureTexture, "DLSSD.ExposureTexture" } } };
         NrHoldParameters_Dx12 parameters;
         D3D12_RESOURCE_DESC outputDesc {};
         bool active = false;
@@ -137,7 +132,9 @@ struct DlssNr_Dx12::State
 
     void ParkNrResource(ID3D12Resource*& resource);
 
-    void ReleaseSurfacesIfFormatChanged(DXGI_FORMAT needed);
+    void ReleaseSurfacesIfFormatChanged(DXGI_FORMAT modelFormat, DXGI_FORMAT nativeFormat);
+    bool PrepareSpatialResources(ID3D12Device* device, const DlssNr::Spatial::Layout& layout);
+    void ReleaseSpatialResources();
     void ReleaseSupersamplers();
 
     ID3D12Resource* CreateScratch(ID3D12Device* device, DXGI_FORMAT format, unsigned int width, unsigned int height);
@@ -214,6 +211,8 @@ struct DlssNr_Dx12::State
             ID3D12Resource* accumulatedEdit[2] {};
             unsigned accumulatedIndex = 0;
             bool accumulationReadable = false, accumulationValid = false;
+            bool historyRejection = false;
+            float historyPreExposure = 1.0f;
             bool smallReadable = false, reset = true, failed = false;
             bool rayReconstruction = false, finishedPicture = false, privateRr = false;
             DlssNr::PrivateUpscaler backend = DlssNr::PrivateUpscaler::DLSS;
@@ -233,7 +232,8 @@ struct DlssNr_Dx12::State
                     if (r)
                         r->Release();
                 for (auto* r : accumulatedEdit)
-                    if (r) r->Release();
+                    if (r)
+                        r->Release();
                 if (queries)
                     queries->Release();
                 if (queue)
@@ -299,6 +299,88 @@ struct DlssNr_Dx12::State
     };
     DeferredSrContext deferredSr { *this };
 
+    // Denoise first. The game's upscaler (RR when the game runs RR, else DLSS SR) is created a second
+    // time privately at a 1:1 ratio and evaluated on the raw render, which gives NR a clean, steady,
+    // un-jittered image at render resolution. NR edits that image, and a second step decides how the
+    // edit reaches the game's upscale. Everything here follows DeferredSrContext's lifetime rules:
+    // create on one submission epoch and evaluate from the next, retire whole generations behind
+    // the GPU, and record every command list the generation touches.
+    struct DenoiseFirstContext
+    {
+        State& owner;
+        explicit DenoiseFirstContext(State& state) : owner(state) {}
+
+        enum Step : int
+        {
+            GameUpscaler = 0, // hand the NR'd clean image to the game's upscale, jitter zeroed
+            PrivateSr = 1,    // private plain DLSS SR on the NR'd clean image replaces the output
+            EditOntoRaw = 2   // NR's edit, shifted by the jitter, added onto the raw render
+        };
+
+        struct Generation
+        {
+            ID3D12Device* device = nullptr;
+            unsigned w = 0, h = 0, outW = 0, outH = 0, flags = 0;
+            DXGI_FORMAT inputFormat {}, outputFormat {};
+            // The game's own Color resource flags, so a texture lent to the game's upscale can sit in
+            // whatever state the game declares for its colour (an Unreal title says RENDER_TARGET).
+            unsigned colorFlags = 0;
+            int step = EditOntoRaw; // the step whose resources exist; the generation survives a step change
+            int quality = 0;
+            unsigned long long enlargerEpoch = 0; // step 1's private SR was created on this epoch
+            bool rayReconstruction = false, privateRr = false, failed = false, reset = true, readable = false;
+            // Scratch. clean: the 1:1 output. edited: a copy of clean that NR edits in place.
+            // composite: raw render + edit (step 2). upscaled: the private SR output (step 1).
+            // exposure: a unit exposure for upscalers that are given none and do not auto-expose.
+            ID3D12Resource *clean = nullptr, *edited = nullptr, *composite = nullptr, *upscaled = nullptr,
+                           *exposure = nullptr;
+            std::unique_ptr<DlssNr::PrivateUpscalerDx12> denoiser, enlarger;
+            DlssNr::PrivateRrInputsDx12 rr;
+            unsigned long long createEpoch = 0;
+            ~Generation()
+            {
+                denoiser.reset(); // NGX features go before the textures they were last evaluated with.
+                enlarger.reset();
+                for (auto* r : { clean, edited, composite, upscaled, exposure })
+                    if (r)
+                        r->Release();
+                if (device)
+                    device->Release();
+            }
+        };
+
+        std::unique_ptr<Generation> current;
+        unsigned retiredCount = 0;
+        DlssNr::GpuLifetime lifetime;
+        std::string status = "not started";
+        // The private passes' own cost, separate from NR's timers: the 1:1 pass, and step 1's upscale.
+        // Rebuilt when the device changes, since the query heaps belong to one device.
+        std::unique_ptr<DlssNrGpuTime> denoiseTime, enlargeTime;
+        ID3D12Device* timerDevice = nullptr;
+        std::optional<double> lastDenoiseTime, lastEnlargeTime;
+        struct Pending
+        {
+            ID3D12GraphicsCommandList* cmd = nullptr;
+            NVSDK_NGX_Parameter* caller = nullptr;
+            ID3D12Resource* handedOff = nullptr; // texture lent to the game's upscale, to take back in After
+            D3D12_RESOURCE_STATES handedState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            bool replaceOutput = false;
+        } pending;
+
+        void Say(const std::string& text);
+        void Cancel();
+        void RetireCurrent();
+        // Called from every seam: drops the generation when the mode is not the active one.
+        void Idle(bool active);
+        bool Allocate(Generation& g);
+
+        DenoiseFirstHandoff Before(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source, uint32_t featureFlags,
+                                   unsigned long long submittedEpoch, ID3D12CommandQueue* queue,
+                                   bool rayReconstruction);
+        void After(ID3D12GraphicsCommandList* cmd, NVSDK_NGX_Parameter* source, ID3D12Resource* output, bool upscaled);
+        void ReleaseResources();
+    };
+    DenoiseFirstContext denoiseFirst { *this };
 
     struct LateContext
     {
@@ -373,16 +455,14 @@ struct DlssNr_Dx12::State
 
     DXGI_COLOR_SPACE_TYPE FinishedColorSpace(IDXGISwapChain* swapchain, DXGI_FORMAT format);
 
-
     void ApplyToFinishedPictureDx11(IDXGISwapChain* swapchain);
 
     bool ApplyFinishedColor(ID3D12Resource* color, ID3D12CommandQueue* queue, DXGI_COLOR_SPACE_TYPE colorSpace,
                             bool gameFrameHandoff = false);
 
-    bool PrepareRunModels(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device,
-                          const DlssNrFrameInfo& frame, const D3D12_RESOURCE_DESC& desc,
-                          DlssNr::ColorExtent native, DlssNr::ColorExtent work,
-                          float workScale, unsigned int requestedPasses);
+    bool PrepareRunModels(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, const DlssNrFrameInfo& frame,
+                          const D3D12_RESOURCE_DESC& desc, DlssNr::ColorExtent native, DlssNr::ColorExtent work,
+                          float workScale, unsigned int requestedPasses, bool spatial);
     struct EncodeContext
     {
         ID3D12GraphicsCommandList* cmdList;
@@ -392,6 +472,8 @@ struct DlssNr_Dx12::State
         const DlssNrFrameInfo& frame;
         float workScale;
         bool targetSupportsUav;
+        bool spatial = false;
+        bool encodeSucceeded = false;
         float whitePoint = 1.0f;
         ID3D12Resource* modelInput = nullptr;
         ID3D12Resource* exposure = nullptr;

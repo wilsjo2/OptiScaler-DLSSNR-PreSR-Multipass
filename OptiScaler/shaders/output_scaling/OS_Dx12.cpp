@@ -71,7 +71,7 @@ bool OS_Dx12::DispatchResources(ID3D12GraphicsCommandList* commandList, ID3D12Re
 }
 
 bool OS_Dx12::DispatchWithSize(ID3D12GraphicsCommandList* InCmdList, ID3D12Resource* InResource,
-                              ID3D12Resource* OutResource, uint32_t srcW, uint32_t srcH, uint32_t dstW, uint32_t dstH)
+                               ID3D12Resource* OutResource, uint32_t srcW, uint32_t srcH, uint32_t dstW, uint32_t dstH)
 {
     if (!_init || _device == nullptr || InCmdList == nullptr || InResource == nullptr || OutResource == nullptr)
         return false;
@@ -87,8 +87,8 @@ bool OS_Dx12::DispatchWithSize(ID3D12GraphicsCommandList* InCmdList, ID3D12Resou
     CreateShaderResourceView(_device, InResource, currentHeap.GetSrvCPU(0));
     CreateUnorderedAccessView(_device, OutResource, currentHeap.GetUavCPU(0), 0);
 
-    FsrEasuCon(fsr1Constants.const0, fsr1Constants.const1, fsr1Constants.const2, fsr1Constants.const3, srcW, srcH,
-               srcW, srcH, dstW, dstH);
+    FsrEasuCon(fsr1Constants.const0, fsr1Constants.const1, fsr1Constants.const2, fsr1Constants.const3, srcW, srcH, srcW,
+               srcH, dstW, dstH);
 
     constants.srcWidth = srcW;
     constants.srcHeight = srcH;

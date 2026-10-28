@@ -11,7 +11,7 @@
 #include <imgui/imgui_impl_win32.h>
 
 // menu
-static int const NUM_BACK_BUFFERS = 8;
+static int const NUM_BACK_BUFFERS = DXGI_MAX_SWAP_CHAIN_BUFFERS;
 static int const SRV_HEAP_SIZE = 64;
 static bool _dx11Device = false;
 static bool _dx12Device = false;
@@ -86,6 +86,12 @@ static void CreateRenderTargetDx12(ID3D12Device* device, IDXGISwapChain* pSwapCh
     if (hr != S_OK)
     {
         LOG_ERROR("pSwapChain->GetDesc: {0:X}", (unsigned long) hr);
+        return;
+    }
+
+    if (sd.BufferCount == 0 || sd.BufferCount > NUM_BACK_BUFFERS)
+    {
+        LOG_ERROR("Unsupported menu back buffer count: {}", sd.BufferCount);
         return;
     }
 
@@ -438,6 +444,12 @@ static void RenderImGui_DX12(IDXGISwapChain* pSwapChainPlain)
                 ImGui::Render();
 
                 UINT backBufferIdx = pSwapChain->GetCurrentBackBufferIndex();
+                if (backBufferIdx >= NUM_BACK_BUFFERS || g_mainRenderTargetResource[backBufferIdx] == nullptr ||
+                    g_commandAllocators[backBufferIdx] == nullptr)
+                {
+                    pSwapChain->Release();
+                    return;
+                }
                 ID3D12CommandAllocator* commandAllocator = g_commandAllocators[backBufferIdx];
 
                 auto result = commandAllocator->Reset();

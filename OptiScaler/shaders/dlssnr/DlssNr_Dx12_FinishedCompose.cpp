@@ -1,8 +1,8 @@
 #include "pch.h"
 #include "DlssNr_Dx12_State.h"
 
-auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12CommandQueue* queue, DXGI_COLOR_SPACE_TYPE colorSpace,
-                                          bool gameFrameHandoff) -> bool
+auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12CommandQueue* queue,
+                                            DXGI_COLOR_SPACE_TYPE colorSpace, bool gameFrameHandoff) -> bool
 {
     if (!Config::Instance()->DlssNrFinishedPicture.value_or_default() ||
         !Config::Instance()->DlssNrEnabled.value_or_default())
@@ -30,9 +30,10 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
     LateContext::Slot* latest = nullptr;
     const auto epoch = ::State::Instance().frameCount;
     const auto& cfg = *Config::Instance();
-    const bool residualOnly = DlssNr::ResolvePlacement(
-        cfg.DlssNrRunBeforeSr.value_or_default(), cfg.DlssNrDeferredDlss.value_or_default(),
-        cfg.DlssNrResidualAcrossRr.value_or_default(), true).deferred;
+    const bool residualOnly =
+        DlssNr::ResolvePlacement(cfg.DlssNrRunBeforeSr.value_or_default(), cfg.DlssNrDeferredDlss.value_or_default(),
+                                 cfg.DlssNrResidualAcrossRr.value_or_default(), true)
+            .deferred;
     for (auto& slot : late.slots)
     {
         if (!slot.pending || !slot.submitted)
@@ -45,8 +46,8 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
             continue;
         }
         // A queued producer signal can depend on this presentation, regardless of FG provider.
-        if (!DlssNr::FinishedInputReady(slot.producerQueue.Get() == realQueue,
-                                        slot.fence->GetCompletedValue(), slot.ready))
+        if (!DlssNr::FinishedInputReady(slot.producerQueue.Get() == realQueue, slot.fence->GetCompletedValue(),
+                                        slot.ready))
             continue;
         if (slot.residualOnly == residualOnly && slot.frame.OutputWidth == desc.Width &&
             slot.frame.OutputHeight == desc.Height && (!latest || slot.serial > latest->serial))
@@ -66,8 +67,8 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
     if (!latest)
         return false; // loading screen, another swapchain, or this real frame was already consumed
     auto& slot = *latest;
-    const bool holdFinished = slot.residualOnly && Config::Instance()->DlssNrHoldFrame.value_or_default() &&
-                              inputHold.active;
+    const bool holdFinished =
+        slot.residualOnly && Config::Instance()->DlssNrHoldFrame.value_or_default() && inputHold.active;
     if (!holdFinished)
         late.heldValid = false;
     if (holdFinished)
@@ -77,7 +78,8 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
         if (late.heldFinished && !SameHoldShape(late.heldFinished->GetDesc(), desc))
         {
             // Defer replacement rather than blocking a presentation needed by the old work.
-            if (late.heldFence && !DlssNr::FinishedInputReady(false, late.heldFence->GetCompletedValue(), late.heldReady))
+            if (late.heldFence &&
+                !DlssNr::FinishedInputReady(false, late.heldFence->GetCompletedValue(), late.heldReady))
                 return false;
             late.heldFinished.Reset();
             late.heldValid = false;
@@ -88,7 +90,7 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
             late.heldState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         }
         if (late.heldFence && !DlssNr::FinishedInputReady(late.heldQueue.Get() == realQueue,
-                                                        late.heldFence->GetCompletedValue(), late.heldReady))
+                                                          late.heldFence->GetCompletedValue(), late.heldReady))
             return false;
         if (!late.heldFinished)
         {
@@ -101,8 +103,7 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
         if (other.submitted && other.serial <= slot.serial)
             other.pending = false;
     // The selected input is complete or ordered before composition on this queue.
-    if (FAILED(slot.allocator->Reset()) ||
-        FAILED(slot.commands->Reset(slot.allocator.Get(), nullptr)))
+    if (FAILED(slot.allocator->Reset()) || FAILED(slot.commands->Reset(slot.allocator.Get(), nullptr)))
     {
         late.reset = true;
         late.Say("Could not prepare the finished picture.");
@@ -111,8 +112,8 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
     auto* cmd = slot.commands.Get();
     if (holdFinished)
     {
-        const bool capture = !late.heldValid || late.heldGeneration != inputHold.generation ||
-                             late.heldSpace != colorSpace;
+        const bool capture =
+            !late.heldValid || late.heldGeneration != inputHold.generation || late.heldSpace != colorSpace;
         if (capture)
         {
             Barrier(cmd, color, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -165,8 +166,8 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
                 {
                     if (!curve)
                     {
-                        curve.Attach(CreateScratch(late.device.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT,
-                                                   kDlssNrHdrCurveBins, 1));
+                        curve.Attach(
+                            CreateScratch(late.device.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT, kDlssNrHdrCurveBins, 1));
                         if (curve)
                             Barrier(cmd, curve.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -241,10 +242,8 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
         frame.WhitePointOverride = (pq || scrgb) ? 203.0f / 80.0f : 0.0f;
         frame.Reset |= late.reset;
         frame.SubmissionEpoch = epoch;
-        Barrier(cmd, slot.depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
-                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        Barrier(cmd, slot.motion.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
-                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        Barrier(cmd, slot.depth.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        Barrier(cmd, slot.motion.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         ID3D12Resource* nrColor = color;
         bool colorReady = true;
         DlssNrConstants conversion {};
@@ -254,8 +253,8 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
         {
             auto ensure = [&](LateContext::ComPtr<ID3D12Resource>& resource, DXGI_FORMAT format)
             {
-                if (resource && (resource->GetDesc().Width != desc.Width ||
-                                 resource->GetDesc().Height != desc.Height || resource->GetDesc().Format != format))
+                if (resource && (resource->GetDesc().Width != desc.Width || resource->GetDesc().Height != desc.Height ||
+                                 resource->GetDesc().Format != format))
                     resource.Reset();
                 if (!resource)
                     resource.Attach(CreateScratch(late.device.Get(), format, (unsigned) desc.Width, desc.Height));
@@ -264,12 +263,10 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
             colorReady = ensure(slot.linear, DXGI_FORMAT_R16G16B16A16_FLOAT) && ensure(slot.encoded, desc.Format);
             if (colorReady)
             {
-                Barrier(cmd, color, D3D12_RESOURCE_STATE_PRESENT,
-                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                Barrier(cmd, color, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                 colorReady = shader.DispatchResidualPass(cmd, conversion, color, nullptr, nullptr, nullptr,
                                                          slot.linear.Get(), true);
-                Barrier(cmd, color, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                        D3D12_RESOURCE_STATE_PRESENT);
+                Barrier(cmd, color, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_PRESENT);
                 // Dispatch reads the converted colour; its transition out of UAV orders the conversion.
                 nrColor = slot.linear.Get();
                 frame.OutputArrivalState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
@@ -289,11 +286,9 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
             {
                 Barrier(cmd, slot.encoded.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                         D3D12_RESOURCE_STATE_COPY_SOURCE);
-                Barrier(cmd, color, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                        D3D12_RESOURCE_STATE_COPY_DEST);
+                Barrier(cmd, color, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
                 cmd->CopyResource(color, slot.encoded.Get());
-                Barrier(cmd, color, D3D12_RESOURCE_STATE_COPY_DEST,
-                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                Barrier(cmd, color, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                 Barrier(cmd, slot.encoded.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             }
@@ -301,10 +296,8 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
             Barrier(cmd, slot.linear.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
-        Barrier(cmd, slot.motion.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                D3D12_RESOURCE_STATE_COPY_DEST);
-        Barrier(cmd, slot.depth.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                D3D12_RESOURCE_STATE_COPY_DEST);
+        Barrier(cmd, slot.motion.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+        Barrier(cmd, slot.depth.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
     }
     if (FAILED(cmd->Close()))
     {
@@ -341,8 +334,11 @@ auto DlssNr_Dx12::State::ApplyFinishedColor(ID3D12Resource* color, ID3D12Command
                                                                              : "Applying NR to the finished picture.")
                                                                       : "Preparing NR for the finished picture.");
     if (ran && (++late.successes == 1 || late.successes % 300 == 0))
-        LOG_INFO("DLSS-NR finished picture: {} frames, {}x{}, OptiScaler FG {}, same producer queue {}, game-frame handoff {}", late.successes, desc.Width, desc.Height,
+        LOG_INFO("DLSS-NR finished picture: {} frames, {}x{}, OptiScaler FG {}, same producer queue {}, game-frame "
+                 "handoff {}",
+                 late.successes, desc.Width, desc.Height,
                  ::State::Instance().currentFG && ::State::Instance().currentFG->IsActive() &&
-                     !::State::Instance().currentFG->IsPaused(), slot.producerQueue.Get() == realQueue, gameFrameHandoff);
+                     !::State::Instance().currentFG->IsPaused(),
+                 slot.producerQueue.Get() == realQueue, gameFrameHandoff);
     return ran;
 }

@@ -1094,6 +1094,25 @@ bool StreamlineHooks::hkcommon_slOnPluginLoad(sl::param::IParameters* params, co
     return result;
 }
 
+#if defined(OPTISCALER_RTX40_MFG)
+static void RefreshAdaMfgLimit()
+{
+    auto& state = State::Instance();
+    const auto maximum = static_cast<int>(MfgUnlock::UnlockedMax());
+    if (maximum <= state.dlssgMfgMax.value_or(0))
+        return;
+
+    state.dlssgMfgMax = maximum;
+    auto& overrideCount = Config::Instance()->FGDLSSGOverrideInterpolationCount;
+    const auto requested = overrideCount.value_for_config();
+    // A preliminary provider may have clamped this session to one. Recover the
+    // saved request on success; an explicit later UI choice supersedes it.
+    if (overrideCount.has_value() && requested.has_value() &&
+        (requested.value() > overrideCount.value() || overrideCount.value() > maximum))
+        overrideCount.set_volatile_value(std::min(requested.value(), maximum));
+}
+#endif
+
 sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewport, const sl::DLSSGOptions& options)
 {
     lastDlssgViewport = viewport;
@@ -1157,16 +1176,11 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
     {
 #if defined(OPTISCALER_RTX40_MFG)
         MfgUnlock::TryApply();
-        if (const auto maximum = MfgUnlock::UnlockedMax(); maximum > 0)
-            state.dlssgMfgMax = std::max(state.dlssgMfgMax.value_or(0), static_cast<int>(maximum));
+        RefreshAdaMfgLimit();
 #endif
 
-        // Populate dlssgMfgMax once
-        if (!state.dlssgMfgMax.has_value()
-#if defined(OPTISCALER_RTX40_MFG)
-            && !MfgUnlock::Pending()
-#endif
-        )
+        // Respect the native limit while discovery is pending; a later unlock refreshes it.
+        if (!state.dlssgMfgMax.has_value())
         {
             sl::DLSSGState localState {};
             sl::DLSSGOptions localOptions {};
@@ -1296,17 +1310,12 @@ sl::Result StreamlineHooks::hkslDLSSGGetState(const sl::ViewportHandle& viewport
 
     auto& optiState = State::Instance();
 #if defined(OPTISCALER_RTX40_MFG)
-    if (const auto maximum = MfgUnlock::UnlockedMax(); maximum > 0)
-        optiState.dlssgMfgMax = std::max(optiState.dlssgMfgMax.value_or(0), static_cast<int>(maximum));
+    RefreshAdaMfgLimit();
 #endif
 
     if (optiState.streamlineVersion >= feature_version { 2, 7, 1 })
     {
-        if (!optiState.dlssgMfgMax.has_value()
-#if defined(OPTISCALER_RTX40_MFG)
-            && !MfgUnlock::Pending()
-#endif
-        )
+        if (!optiState.dlssgMfgMax.has_value())
         {
             sl::DLSSGState localState {};
             sl::DLSSGOptions localOptions {};
@@ -1914,13 +1923,14 @@ void StreamlineHooks::hookInterposer(HMODULE slInterposer)
         unhookInterposer();
 
     {
-        char dllPath[MAX_PATH];
-        GetModuleFileNameA(slInterposer, dllPath, MAX_PATH);
-
-        LOG_TRACE("slInterposer path: {}", dllPath);
-
-        version_t sl_version;
-        Util::GetFileVersion(string_to_wstring(dllPath), &sl_version);
+        // Keep the Windows path in UTF-16, including non-ASCII and long game paths.
+        wchar_t dllPath[32768] {};
+        const DWORD pathLength = GetModuleFileNameW(slInterposer, dllPath, ARRAYSIZE(dllPath));
+        version_t sl_version {};
+        if (pathLength == 0 || pathLength >= ARRAYSIZE(dllPath) || !Util::GetFileVersion(dllPath, &sl_version))
+            LOG_WARN("Could not read sl.interposer.dll's version");
+        else
+            LOG_TRACE("slInterposer path: {}", wstring_to_string(dllPath));
 
         State::Instance().streamlineVersion.major = sl_version.major;
         State::Instance().streamlineVersion.minor = sl_version.minor;

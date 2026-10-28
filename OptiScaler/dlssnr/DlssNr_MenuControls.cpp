@@ -1,6 +1,8 @@
 #include "pch.h"
 #include "DlssNr_MenuSections.h"
 #include "DlssNr_Placement.h"
+#include "DlssNr_Status.h"
+#include <shaders/dlssnr/DlssNr_Spatial.h>
 #include <Config.h>
 #include <menu/menu_common.h>
 #include <algorithm>
@@ -36,6 +38,103 @@ static void Slider(const char* label, Option& option, float minimum, float maxim
     }
 }
 
+static void StoreSpatial(Config* config, const Spatial::Settings& value)
+{
+    config->DlssNrSpatialCenterX = value.centerX;
+    config->DlssNrSpatialCenterY = value.centerY;
+    config->DlssNrSpatialWorkX = value.workX;
+    config->DlssNrSpatialWorkY = value.workY;
+    config->DlssNrSpatialOffsetX = value.offsetX;
+    config->DlssNrSpatialOffsetY = value.offsetY;
+    config->DlssNrSpatialShiftX = value.shiftX;
+    config->DlssNrSpatialShiftY = value.shiftY;
+}
+
+// Used only for user edits. Invalid INI values remain visible as a runtime fallback.
+static void ConstrainSpatialControls(Spatial::Settings& value, float scale)
+{
+    const float minimumWork = Spatial::MinimumWorkPercent(scale);
+    auto axis = [&](float& center, float& work, float& offset)
+    {
+        center = std::clamp(std::isfinite(center) ? center : 80.0f, 1.0f, 99.5f);
+        work = std::clamp(std::isfinite(work) ? work : 90.0f, std::max(minimumWork, center + 0.5f), 100.0f);
+        const float limit = Spatial::MaxCenterOffset(center);
+        offset = std::clamp(std::isfinite(offset) ? offset : 0.0f, -limit, limit);
+    };
+    axis(value.centerX, value.workX, value.offsetX);
+    axis(value.centerY, value.workY, value.offsetY);
+    const auto x = Spatial::WorkShiftLimits(value, false);
+    const auto y = Spatial::WorkShiftLimits(value, true);
+    value.shiftX = std::clamp(std::isfinite(value.shiftX) ? value.shiftX : 0.0f, x.first, x.second);
+    value.shiftY = std::clamp(std::isfinite(value.shiftY) ? value.shiftY : 0.0f, y.first, y.second);
+}
+
+static void RenderSpatial(Config* config)
+{
+    Checkbox("Peripheral compression", config->DlssNrSpatialCompression);
+    HelpMarker(
+        "Keep more model detail in the centre and compress the edges. Model resolution still scales the whole image.");
+    bool preview = config->DlssNrDebugView.value_or_default() == 4;
+    if (ImGui::Checkbox("Preview", &preview))
+        config->DlssNrDebugView = preview ? 4u : 0u;
+    HelpMarker("Show the packed model input before spatial unpacking, scaled to fill the screen. "
+               "This is the same as the Compressed model input debug view. "
+               "Without active compression, shows the ordinary model input. Apply model must be enabled.");
+    if (!config->DlssNrSpatialCompression.value_or_default())
+        return;
+
+    const auto feature = State::Instance().currentFeature;
+    const bool nativeVk = feature && feature->Api() == API::Vulkan && !feature->IsWithDx12();
+    const auto status = ReadStatus(nativeVk ? Backend::Vulkan : Backend::Dx12);
+    if (!status.spatialStatus.empty())
+        ImGui::TextWrapped("%s", status.spatialStatus.c_str());
+
+    static Spatial::Settings pending;
+    static bool editing = false;
+    if (!editing)
+        pending = Spatial::ReadSettings(*config);
+    const float scale = config->DlssNrWorkingScale.value_or_default();
+    ConstrainSpatialControls(pending, scale);
+    bool commit = false;
+    auto slider = [&](const char* label, float& value, float lo, float hi)
+    {
+        if (ImGui::SliderFloat(label, &value, lo, hi, "%.1f%%"))
+            editing = true;
+        if (ImGui::IsItemDeactivatedAfterEdit())
+            commit = true;
+    };
+    slider("Centre width", pending.centerX, 1.0f, pending.workX - 0.5f);
+    slider("Centre height", pending.centerY, 1.0f, pending.workY - 0.5f);
+    const float minimumWork = Spatial::MinimumWorkPercent(scale);
+    slider("Working width", pending.workX, std::max(minimumWork, pending.centerX + 0.5f), 100.0f);
+    slider("Working height", pending.workY, std::max(minimumWork, pending.centerY + 0.5f), 100.0f);
+    const float xLimit = Spatial::MaxCenterOffset(pending.centerX);
+    const float yLimit = Spatial::MaxCenterOffset(pending.centerY);
+    slider("Centre horizontal offset", pending.offsetX, -xLimit, xLimit);
+    slider("Centre vertical offset", pending.offsetY, -yLimit, yLimit);
+    const auto xShift = Spatial::WorkShiftLimits(pending, false);
+    const auto yShift = Spatial::WorkShiftLimits(pending, true);
+    slider("Working region horizontal shift", pending.shiftX, xShift.first, xShift.second);
+    slider("Working region vertical shift", pending.shiftY, yShift.first, yShift.second);
+    HelpMarker("Extreme shifts can leave an edge with less than one working pixel. Compression then falls back to "
+               "ordinary NR; the status above explains why.");
+    if (ImGui::SmallButton("Reset compression layout"))
+    {
+        pending = Spatial::Settings {};
+        commit = true;
+    }
+    if (commit)
+    {
+        ConstrainSpatialControls(pending, scale);
+        StoreSpatial(config, pending);
+        editing = false;
+    }
+    Checkbox("Show centre outline", config->DlssNrSpatialShowCenter);
+    Checkbox("Show working region outline", config->DlssNrSpatialShowWork);
+    ImGui::TextWrapped("Centre detail follows Model resolution. Strong edge compression can soften detail or shimmer "
+                       "during movement.");
+}
+
 void RenderInput(Config* config)
 {
     // Resolution changes rebuild model resources; commit only after releasing the slider.
@@ -50,10 +149,17 @@ void RenderInput(Config* config)
     if (ImGui::IsItemDeactivatedAfterEdit() && pendingScale >= 0)
     {
         config->DlssNrWorkingScale = std::clamp(pendingScale, 25, 200) / 100.0f;
+        if (config->DlssNrSpatialCompression.value_or_default())
+        {
+            auto spatial = Spatial::ReadSettings(*config);
+            ConstrainSpatialControls(spatial, config->DlssNrWorkingScale.value_or_default());
+            StoreSpatial(config, spatial);
+        }
         pendingScale = -1;
     }
 
     HelpMarker("50% halves width and height. 100% uses the full input size.");
+    RenderSpatial(config);
 
     if (scalePercent > 100)
     {
@@ -73,9 +179,11 @@ void RenderInput(Config* config)
 
         ImGui::BeginDisabled(!reduced);
 
-        static const char* enlargeNames[] = { "Classic", "Matched residual", "Matched residual + DLSS",
-                                             "Lighting + colour", "Lighting + colour + DLSS" };
-        int enlarge = (int) std::min(config->DlssNrTransfer.value_or_default(), 4u);
+        static const char* enlargeNames[] = {
+            "Classic",           "Matched residual",         "Matched residual + DLSS",
+            "Lighting + colour", "Lighting + colour + DLSS", "Edge-aware"
+        };
+        int enlarge = (int) std::min(config->DlssNrTransfer.value_or_default(), 5u);
 
         if (ImGui::Combo("Enlargement", &enlarge, enlargeNames, IM_ARRAYSIZE(enlargeNames)))
             config->DlssNrTransfer = (uint32_t) enlarge;
@@ -84,6 +192,7 @@ void RenderInput(Config* config)
 
         HelpMarker("Below 100%: Lighting + colour resizes lighting gain and colour changes separately, then applies "
                    "them at full resolution. This can reduce resize halos; fully black pixels remain black. "
+                   "Edge-aware uses the original picture's brightness to keep edits on the correct side of edges. "
                    "DLSS modes require post-upscale DX12 processing.");
     }
     static const char* reversibleNames[] = { "Off (soft knee)", "Neutwo proxy + composed", "Neutwo proxy + replace",
@@ -165,6 +274,36 @@ static void DeferredSlider(const char* label, Option* opt, float mn, float mx, f
         HelpMarker("Skin detail. -1 follows Local structure.");
 }
 
+template <typename Option> static void NrModelCombo(Option* opt, bool allowInherit)
+{
+    static const char* names[] = { "Automatic", "Original", "Optimized" };
+    const bool inherited = allowInherit && !opt->has_value();
+    const uint32_t preset = opt->has_value() ? opt->value() : 0u;
+    const char* preview = inherited                      ? "Inherit pass 1"
+                          : preset < IM_ARRAYSIZE(names) ? names[preset]
+                                                         : "Unavailable preset";
+
+    if (ImGui::BeginCombo("NR model", preview))
+    {
+        if (allowInherit && ImGui::Selectable("Inherit pass 1", inherited))
+            *opt = std::optional<uint32_t> {};
+        for (uint32_t value = 0; value < IM_ARRAYSIZE(names); ++value)
+        {
+            const bool selected = !inherited && preset == value;
+            if (ImGui::Selectable(names[value], selected))
+                *opt = value;
+            if (selected)
+                ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    HelpMarker("Automatic: use the installed NR runtime's default model.\n"
+               "Original: use the original model (preset 1).\n"
+               "Optimized: use the smaller FP8 model (preset 2), included in NR 310.9.16.0.\n"
+               "Older runtimes fall back to their default when a model is unavailable.\n"
+               "Changing the model rebuilds this pass and resets its history.");
+}
+
 void RenderModel(Config* config)
 {
     bool unlockPasses = config->DlssNrUnlockPasses.value_or_default();
@@ -227,6 +366,7 @@ void RenderModel(Config* config)
     static const char* inheritedStyles[] = { "Auto", "Standard", "Natural", "Cinematic" };
     if (selectedPass == 0)
     {
+        NrModelCombo(&config->DlssNrPreset, false);
         int style = (int) std::min(config->DlssNrStyle.value_or_default(), 2u);
         if (ImGui::Combo("Style", &style, styles, IM_ARRAYSIZE(styles)))
             config->DlssNrStyle = (uint32_t) style;
@@ -236,6 +376,10 @@ void RenderModel(Config* config)
     else
     {
         auto& pass = config->DlssNrPassOverrides[selectedPass - 1];
+        if (selectedPass <= 2)
+            NrModelCombo(&pass.preset, true);
+        else
+            ImGui::TextDisabled("NR model: inherits pass 1");
         int style = pass.style.has_value() ? std::clamp((int) pass.style.value(), 0, 2) + 1 : 0;
         if (ImGui::Combo("Style", &style, inheritedStyles, IM_ARRAYSIZE(inheritedStyles)))
             pass.style = style ? std::optional<uint32_t>(style - 1) : std::nullopt;
@@ -247,7 +391,21 @@ void RenderModel(Config* config)
 void RenderBlend(Config* config)
 {
     if (config->DlssNrResidualAcrossRr.value_or_default())
+    {
+        Checkbox("Reject stale history", config->DlssNrHistoryRejection);
+        HelpMarker("RR residual path: reject old edits when the input changes and limit them to nearby current edits. "
+                   "Can reduce trails. Off keeps the original history filter.");
         Slider("History confidence threshold", config->DlssNrResidualConfidenceSensitivity, 0.0f, 2.0f, "%.3f", 0.0f);
+    }
+    if (ImGui::TreeNode("Halo suppression (experimental)"))
+    {
+        Slider("Dark rims near bright objects", config->DlssNrHaloSuppression, 0.0f, 1.0f, "%.2f", 0.0f);
+        Slider("Dark rims near dark objects", config->DlssNrHaloBrightSuppression, 0.0f, 1.0f, "%.2f", 0.0f);
+        Slider("Halo radius (NR pixels)", config->DlssNrHaloRadius, 1.0f, 4.0f, "%.0f", 2.0f);
+        HelpMarker("Lifts fine dark rims while keeping broad lighting. Both strengths at zero disable the pass. "
+                   "May lighten real shadows; compare the result before keeping it on.");
+        ImGui::TreePop();
+    }
     if (config->DlssNrFinishedPicture.value_or_default() &&
         (config->DlssNrRunBeforeSr.value_or_default() || config->DlssNrDeferredDlss.value_or_default()))
     {
@@ -256,7 +414,8 @@ void RenderBlend(Config* config)
                              (feature && feature->GetUpscalerType() == Upscaler::DLSSD));
         Checkbox("Match HDR brightness response (experimental)", config->DlssNrHdrTransfer);
         ImGui::EndDisabled();
-        HelpMarker("Match early NR brightness changes to the finished HDR image. Adds GPU work; unreliable fits fall back.");
+        HelpMarker(
+            "Match early NR brightness changes to the finished HDR image. Adds GPU work; unreliable fits fall back.");
     }
     Slider("Detail strength", config->DlssNrTransferStrength, 0.0f, 2.0f, "%.2f", 1.0f);
     HelpMarker("0 = no detail change. 1 = normal.");
@@ -295,7 +454,8 @@ void RenderInspect(Config* config)
                                config->DlssNrShowSkinMask.value_or_default()))
         ImGui::TextWrapped("Compare, debug view and skin-mask inspection suspend the separate edit-upscale path.");
     Checkbox("Hold frame", config->DlssNrHoldFrame);
-    HelpMarker("Freeze a frame for NR tuning. Later game effects may update; temporal behaviour is not representative.");
+    HelpMarker(
+        "Freeze a frame for NR tuning. Later game effects may update; temporal behaviour is not representative.");
 
     static const char* compareNames[] = { "Off", "Side by side", "Wipe" };
     int compare = (int) config->DlssNrCompare.value_or_default();
@@ -325,11 +485,12 @@ void RenderInspect(Config* config)
     }
 
     static const char* debugNames[] = { "Off", "Proxy (what the model sees)", "Model output (raw)",
-                                        "Difference (amplified)" };
+                                        "Difference (amplified)", "Compressed model input" };
     int debugView = (int) config->DlssNrDebugView.value_or_default();
     if (ImGui::Combo("Debug view", &debugView, debugNames, IM_ARRAYSIZE(debugNames)))
         config->DlssNrDebugView = (uint32_t) debugView;
 
-    HelpMarker("Difference is amplified 20x. Grey means unchanged.");
+    HelpMarker("Difference is amplified 20x. Grey means unchanged. Proxy and raw model output use unpacked geometry. "
+               "Compressed model input shows the input before unpacking, scaled to fill the screen.");
 }
 } // namespace DlssNr::MenuSections

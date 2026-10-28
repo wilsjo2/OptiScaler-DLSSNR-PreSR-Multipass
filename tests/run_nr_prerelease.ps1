@@ -11,6 +11,7 @@ try {
     & "$PSScriptRoot/mfg_unlock/run.ps1"
     & "$PSScriptRoot/run_nr_pipeline_capture.ps1"
     & "$PSScriptRoot/run_nr_streamline_hooks.ps1"
+    & "$PSScriptRoot/run_nr_menu_overlay.ps1"
     function RunSmoke($name, $libraries, $arguments = @(), $includes = @()) {
         $exe = Join-Path $out "$name.exe"
         & cl.exe /nologo /std:c++20 /EHsc /DNOMINMAX "/Fo$out/$name.obj" "/Fe$exe" @includes "$PSScriptRoot/$name.cpp" @libraries
@@ -26,6 +27,7 @@ try {
     RunSmoke 'nr_residual_rr_smoke' @('d3d11.lib', 'd3dcompiler.lib')
     RunSmoke 'nr_active_color_smoke' @('d3d12.lib', 'dxgi.lib')
     RunSmoke 'nr_finished_queue_smoke' @('d3d12.lib', 'dxgi.lib')
+    & "$PSScriptRoot/run_nr_spatial_smoke.ps1"
     RunSmoke 'nr_vulkan_shader_smoke' @('OptiScaler/library/vulkan/vulkan-1.lib') `
         @("$repo/OptiScaler/shaders/dlssnr/precompile/DlssNr_Shader_Vk.spv") `
         @('/IOptiScaler', '/Iexternal/vulkan/include', '/Iexternal/nvngx_dlss_sdk', '/Iexternal/spdlog/include')

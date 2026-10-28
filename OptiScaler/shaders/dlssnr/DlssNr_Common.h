@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cmath>
 
 // Which of the passes a dispatch is. One shader, because they read and write the same set of
 // resources and differ only in what they compute.
@@ -29,7 +30,8 @@ enum DlssNrMode : uint32_t
     DlssNrMode_Meter = 3,
     DlssNrMode_AutoExposure = 11,
     DlssNrMode_ResizePrivateGuides = 10,
-    DlssNrMode_EncodeResizeField = 12
+    DlssNrMode_EncodeResizeField = 12,
+    DlssNrMode_SuppressHalo = 13
 };
 
 inline bool DlssNrUsesDlssEnlargement(uint32_t transfer) { return transfer == 2 || transfer == 4; }
@@ -37,7 +39,7 @@ inline bool DlssNrUsesDlssEnlargement(uint32_t transfer) { return transfer == 2 
 // The spatial mode is used until the caller has supplied an enlarged DLSS carrier.
 inline uint32_t DlssNrSpatialTransfer(uint32_t transfer)
 {
-    return DlssNrUsesDlssEnlargement(transfer) ? transfer - 1 : std::min(transfer, 3u);
+    return transfer == 5 ? 5 : DlssNrUsesDlssEnlargement(transfer) ? transfer - 1 : std::min(transfer, 3u);
 }
 
 // Finished-colour shader's exposure-normalised brightness response, -12..12 stops.
@@ -181,7 +183,7 @@ struct alignas(256) DlssNrConstants
     uint32_t CompareSwap;
 
     // Below-size reconstruction: 0 classic, 1/2 matched residual spatial/DLSS,
-    // 3/4 relative lighting and chromaticity spatial/DLSS. Native size bypasses resizing.
+    // 3/4 relative lighting and chromaticity spatial/DLSS, 5 edge-aware. Native size bypasses resizing.
     //
     // Classic composes the model's own low-resolution picture against the full-resolution frame, so
     // the two disagree by the blur the downsample introduced as well as by the edit -- and the
@@ -211,7 +213,7 @@ struct alignas(256) DlssNrConstants
     // to A/B against), 1 = apply the model's edit. Trailing scalar, mirrored in the shader cbuffer.
     uint32_t ApplyModel;
 
-    uint32_t Reserved; // Preserve the shared constant-buffer layout.
+    uint32_t Reserved;   // Preserve the shared constant-buffer layout.
     float ResidualScale; // Scene pre-exposure used to encode/decode the private residual carrier.
     // Optional colour-based final-composition mask. Not the runtime's semantic mask.
     uint32_t SkinProtection;
@@ -241,10 +243,16 @@ struct alignas(256) DlssNrConstants
     uint32_t ExposureSourceHeight;
     uint32_t ExposurePadding;
     float ExposureAnchors[16]; // Eight float2 pairs, packed as four float4s in HLSL.
+    float HaloSuppression;
+    float HaloBrightSuppression;
+    float HaloRadius;
+    uint32_t HistoryRejection;
 };
 static_assert(sizeof(DlssNrConstants) == 256);
 static_assert(offsetof(DlssNrConstants, ReplaceDetailStrength) == 132);
 static_assert(offsetof(DlssNrConstants, ExposureAnchors) == 176);
+static_assert(offsetof(DlssNrConstants, HaloSuppression) == 240);
+static_assert(offsetof(DlssNrConstants, HistoryRejection) == 252);
 
 // Local mode numbering for dlssnr_residual.hlsl (a separate blob / PSO from the DlssNrMode shader).
 enum DlssNrResidualMode : uint32_t
@@ -256,6 +264,22 @@ enum DlssNrResidualMode : uint32_t
 class DlssNr_Common
 {
   public:
+    template <typename ConfigType> static bool HaloEnabled(const ConfigType& config)
+    {
+        const float dark = config.DlssNrHaloSuppression.value_or_default();
+        const float bright = config.DlssNrHaloBrightSuppression.value_or_default();
+        return (std::isfinite(dark) && dark > 0) || (std::isfinite(bright) && bright > 0);
+    }
+
+    template <typename ConfigType> static void SetQualityConstants(DlssNrConstants& c, const ConfigType& config)
+    {
+        const auto bounded = [](float value, float fallback, float lo, float hi)
+        { return std::isfinite(value) ? std::clamp(value, lo, hi) : fallback; };
+        c.HaloSuppression = bounded(config.DlssNrHaloSuppression.value_or_default(), 0, 0, 1);
+        c.HaloBrightSuppression = bounded(config.DlssNrHaloBrightSuppression.value_or_default(), 0, 0, 1);
+        c.HaloRadius = bounded(config.DlssNrHaloRadius.value_or_default(), 2, 1, 4);
+        c.HistoryRejection = config.DlssNrHistoryRejection.value_or_default();
+    }
     // Keep the controls consumed by the shared shader identical across graphics APIs.
     template <typename ConfigType>
     static DlssNrConstants MakeConstants(DlssNrMode mode, uint32_t width, uint32_t height, float whitePoint,
@@ -285,7 +309,7 @@ class DlssNr_Common
         constants.SkinColour = config.DlssNrSkinColour.value_or_default();
         constants.EnvironmentDetail = config.DlssNrEnvironmentDetail.value_or_default();
         constants.EnvironmentColour = config.DlssNrEnvironmentColour.value_or_default();
+        SetQualityConstants(constants, config);
         return constants;
     }
-
 };

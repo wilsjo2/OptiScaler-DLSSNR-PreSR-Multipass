@@ -21,6 +21,9 @@ auto DlssNr_Dx12::State::RetryAfterFailure() -> void
     nr.failed = false;
     nr.reason = "";
     nr.reset = true;
+    nr.spatialFallback = false;
+    nr.spatialFallbackReason = "";
+    nr.spatialActive = false;
 }
 
 auto DlssNr_Dx12::State::ConsumeControls() -> void
@@ -48,12 +51,22 @@ auto DlssNr_Dx12::State::ConsumeControls() -> void
 
 auto DlssNr_Dx12::State::Publish() -> void
 {
-    DlssNr::PublishStatus(
-        &shader, DlssNr::Backend::Dx12,
-        { !nr.failed && modelRunning && enlargementStatus.empty(),
-          nr.failed ? nr.reason : enlargementStatus,
-          lastGpuTime,
-          frames });
+    std::string spatialStatus = "Off";
+    if (nr.spatialLayout.requested)
+    {
+        if (!nr.spatialLayout.active)
+            spatialStatus = "Unavailable: " + nr.spatialLayout.reason;
+        else if (nr.spatialFallback)
+            spatialStatus = std::string("Fallback to ordinary NR: ") + nr.spatialFallbackReason;
+        else
+            spatialStatus = "DX12 peripheral compression: " + std::to_string(nr.spatialLayout.ordinaryW) + "x" +
+                            std::to_string(nr.spatialLayout.ordinaryH) + " -> " +
+                            std::to_string(nr.spatialLayout.modelW) + "x" + std::to_string(nr.spatialLayout.modelH);
+    }
+    DlssNr::PublishStatus(&shader, DlssNr::Backend::Dx12,
+                          { !nr.failed && modelRunning && enlargementStatus.empty(),
+                            nr.failed ? nr.reason : enlargementStatus, lastGpuTime, frames, spatialStatus,
+                            nr.spatialActive });
 }
 
 void DlssNr_Dx12::State::EndGpuTiming(ID3D12GraphicsCommandList* cmdList)

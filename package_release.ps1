@@ -38,6 +38,8 @@ if ($hasUnlock -ne $EnableRtx40Mfg.IsPresent) { throw 'DLL RTX 40 MFG feature do
 # Streamline/MFG, removed NR helpers or discarded experiment files entering this package.
 $files = @{}
 $files['OptiScaler.dll'] = Join-Path $buildRoot 'OptiScaler.dll'
+$files['docs/RELEASE-v0.8.91.md'] = Join-Path $root 'docs/RELEASE-v0.8.91.md'
+$files['docs/RELEASE-v0.8.9.md'] = Join-Path $root 'docs/RELEASE-v0.8.9.md'
 $files['docs/RELEASE-v0.8.8.md'] = Join-Path $root 'docs/RELEASE-v0.8.8.md'
 $files['docs/RELEASE-v0.8.7.md'] = Join-Path $root 'docs/RELEASE-v0.8.7.md'
 $files['docs/RELEASE-v0.8.6.md'] = Join-Path $root 'docs/RELEASE-v0.8.6.md'
@@ -63,6 +65,8 @@ $files['Licenses/FidelityFX_v1_LICENSE.md'] = Join-Path $root 'external/Fidelity
 $files['Licenses/FidelityFX_v2_LICENSE.md'] = Join-Path $root 'external/FidelityFX-SDK-v2/docs/license.md'
 $files['Licenses/DirectX_LICENSE.txt'] = Join-Path $root 'external/directx_agility_sdk/LICENSE.txt'
 $files['Licenses/RenoDX_ATTRIBUTION.txt'] = Join-Path $root 'Licenses/RenoDX_ATTRIBUTION.txt'
+$files['Licenses/PeripheralWarp_LICENSE.txt'] = Join-Path $root 'external/peripheral_warp/LICENSE'
+$files['docs/NR-SPATIAL-COMPRESSION.md'] = Join-Path $root 'docs/NR-SPATIAL-COMPRESSION.md'
 if ($EnableRtx40Mfg) {
     $files['Licenses/MFGUnlock_LICENSE.txt'] = Join-Path $root 'Licenses/MFGUnlock_LICENSE.txt'
 }
@@ -81,7 +85,7 @@ foreach ($entry in $files.GetEnumerator()) {
 
 $ini = Get-Content -LiteralPath $files['OptiScaler.ini'] -Raw
 if ($ini -match '(?mi)^Enabled=true\s*$') { throw 'A feature is enabled in the default INI.' }
-foreach ($key in @('FinishedPicture', 'DeferredDLSS', 'UnlockPasses', 'AdaMfgUnlock', 'AdaFlipMeteringPatch')) {
+foreach ($key in @('FinishedPicture', 'DeferredDLSS', 'UnlockPasses', 'AdaMfgUnlock', 'AdaFlipMeteringPatch', 'SpatialCompression')) {
     if ($ini -match "(?mi)^$key=true\s*$") { throw "Experimental option $key is enabled in the default INI." }
 }
 if ($ini -notmatch '(?mi)^TargetProcessName=auto\s*$') { throw 'The INI contains a game-specific process filter.' }

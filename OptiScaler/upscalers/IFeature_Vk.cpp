@@ -116,9 +116,8 @@ bool IFeature_Vk::Evaluate(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Parameter* InP
     const bool useNr = !finishedNr && NeuralRendering && NeuralRendering->CanRender() && !IsWithDx12() &&
                        Config::Instance()->DlssNrEnabled.value_or_default() &&
                        DlssNr::HasSupportedSubrects(InParameters, false);
-    const bool nrBeforeUpscale =
-        useNr && Config::Instance()->DlssNrRunBeforeSr.value_or_default() &&
-        DlssNr::HasSupportedSubrects(InParameters, true);
+    const bool nrBeforeUpscale = useNr && Config::Instance()->DlssNrRunBeforeSr.value_or_default() &&
+                                 DlssNr::HasSupportedSubrects(InParameters, true);
     const auto nrDepth = DlssNr::ImageInfo(paramDepth);
     const auto nrMotion = DlssNr::ImageInfo(paramMotion);
     auto nrFrame = DlssNr::FrameInfo(InParameters, nrBeforeUpscale);

@@ -43,8 +43,6 @@ constexpr std::string_view kAdvertisePattern309 = "81 FD B0 01 00 00 0F 8C ? ? ?
 //     setae al
 constexpr std::string_view kValidatePattern309 = "3D B0 01 00 00 0F 93 C0";
 
-
-
 MfgUnlock::Status g_status {};
 std::recursive_mutex g_mutex;
 
@@ -213,13 +211,17 @@ void PatchPluginCeilings()
 
     for (HMODULE plugin : g_plugins)
     {
+        // NGX's requirements probe can unload a plugin before the real device
+        // starts. Never scan a stale module handle while unlocking another provider.
+        wchar_t path[MAX_PATH] {};
+        if (GetModuleFileNameW(plugin, path, MAX_PATH) == 0)
+            continue;
+
         if (std::find(g_pluginsTried.begin(), g_pluginsTried.end(), plugin) != g_pluginsTried.end())
             continue;
 
         g_pluginsTried.push_back(plugin);
 
-        wchar_t path[MAX_PATH] {};
-        GetModuleFileNameW(plugin, path, MAX_PATH);
         const auto pluginPath = wstring_to_string(path);
 
         // A plugin that was patched stays patched; a second one that cannot be does not change that.
@@ -321,9 +323,8 @@ bool PatchAdvertise(HMODULE module)
     const uint8_t count[] = { kMaxGeneratedFrames };
     const uint8_t nop[] = { 0x0F, 0x1F, 0x40, 0x00 };
 
-    LOG_INFO("MFG unlock: advertise at {:X}, count {} -> {}, cmovl {} -> {}", address,
-             *(const uint8_t*) countAt, kMaxGeneratedFrames, Hex((const uint8_t*) cmovAt, sizeof(nop)),
-             Hex(nop, sizeof(nop)));
+    LOG_INFO("MFG unlock: advertise at {:X}, count {} -> {}, cmovl {} -> {}", address, *(const uint8_t*) countAt,
+             kMaxGeneratedFrames, Hex((const uint8_t*) cmovAt, sizeof(nop)), Hex(nop, sizeof(nop)));
 
     return WriteBytes(countAt, count, sizeof(count)) && WriteBytes(cmovAt, nop, sizeof(nop));
 }
@@ -364,7 +365,6 @@ bool PatchValidate(HMODULE module)
 
     return WriteBytes(branchAt, nop, sizeof(nop)) && WriteBytes(countAt, count, sizeof(count));
 }
-
 
 // Gives Ada the Blackwell kernels the module already carries.
 //
@@ -443,8 +443,8 @@ unsigned int RewriteBlackwellKernels(HMODULE module)
                 const auto payload = *reinterpret_cast<const uint64_t*>(image + kImagePayloadSize);
                 const auto arch = *reinterpret_cast<const uint32_t*>(image + kImageArch);
 
-                if (imageHeader < kImageArch + sizeof(uint32_t) || imageHeader > remaining ||
-                    payload == 0 || payload > remaining - imageHeader)
+                if (imageHeader < kImageArch + sizeof(uint32_t) || imageHeader > remaining || payload == 0 ||
+                    payload > remaining - imageHeader)
                 {
                     valid = false;
                     break;
@@ -506,52 +506,89 @@ void MfgUnlock::TryApply(HMODULE requestedModule)
 
     std::lock_guard lock(g_mutex);
 
-    // Latches once nvngx_dlssg.dll is present; before that every call rescans for it.
-    static bool snippetDone = false;
+    // NGX can probe the local provider, unload it, then use a different OTA provider.
+    // Each provider must be unlocked before NGX caches that provider's capabilities.
+    static std::vector<HMODULE> snippetsTried;
+    static std::vector<HMODULE> snippetsApplying;
 
-    if (!snippetDone)
+    if (auto module = requestedModule ? requestedModule : FindProvider(); module != nullptr)
     {
-        if (auto module = requestedModule ? requestedModule : FindProvider(); module != nullptr)
+        // Synchronous diagnostics can re-enter the loader before this provider's
+        // gates are patched. That is not a reload and must not retarget it twice.
+        if (std::find(snippetsApplying.begin(), snippetsApplying.end(), module) != snippetsApplying.end())
+            return;
+
+        const bool seen = std::find(snippetsTried.begin(), snippetsTried.end(), module) != snippetsTried.end();
+        if (seen && !requestedModule)
+            return;
+        const bool knownGates =
+            (UniqueAddress(module, kAdvertisePattern309) && UniqueAddress(module, kValidatePattern309)) ||
+            (UniqueAddress(module, kAdvertisePattern) && UniqueAddress(module, kValidatePattern));
+
+        // Ordinary Streamline calls must not rewrite an already patched provider. A load
+        // notification with original gates also covers a DLL reloaded at the same address.
+        if (seen && !knownGates)
+            return;
+
+        if (!seen)
+            snippetsTried.push_back(module);
+
+        // Driver requirements probes can also load older, unsupported providers.
+        // They must not erase the completed unlock for the effective OTA provider.
+        if (!knownGates)
         {
-            snippetDone = true;
-            g_status.ModuleFound = true;
-            g_status.SnippetVersion = ModuleVersion(module);
+            LOG_WARN("MFG unlock: unsupported or ambiguous DLSSG {} signatures; left unchanged", ModuleVersion(module));
+            return;
+        }
+
+        {
+            snippetsApplying.push_back(module);
+            struct ApplyingScope
+            {
+                std::vector<HMODULE>& modules;
+                ~ApplyingScope() { modules.pop_back(); }
+            } applying { snippetsApplying };
+
+            // A callback can complete a different provider. Publish only this
+            // attempt's completed provider fields, preserving plugin status.
+            Status status {};
+            const auto publish = [&]
+            {
+                g_status.ModuleFound = status.ModuleFound;
+                g_status.AdvertiseMatched = status.AdvertiseMatched;
+                g_status.ValidateMatched = status.ValidateMatched;
+                g_status.KernelsRewritten = status.KernelsRewritten;
+                g_status.TemporalAttempted = status.TemporalAttempted;
+                g_status.TemporalDetail = status.TemporalDetail;
+                g_status.SnippetVersion = status.SnippetVersion;
+            };
+            status.ModuleFound = true;
+            status.SnippetVersion = ModuleVersion(module);
 
             wchar_t modulePath[MAX_PATH] {};
             GetModuleFileNameW(module, modulePath, MAX_PATH);
-            LOG_INFO("MFG unlock: DLSS-G provider {} at {}", g_status.SnippetVersion, wstring_to_string(modulePath));
-
-            // Validate both gates before touching either. Ambiguous/unknown versions remain unmodified.
-            const bool knownGates =
-                (UniqueAddress(module, kAdvertisePattern309) && UniqueAddress(module, kValidatePattern309)) ||
-                (UniqueAddress(module, kAdvertisePattern) && UniqueAddress(module, kValidatePattern));
-            if (!knownGates)
-            {
-                LOG_WARN("MFG unlock: unsupported or ambiguous DLSSG {} signatures; left unchanged",
-                         g_status.SnippetVersion);
-                return;
-            }
+            LOG_INFO("MFG unlock: DLSS-G provider {} at {}", status.SnippetVersion, wstring_to_string(modulePath));
 
             // Retargeting and both gates form one feature; a count-only unlock repeats frames. One temporal
             // method per session, since both edit the same fatbin.
             const auto method = ConfiguredTemporalMethod();
-            g_status.TemporalAttempted = method;
+            status.TemporalAttempted = method;
 
             if (method == TemporalMethod::Retarget)
             {
-                g_status.KernelsRewritten = RewriteBlackwellKernels(module);
+                status.KernelsRewritten = RewriteBlackwellKernels(module);
 
-                g_status.TemporalDetail = g_status.KernelsRewritten > 0
-                                              ? "reused the Blackwell interpolation kernel"
-                                              : "no compatible Blackwell interpolation kernel image";
+                status.TemporalDetail = status.KernelsRewritten > 0
+                                            ? "reused the Blackwell interpolation kernel"
+                                            : "no compatible Blackwell interpolation kernel image";
             }
             else
             {
                 Ptx::Result ptx;
 
                 Ptx::Apply(module, ptx);
-                g_status.KernelsRewritten = static_cast<unsigned int>(ptx.redirected);
-                g_status.TemporalDetail = ptx.detail;
+                status.KernelsRewritten = static_cast<unsigned int>(ptx.redirected);
+                status.TemporalDetail = ptx.detail;
 
                 if (ptx.redirected > 0)
                     LOG_INFO("MFG unlock: PTX temporal fix: {}", ptx.detail);
@@ -559,15 +596,17 @@ void MfgUnlock::TryApply(HMODULE requestedModule)
                     LOG_WARN("MFG unlock: PTX temporal fix not applied: {}", ptx.detail);
             }
 
-            if (g_status.KernelsRewritten == 0)
+            if (status.KernelsRewritten == 0)
             {
+                publish();
                 LOG_WARN("MFG unlock: no compatible interpolation kernels; frame-count gates left unchanged");
                 return;
             }
             const bool advertise = PatchAdvertise(module);
             const bool validate = PatchValidate(module);
-            g_status.AdvertiseMatched = advertise;
-            g_status.ValidateMatched = validate;
+            status.AdvertiseMatched = advertise;
+            status.ValidateMatched = validate;
+            publish();
 
             if (advertise && validate)
                 LOG_INFO("MFG unlock: nvngx_dlssg.dll patched for {} generated frames", kMaxGeneratedFrames);
@@ -646,9 +685,10 @@ unsigned int MfgUnlock::UnlockedMax()
 {
     const auto& status = LastStatus();
 
-    return status.AdvertiseMatched && status.ValidateMatched && status.KernelsRewritten > 0
-               ? kMaxGeneratedFrames : 0;
+    return status.AdvertiseMatched && status.ValidateMatched && status.KernelsRewritten > 0 ? kMaxGeneratedFrames : 0;
 }
+
+bool MfgUnlock::Enabled() { return AdaUnlockWanted(); }
 
 bool MfgUnlock::Pending()
 {

@@ -16,6 +16,9 @@ struct PrivateUpscalerCreateDx12
     bool depthInverted = false, jitteredMotion = false, lowResolutionMotion = true;
     bool rayReconstruction = false;
     unsigned roughnessMode = 0, hardwareDepth = 1;
+    // Denoise-first passes feed the game's own scene-linear colour, so SR needs the game's HDR and
+    // auto-exposure creation flags. Off by default so the residual carrier keeps its LDR creation.
+    bool hdr = false, autoExposure = false;
 };
 struct PrivateUpscalerResourceDx12
 {
@@ -42,6 +45,8 @@ struct PrivateUpscalerFrameDx12
     unsigned width = 0, height = 0, outputWidth = 0, outputHeight = 0;
     float jitterX = 0, jitterY = 0, motionScaleX = 1, motionScaleY = 1, frameTimeMs = 16.67f;
     float cameraNear = 0.1f, cameraFar = 1000.0f, cameraFovVertical = 1.04719755f, viewSpaceToMeters = 1;
+    // Passed straight to DLSS. The residual carrier keeps both at 1; denoise-first passes the game's.
+    float preExposure = 1, exposureScale = 1;
     bool reset = false;
     PrivateRrInputsDx12 rr;
 };
@@ -52,6 +57,7 @@ class PrivateUpscalerDx12
 {
     struct Impl;
     std::unique_ptr<Impl> impl;
+
   public:
     explicit PrivateUpscalerDx12(PrivateUpscaler selected);
     ~PrivateUpscalerDx12();

@@ -19,8 +19,8 @@ class CompatibilityRuntime
 
     static std::shared_ptr<CompatibilityRuntime> TryOpen(ID3D12Device* device);
     static std::shared_ptr<CompatibilityRuntime> Open(const std::filesystem::path& path, ID3D12Device* device,
-                                                     Allocate allocate, Destroy destroy,
-                                                     const std::filesystem::path& dataPath = {});
+                                                      Allocate allocate, Destroy destroy,
+                                                      const std::filesystem::path& dataPath = {});
     ~CompatibilityRuntime();
     CompatibilityRuntime(const CompatibilityRuntime&) = delete;
     CompatibilityRuntime& operator=(const CompatibilityRuntime&) = delete;
@@ -37,4 +37,4 @@ class CompatibilityRuntime
     bool initialized = false;
     CompatibilityRuntime() = default;
 };
-}
+} // namespace DlssNr

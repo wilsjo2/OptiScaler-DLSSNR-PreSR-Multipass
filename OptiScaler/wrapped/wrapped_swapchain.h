@@ -15,7 +15,7 @@ class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChai
 {
   public:
     WrappedIDXGISwapChain4(IDXGISwapChain* real, IUnknown* pDevice, HWND hWnd, UINT flags, bool isUWP,
-                          bool isComposition = false);
+                           bool isComposition = false);
     virtual ~WrappedIDXGISwapChain4();
 
     // implement IUnknown

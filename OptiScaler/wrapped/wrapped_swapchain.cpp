@@ -514,7 +514,13 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
                 currentFeature->TickFrozenCheck();
         }
 
-        if (cq && (fg == nullptr || !fg->IsActive() || fg->IsPaused()))
+        // XeFG's app-facing Present composes NR before the provider takes the frame,
+        // even with interpolation off. Its internal display buffer is not that frame.
+        const bool xeFgGamePicture = fg != nullptr && State::Instance().currentFGSwapchain != nullptr &&
+                                     State::Instance().activeFgOutput == FGOutput::XeFG &&
+                                     State::Instance().swapchainInteropApi == SwapchainInteropApi::None &&
+                                     fg->Hwnd() == hWnd;
+        if (cq && !xeFgGamePicture && (fg == nullptr || !fg->IsActive() || fg->IsPaused()))
             DlssNr::ApplyToFinishedPicture(pSwapChain, cq);
         else if (isD3D11 && State::Instance().swapchainInteropApi == SwapchainInteropApi::None)
             DlssNr::ApplyToFinishedPictureDx11(pSwapChain);
@@ -933,8 +939,8 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount
 
     State::Instance().scChanged = true;
 
-    if (!_composition && Config::Instance()->OverrideVsync.value_or_default() && !State::Instance().SCExclusiveFullscreen &&
-        State::Instance().currentFG == nullptr)
+    if (!_composition && Config::Instance()->OverrideVsync.value_or_default() &&
+        !State::Instance().SCExclusiveFullscreen && State::Instance().currentFG == nullptr)
     {
         LOG_DEBUG("Overriding flags");
         SwapChainFlags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
@@ -1073,7 +1079,8 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount
                 if (DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT & css)
                 {
                     result = _real3->SetColorSpace1(hdrCS);
-                    if (SUCCEEDED(result)) DlssNr::FinishedPictureColorSpace(_real3, hdrCS);
+                    if (SUCCEEDED(result))
+                        DlssNr::FinishedPictureColorSpace(_real3, hdrCS);
 
                     if (result != S_OK)
                     {
@@ -1377,8 +1384,8 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
 
     State::Instance().scChanged = true;
 
-    if (!_composition && Config::Instance()->OverrideVsync.value_or_default() && !State::Instance().SCExclusiveFullscreen &&
-        State::Instance().currentFG == nullptr)
+    if (!_composition && Config::Instance()->OverrideVsync.value_or_default() &&
+        !State::Instance().SCExclusiveFullscreen && State::Instance().currentFG == nullptr)
     {
         LOG_DEBUG("Overriding flags");
         SwapChainFlags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
@@ -1537,7 +1544,8 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
                 if (DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT & css)
                 {
                     result = _real3->SetColorSpace1(hdrCS);
-                    if (SUCCEEDED(result)) DlssNr::FinishedPictureColorSpace(_real3, hdrCS);
+                    if (SUCCEEDED(result))
+                        DlssNr::FinishedPictureColorSpace(_real3, hdrCS);
 
                     if (result != S_OK)
                     {

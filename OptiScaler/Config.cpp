@@ -342,6 +342,14 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrPrivateUpscaler.set_from_config(readInt("DlssNr", "PrivateUpscaler"));
             DlssNrResidualAcrossRr.set_from_config(readBool("DlssNr", "ResidualAcrossRR"));
             DlssNrResidualAcrossRrBlend.set_from_config(readFloat("DlssNr", "ResidualAcrossRRBlend"));
+            DlssNrDenoiseFirst.set_from_config(readBool("DlssNr", "DenoiseFirst"));
+            DlssNrDenoiseFirstStep.set_from_config(readInt("DlssNr", "DenoiseFirstStep"));
+            DlssNrDenoiseFirstEdit.set_from_config(readInt("DlssNr", "DenoiseFirstEdit"));
+            DlssNrDenoiseFirstKernel.set_from_config(readInt("DlssNr", "DenoiseFirstKernel"));
+            DlssNrDenoiseFirstShift.set_from_config(readBool("DlssNr", "DenoiseFirstShift"));
+            DlssNrDenoiseFirstFlipJitter.set_from_config(readBool("DlssNr", "DenoiseFirstFlipJitter"));
+            DlssNrDenoiseFirstNeighbourhoodClamp.set_from_config(readBool("DlssNr", "DenoiseFirstNeighbourhoodClamp"));
+            DlssNrDenoiseFirstFireflyGuard.set_from_config(readBool("DlssNr", "DenoiseFirstFireflyGuard"));
             DlssNrToggleKey.set_from_config(readInt("DlssNr", "ToggleKey"));
             DlssNrTransferStrength.set_from_config(readFloat("DlssNr", "TransferStrength"));
             DlssNrColourStrength.set_from_config(readFloat("DlssNr", "ColourStrength"));
@@ -356,6 +364,17 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrCompareTags.set_from_config(readBool("DlssNr", "CompareTags"));
             DlssNrTagScale.set_from_config(readFloat("DlssNr", "TagScale"));
             DlssNrWorkingScale.set_from_config(readFloat("DlssNr", "WorkingScale"));
+            DlssNrSpatialCompression.set_from_config(readBool("DlssNr", "SpatialCompression"));
+            DlssNrSpatialCenterX.set_from_config(readFloat("DlssNr", "SpatialCenterX"));
+            DlssNrSpatialCenterY.set_from_config(readFloat("DlssNr", "SpatialCenterY"));
+            DlssNrSpatialWorkX.set_from_config(readFloat("DlssNr", "SpatialWorkX"));
+            DlssNrSpatialWorkY.set_from_config(readFloat("DlssNr", "SpatialWorkY"));
+            DlssNrSpatialOffsetX.set_from_config(readFloat("DlssNr", "SpatialOffsetX"));
+            DlssNrSpatialOffsetY.set_from_config(readFloat("DlssNr", "SpatialOffsetY"));
+            DlssNrSpatialShiftX.set_from_config(readFloat("DlssNr", "SpatialShiftX"));
+            DlssNrSpatialShiftY.set_from_config(readFloat("DlssNr", "SpatialShiftY"));
+            DlssNrSpatialShowCenter.set_from_config(readBool("DlssNr", "SpatialShowCenter"));
+            DlssNrSpatialShowWork.set_from_config(readBool("DlssNr", "SpatialShowWork"));
 
             if (auto v = readEnum<Scaler>("DlssNr", "ScalingDownscaler"))
                 DlssNrScalingDownscaler.set_from_config(*v);
@@ -365,6 +384,10 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrWhitePointScale.set_from_config(readFloat("DlssNr", "WhitePointScale"));
             DlssNrReplaceDetailStrength.set_from_config(readFloat("DlssNr", "ReplaceDetailStrength"));
             DlssNrResidualConfidenceSensitivity.set_from_config(readFloat("DlssNr", "ResidualConfidenceSensitivity"));
+            DlssNrHistoryRejection.set_from_config(readBool("DlssNr", "HistoryRejection"));
+            DlssNrHaloSuppression.set_from_config(readFloat("DlssNr", "HaloSuppression"));
+            DlssNrHaloBrightSuppression.set_from_config(readFloat("DlssNr", "HaloBrightSuppression"));
+            DlssNrHaloRadius.set_from_config(readFloat("DlssNr", "HaloRadius"));
             DlssNrWhitePointSource.set_from_config(readUInt("DlssNr", "WhitePointSource"));
             DlssNrWhitePointTrim.set_from_config(readFloat("DlssNr", "WhitePointTrim"));
             DlssNrAutoExposureTrim.set_from_config(readFloat("DlssNr", "AutoExposureTrim"));
@@ -387,6 +410,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrEnvironmentColour.set_from_config(readFloat("DlssNr", "EnvironmentColour"));
             DlssNrShowSkinMask.set_from_config(readBool("DlssNr", "ShowSkinMask"));
             DlssNrUnlockPasses.set_from_config(readBool("DlssNr", "UnlockPasses"));
+            DlssNrMatchGuides.set_from_config(readBool("DlssNr", "MatchGuides"));
+            DlssNrRenderMotionScale.set_from_config(readBool("DlssNr", "RenderMotionScale"));
             for (unsigned int i = 0; i < std::size(DlssNrPassOverrides); ++i)
             {
                 auto& pass = DlssNrPassOverrides[i];
@@ -971,8 +996,8 @@ bool Config::SaveIni(std::filesystem::path destination)
         ini.SetValue("FrameGen", "Enabled", GetBoolValue(Instance()->FGEnabled.value_for_config()).c_str());
         // Discard settings from removed fork-only frame-generation extensions.
         ini.Delete("FrameGen", "External");
-        for (const auto* key : { "AdaBlackwellKernels", "AmpereMfgUnlock", "AmpereMfgMaxFrames",
-                                "AmpereMfgKernelImage", "AmpereMfgHardwareBilinear" })
+        for (const auto* key : { "AdaBlackwellKernels", "AmpereMfgUnlock", "AmpereMfgMaxFrames", "AmpereMfgKernelImage",
+                                 "AmpereMfgHardwareBilinear" })
             ini.Delete("DLSSG", key);
         ini.SetValue("FrameGen", "DebugView", GetBoolValue(Instance()->FGDebugView.value_for_config()).c_str());
         std::string FGInputString = "auto";
@@ -1249,106 +1274,160 @@ bool Config::SaveIni(std::filesystem::path destination)
     {
         ini.SetValue("DLSS", "Enabled", GetBoolValue(Instance()->DLSSEnabled.value_for_config()).c_str());
 
-    // --- DLSS 5 Neural Rendering (OptiScaler/dlssnr) ---
-    ini.SetValue("DlssNr", "Enabled", GetBoolValue(Instance()->DlssNrEnabled.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "FinishedPicture", GetBoolValue(Instance()->DlssNrFinishedPicture.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "HdrTransfer", GetBoolValue(Instance()->DlssNrHdrTransfer.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "RunBeforeSR",
-                 GetBoolValue(Instance()->DlssNrRunBeforeSr.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "DeferredDLSS",
-                 GetBoolValue(Instance()->DlssNrDeferredDlss.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "PrivateUpscaler",
-                 GetIntValue(Instance()->DlssNrPrivateUpscaler.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "ResidualAcrossRR",
-                 GetBoolValue(Instance()->DlssNrResidualAcrossRr.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "ResidualAcrossRRBlend",
-                 GetFloatValue(Instance()->DlssNrResidualAcrossRrBlend.value_for_config()).c_str());
-    ini.Delete("DlssNr", "ResidualFG");
-    ini.Delete("DlssNr", "ResidualFGApproxCamera");
-    ini.Delete("DlssNr", "UseProxy");
-    ini.Delete("DlssNr", "ProxyProbe");
-    ini.Delete("DlssNr", "ProbeD3D11");
-    ini.Delete("DlssNr", "Precision"); // Remove the obsolete backend selector from saved configurations.
-    for (const char* key :
-         { "ScanExposure", "ScanMeter", "ScanTrim", "ScanAnchorValue", "ScanAnchorWhitePoint", "ScanAnchors",
-           "ScanInverted", "WhitePointFromExposure", "SkinToneEnabled", "AutoCapture" })
-        ini.Delete("DlssNr", key);
-    {
-        auto toggle = Instance()->DlssNrToggleKey.value_for_config();
-        ini.SetValue("DlssNr", "ToggleKey", GetIntValue(toggle, toggle > 0).c_str());
-    }
-    ini.SetValue("DlssNr", "TransferStrength",
-                 GetFloatValue(Instance()->DlssNrTransferStrength.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "ColourStrength",
-                 GetFloatValue(Instance()->DlssNrColourStrength.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "MaxRatio", GetFloatValue(Instance()->DlssNrMaxRatio.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "Transfer", GetIntValue(Instance()->DlssNrTransfer.value_for_config()).c_str());
+        // --- DLSS 5 Neural Rendering (OptiScaler/dlssnr) ---
+        ini.SetValue("DlssNr", "Enabled", GetBoolValue(Instance()->DlssNrEnabled.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "FinishedPicture",
+                     GetBoolValue(Instance()->DlssNrFinishedPicture.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "HdrTransfer", GetBoolValue(Instance()->DlssNrHdrTransfer.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "RunBeforeSR", GetBoolValue(Instance()->DlssNrRunBeforeSr.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "DeferredDLSS", GetBoolValue(Instance()->DlssNrDeferredDlss.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "PrivateUpscaler",
+                     GetIntValue(Instance()->DlssNrPrivateUpscaler.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "ResidualAcrossRR",
+                     GetBoolValue(Instance()->DlssNrResidualAcrossRr.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "ResidualAcrossRRBlend",
+                     GetFloatValue(Instance()->DlssNrResidualAcrossRrBlend.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "DenoiseFirst", GetBoolValue(Instance()->DlssNrDenoiseFirst.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "DenoiseFirstStep",
+                     GetIntValue(Instance()->DlssNrDenoiseFirstStep.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "DenoiseFirstEdit",
+                     GetIntValue(Instance()->DlssNrDenoiseFirstEdit.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "DenoiseFirstKernel",
+                     GetIntValue(Instance()->DlssNrDenoiseFirstKernel.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "DenoiseFirstShift",
+                     GetBoolValue(Instance()->DlssNrDenoiseFirstShift.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "DenoiseFirstFlipJitter",
+                     GetBoolValue(Instance()->DlssNrDenoiseFirstFlipJitter.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "DenoiseFirstNeighbourhoodClamp",
+                     GetBoolValue(Instance()->DlssNrDenoiseFirstNeighbourhoodClamp.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "DenoiseFirstFireflyGuard",
+                     GetBoolValue(Instance()->DlssNrDenoiseFirstFireflyGuard.value_for_config()).c_str());
+        ini.Delete("DlssNr", "ResidualFG");
+        ini.Delete("DlssNr", "ResidualFGApproxCamera");
+        ini.Delete("DlssNr", "UseProxy");
+        ini.Delete("DlssNr", "ProxyProbe");
+        ini.Delete("DlssNr", "ProbeD3D11");
+        ini.Delete("DlssNr", "Precision"); // Remove the obsolete backend selector from saved configurations.
+        for (const char* key :
+             { "ScanExposure", "ScanMeter", "ScanTrim", "ScanAnchorValue", "ScanAnchorWhitePoint", "ScanAnchors",
+               "ScanInverted", "WhitePointFromExposure", "SkinToneEnabled", "AutoCapture" })
+            ini.Delete("DlssNr", key);
+        {
+            auto toggle = Instance()->DlssNrToggleKey.value_for_config();
+            ini.SetValue("DlssNr", "ToggleKey", GetIntValue(toggle, toggle > 0).c_str());
+        }
+        ini.SetValue("DlssNr", "TransferStrength",
+                     GetFloatValue(Instance()->DlssNrTransferStrength.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "ColourStrength",
+                     GetFloatValue(Instance()->DlssNrColourStrength.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "MaxRatio", GetFloatValue(Instance()->DlssNrMaxRatio.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "Transfer", GetIntValue(Instance()->DlssNrTransfer.value_for_config()).c_str());
 
-    ini.SetValue("DlssNr", "DebugView", GetIntValue(Instance()->DlssNrDebugView.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "Compare", GetIntValue(Instance()->DlssNrCompare.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "CompareSplit",
-                 GetFloatValue(Instance()->DlssNrCompareSplit.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "CompareZoom",
-                 GetFloatValue(Instance()->DlssNrCompareZoom.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "CompareSwap",
-                 GetBoolValue(Instance()->DlssNrCompareSwap.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "CompareTags",
-                 GetBoolValue(Instance()->DlssNrCompareTags.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "TagScale",
-                 GetFloatValue(Instance()->DlssNrTagScale.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "WorkingScale", GetFloatValue(Instance()->DlssNrWorkingScale.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "ScalingDownscaler", GetIntValue(Instance()->DlssNrScalingDownscaler).c_str());
+        ini.SetValue("DlssNr", "DebugView", GetIntValue(Instance()->DlssNrDebugView.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "Compare", GetIntValue(Instance()->DlssNrCompare.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "CompareSplit",
+                     GetFloatValue(Instance()->DlssNrCompareSplit.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "CompareZoom", GetFloatValue(Instance()->DlssNrCompareZoom.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "CompareSwap", GetBoolValue(Instance()->DlssNrCompareSwap.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "CompareTags", GetBoolValue(Instance()->DlssNrCompareTags.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "TagScale", GetFloatValue(Instance()->DlssNrTagScale.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "WorkingScale",
+                     GetFloatValue(Instance()->DlssNrWorkingScale.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "SpatialCompression",
+                     GetBoolValue(Instance()->DlssNrSpatialCompression.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "SpatialCenterX",
+                     GetFloatValue(Instance()->DlssNrSpatialCenterX.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "SpatialCenterY",
+                     GetFloatValue(Instance()->DlssNrSpatialCenterY.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "SpatialWorkX",
+                     GetFloatValue(Instance()->DlssNrSpatialWorkX.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "SpatialWorkY",
+                     GetFloatValue(Instance()->DlssNrSpatialWorkY.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "SpatialOffsetX",
+                     GetFloatValue(Instance()->DlssNrSpatialOffsetX.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "SpatialOffsetY",
+                     GetFloatValue(Instance()->DlssNrSpatialOffsetY.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "SpatialShiftX",
+                     GetFloatValue(Instance()->DlssNrSpatialShiftX.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "SpatialShiftY",
+                     GetFloatValue(Instance()->DlssNrSpatialShiftY.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "SpatialShowCenter",
+                     GetBoolValue(Instance()->DlssNrSpatialShowCenter.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "SpatialShowWork",
+                     GetBoolValue(Instance()->DlssNrSpatialShowWork.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "ScalingDownscaler", GetIntValue(Instance()->DlssNrScalingDownscaler).c_str());
 
-    ini.SetValue("DlssNr", "Passes", GetIntValue(Instance()->DlssNrPasses.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "ReplaceDetailStrength",
-                 GetFloatValue(Instance()->DlssNrReplaceDetailStrength.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "ResidualConfidenceSensitivity",
-                 GetFloatValue(Instance()->DlssNrResidualConfidenceSensitivity.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "WhitePointSource",
-                 GetIntValue(Instance()->DlssNrWhitePointSource.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "WhitePointTrim",
-                 GetFloatValue(Instance()->DlssNrWhitePointTrim.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "AutoExposureTrim",
-                 GetFloatValue(Instance()->DlssNrAutoExposureTrim.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "AutoExposureHighlightProtection",
-                 GetFloatValue(Instance()->DlssNrAutoExposureHighlightProtection.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "ExposureTrimAnchors",
-                 Instance()->DlssNrExposureTrimAnchors.value_for_config().value_or("auto").c_str());
-    ini.SetValue("DlssNr", "AutoExposureTrimAnchors",
-                 Instance()->DlssNrAutoExposureTrimAnchors.value_for_config().value_or("auto").c_str());
-    ini.SetValue("DlssNr", "WhitePointScale",
-                 GetFloatValue(Instance()->DlssNrWhitePointScale.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "Preset", GetIntValue(Instance()->DlssNrPreset.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "Intensity", GetFloatValue(Instance()->DlssNrIntensity.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "Style", GetIntValue(Instance()->DlssNrStyle.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "LocalStructure",
-                 GetFloatValue(Instance()->DlssNrLocalStructure.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "LocalTone", GetFloatValue(Instance()->DlssNrLocalTone.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "SkinStructure",
-                 GetFloatValue(Instance()->DlssNrSkinStructure.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "AutoMask", GetBoolValue(Instance()->DlssNrAutoMask.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "SkinProtection", GetBoolValue(Instance()->DlssNrSkinProtection.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "SkinDetail", GetFloatValue(Instance()->DlssNrSkinDetail.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "SkinColour", GetFloatValue(Instance()->DlssNrSkinColour.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "EnvironmentDetail", GetFloatValue(Instance()->DlssNrEnvironmentDetail.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "EnvironmentColour", GetFloatValue(Instance()->DlssNrEnvironmentColour.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "ShowSkinMask", GetBoolValue(Instance()->DlssNrShowSkinMask.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "UnlockPasses", GetBoolValue(Instance()->DlssNrUnlockPasses.value_for_config()).c_str());
-    for (unsigned int i = 0; i < std::size(Instance()->DlssNrPassOverrides); ++i)
-    {
-        auto& pass = Instance()->DlssNrPassOverrides[i];
-        if (i < 2)
-            ini.SetValue("DlssNr", std::format("Pass{}Preset", i + 2).c_str(), GetIntValue(pass.preset.value_for_config()).c_str());
-        ini.SetValue("DlssNr", std::format("Pass{}Style", i + 2).c_str(), GetIntValue(pass.style.value_for_config()).c_str());
-        ini.SetValue("DlssNr", std::format("Pass{}Intensity", i + 2).c_str(), GetFloatValue(pass.intensity.value_for_config()).c_str());
-        ini.SetValue("DlssNr", std::format("Pass{}LocalStructure", i + 2).c_str(), GetFloatValue(pass.structure.value_for_config()).c_str());
-        ini.SetValue("DlssNr", std::format("Pass{}LocalTone", i + 2).c_str(), GetFloatValue(pass.tone.value_for_config()).c_str());
-        ini.SetValue("DlssNr", std::format("Pass{}SkinStructure", i + 2).c_str(), GetFloatValue(pass.skin.value_for_config()).c_str());
-        ini.SetValue("DlssNr", std::format("Pass{}AutoMask", i + 2).c_str(), GetBoolValue(pass.autoMask.value_for_config()).c_str());
-    }
-    ini.SetValue("DlssNr", "ReversibleMode", GetIntValue(Instance()->DlssNrReversibleMode.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "ApplyModel", GetBoolValue(Instance()->DlssNrApplyModel.value_for_config()).c_str());
-    ini.SetValue("DlssNr", "HoldFrame", GetBoolValue(Instance()->DlssNrHoldFrame.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "Passes", GetIntValue(Instance()->DlssNrPasses.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "ReplaceDetailStrength",
+                     GetFloatValue(Instance()->DlssNrReplaceDetailStrength.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "ResidualConfidenceSensitivity",
+                     GetFloatValue(Instance()->DlssNrResidualConfidenceSensitivity.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "HistoryRejection",
+                     GetBoolValue(Instance()->DlssNrHistoryRejection.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "HaloSuppression",
+                     GetFloatValue(Instance()->DlssNrHaloSuppression.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "HaloBrightSuppression",
+                     GetFloatValue(Instance()->DlssNrHaloBrightSuppression.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "HaloRadius", GetFloatValue(Instance()->DlssNrHaloRadius.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "WhitePointSource",
+                     GetIntValue(Instance()->DlssNrWhitePointSource.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "WhitePointTrim",
+                     GetFloatValue(Instance()->DlssNrWhitePointTrim.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "AutoExposureTrim",
+                     GetFloatValue(Instance()->DlssNrAutoExposureTrim.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "AutoExposureHighlightProtection",
+                     GetFloatValue(Instance()->DlssNrAutoExposureHighlightProtection.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "ExposureTrimAnchors",
+                     Instance()->DlssNrExposureTrimAnchors.value_for_config().value_or("auto").c_str());
+        ini.SetValue("DlssNr", "AutoExposureTrimAnchors",
+                     Instance()->DlssNrAutoExposureTrimAnchors.value_for_config().value_or("auto").c_str());
+        ini.SetValue("DlssNr", "WhitePointScale",
+                     GetFloatValue(Instance()->DlssNrWhitePointScale.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "Preset", GetIntValue(Instance()->DlssNrPreset.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "Intensity", GetFloatValue(Instance()->DlssNrIntensity.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "Style", GetIntValue(Instance()->DlssNrStyle.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "LocalStructure",
+                     GetFloatValue(Instance()->DlssNrLocalStructure.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "LocalTone", GetFloatValue(Instance()->DlssNrLocalTone.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "SkinStructure",
+                     GetFloatValue(Instance()->DlssNrSkinStructure.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "AutoMask", GetBoolValue(Instance()->DlssNrAutoMask.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "SkinProtection",
+                     GetBoolValue(Instance()->DlssNrSkinProtection.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "SkinDetail", GetFloatValue(Instance()->DlssNrSkinDetail.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "SkinColour", GetFloatValue(Instance()->DlssNrSkinColour.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "EnvironmentDetail",
+                     GetFloatValue(Instance()->DlssNrEnvironmentDetail.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "EnvironmentColour",
+                     GetFloatValue(Instance()->DlssNrEnvironmentColour.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "ShowSkinMask", GetBoolValue(Instance()->DlssNrShowSkinMask.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "UnlockPasses", GetBoolValue(Instance()->DlssNrUnlockPasses.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "MatchGuides", GetBoolValue(Instance()->DlssNrMatchGuides.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "RenderMotionScale",
+                     GetBoolValue(Instance()->DlssNrRenderMotionScale.value_for_config()).c_str());
+        for (unsigned int i = 0; i < std::size(Instance()->DlssNrPassOverrides); ++i)
+        {
+            auto& pass = Instance()->DlssNrPassOverrides[i];
+            if (i < 2)
+                ini.SetValue("DlssNr", std::format("Pass{}Preset", i + 2).c_str(),
+                             GetIntValue(pass.preset.value_for_config()).c_str());
+            ini.SetValue("DlssNr", std::format("Pass{}Style", i + 2).c_str(),
+                         GetIntValue(pass.style.value_for_config()).c_str());
+            ini.SetValue("DlssNr", std::format("Pass{}Intensity", i + 2).c_str(),
+                         GetFloatValue(pass.intensity.value_for_config()).c_str());
+            ini.SetValue("DlssNr", std::format("Pass{}LocalStructure", i + 2).c_str(),
+                         GetFloatValue(pass.structure.value_for_config()).c_str());
+            ini.SetValue("DlssNr", std::format("Pass{}LocalTone", i + 2).c_str(),
+                         GetFloatValue(pass.tone.value_for_config()).c_str());
+            ini.SetValue("DlssNr", std::format("Pass{}SkinStructure", i + 2).c_str(),
+                         GetFloatValue(pass.skin.value_for_config()).c_str());
+            ini.SetValue("DlssNr", std::format("Pass{}AutoMask", i + 2).c_str(),
+                         GetBoolValue(pass.autoMask.value_for_config()).c_str());
+        }
+        ini.SetValue("DlssNr", "ReversibleMode",
+                     GetIntValue(Instance()->DlssNrReversibleMode.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "ApplyModel", GetBoolValue(Instance()->DlssNrApplyModel.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "HoldFrame", GetBoolValue(Instance()->DlssNrHoldFrame.value_for_config()).c_str());
         ini.SetValue("DLSS", "RenderPresetOverride",
                      GetBoolValue(Instance()->RenderPresetOverride.value_for_config()).c_str());
         ini.SetValue("DLSS", "RenderPresetForAll",

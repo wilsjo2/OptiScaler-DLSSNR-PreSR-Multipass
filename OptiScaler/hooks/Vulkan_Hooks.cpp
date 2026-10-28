@@ -359,8 +359,8 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
     {
         VkSurfaceCapabilitiesKHR capabilities {};
         if (_PD && vkGetPhysicalDeviceSurfaceCapabilitiesKHR(_PD, pCreateInfo->surface, &capabilities) == VK_SUCCESS)
-            nrCreateInfo.imageUsage |= capabilities.supportedUsageFlags &
-                                      (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+            nrCreateInfo.imageUsage |=
+                capabilities.supportedUsageFlags & (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
         pCreateInfo = &nrCreateInfo;
     }
     ScopedVulkanCreatingSC scopedVulkanCreatingSC {};
@@ -414,8 +414,8 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
                     break;
                 }
 
-                LOG_INFO("DLSS-NR: swapchain colour space {} -- {} ({}), format {}",
-                         (int) pCreateInfo->imageColorSpace, name, meaning, (int) pCreateInfo->imageFormat);
+                LOG_INFO("DLSS-NR: swapchain colour space {} -- {} ({}), format {}", (int) pCreateInfo->imageColorSpace,
+                         name, meaning, (int) pCreateInfo->imageFormat);
             }
         }
 

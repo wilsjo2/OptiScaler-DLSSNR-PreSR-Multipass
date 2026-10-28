@@ -10,8 +10,6 @@
 
 #include <dlssnr/DlssNr.h>
 
-
-
 #include "input/input_system.h"
 
 #include "font/Hack_Compressed.h"
@@ -1667,7 +1665,9 @@ void MenuCommon::BeginMenuFrameIfNeeded(RenderMenuContext& ctx)
     // New frame check
     if ((!config->DisableSplash.value_or_default() && now > splashStart && now < splashLimit) ||
         config->ShowFps.value_or_default() || _isVisible || ImGui::notifications.size() > 0 ||
-        (config->DlssNrCompare.value_or_default() != 0 && config->DlssNrCompareTags.value_or_default()))
+        (config->DlssNrCompare.value_or_default() != 0 && config->DlssNrCompareTags.value_or_default()) ||
+        (config->DlssNrEnabled.value_or_default() && config->DlssNrSpatialCompression.value_or_default() &&
+         (config->DlssNrSpatialShowCenter.value_or_default() || config->DlssNrSpatialShowWork.value_or_default())))
     {
         if (!_isUWP)
         {
@@ -1846,8 +1846,8 @@ void MenuCommon::UpdateFrameTimeAverages(RenderMenuContext& ctx)
 //
 void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
 {
-    DlssNr::RenderNrCompareTags();
-
+    if (ctx.newFrame)
+        DlssNr::RenderNrCompareTags();
 
     auto& state = ctx.state;
     auto config = ctx.config;
