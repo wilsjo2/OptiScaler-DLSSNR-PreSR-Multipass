@@ -441,6 +441,7 @@ int wmain(int argc, wchar_t** argv) {
         bool capture = false, monitor = false, lifecycle = false, motion = false, displayInfo = false, appearance = false, alignment = false, history = false, pacing = false, quality = false, features = false, performance = false, captureQueue = false, residual = false, logging = false, resizeCheck = false;
         for (int i = 1; i < argc; ++i) {
             std::wstring key = argv[i]; if (i + 1 >= argc) throw std::runtime_error("Missing argument value.");
+            if (key == L"--runtime-path-check") { nr::RuntimePathCheck(); return 0; }
             if (key == L"--runtime") settings.runtime = argv[++i];
             else if (key == L"--settings") settings = nr::LoadSettings(argv[++i]);
             else if (key == L"--width") width = std::stoul(argv[++i]);

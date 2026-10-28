@@ -1,7 +1,31 @@
 #include "FeatureChecks.h"
 #include <DirectXPackedVector.h>
 #include <iostream>
+#include <fstream>
 namespace nr {
+void RuntimePathCheck() {
+    const auto root = std::filesystem::temp_directory_path() /
+        std::format(L"nr-path-{}-{}-\u6d4b\u8bd5", GetCurrentProcessId(), GetTickCount64());
+    const auto app = root / L"moved app";
+    const auto bundled = app / L"runtime" / L"nvngx_dlssnr.dll";
+    const auto adjacent = app / L"nvngx_dlssnr.dll";
+    const auto custom = root / L"custom" / L"nvngx_dlssnr.dll";
+    std::filesystem::create_directories(bundled.parent_path());
+    std::filesystem::create_directories(custom.parent_path());
+    struct Cleanup { std::filesystem::path root; ~Cleanup() { std::error_code error; std::filesystem::remove_all(root, error); } } cleanup{root};
+    std::ofstream(bundled).put('x'); std::ofstream(adjacent).put('x'); std::ofstream(custom).put('x');
+    const auto expect = [&](const std::filesystem::path& saved, const std::filesystem::path& wanted) {
+        if (ResolveRuntimePath(saved, app) != wanted) throw std::runtime_error("NR runtime path lookup failed.");
+    };
+    expect({}, bundled);
+    expect(root / L"old package/runtime/nvngx_dlssnr.dll", bundled);
+    expect(L"runtime/nvngx_dlssnr.dll", bundled);
+    expect(custom, custom);
+    expect(app / L"runtime", bundled); // A directory is not a DLL.
+    std::filesystem::remove(bundled); expect({}, adjacent);
+    std::filesystem::remove(adjacent); expect({}, bundled);
+    std::cout << "PASS runtime lookup: moved package, missing saved path, executable-relative path, custom DLL, adjacent DLL and Unicode folders\n";
+}
 void FeatureChecks(Processor& processor, const Settings& settings, std::vector<uint16_t>& pixels,
     const std::function<void()>& upload,
     const std::function<std::vector<uint16_t>(Settings, bool, float, bool)>& read) {

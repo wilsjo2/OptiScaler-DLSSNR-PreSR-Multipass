@@ -18,6 +18,8 @@ inline constexpr size_t MaxLogBytes = 2 * 1024 * 1024;
 // The caller serializes writes; an oversized old log retains only its newest bytes.
 void AppendBoundedLog(const std::filesystem::path& file, const std::string& entry);
 std::filesystem::path DataDirectory();
+std::filesystem::path ExecutableDirectory();
+std::filesystem::path ResolveRuntimePath(const std::filesystem::path& saved, const std::filesystem::path& directory);
 std::string Narrow(const std::wstring& value);
 std::wstring Wide(const std::string& value);
 double ClockMs();

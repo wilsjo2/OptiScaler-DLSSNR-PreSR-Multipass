@@ -42,7 +42,12 @@ void Runtime::CheckResult(NVSDK_NGX_Result result, const char* operation) {
 Runtime::Runtime(ID3D12Device* d, const std::filesystem::path& modelPath, bool unlockAdaMfg) : device(d) {
     if (modelPath.filename() != L"nvngx_dlssnr.dll")
         throw std::runtime_error("Select nvngx_dlssnr.dll.");
-    const auto model = std::filesystem::canonical(modelPath);
+    const auto selected = modelPath.is_absolute() ? modelPath : ExecutableDirectory() / modelPath;
+    std::error_code pathError;
+    if (!std::filesystem::is_regular_file(selected, pathError))
+        throw std::runtime_error("NR DLL not found: " + Narrow(selected.wstring()) +
+            ". Put nvngx_dlssnr.dll in the runtime folder beside display_filter.exe, or use Browse.");
+    const auto model = std::filesystem::canonical(selected);
     this->modelPath = model;
     wchar_t folder[32768]{}; DWORD bytes = sizeof(folder);
     LSTATUS read = RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\NVIDIA Corporation\\Global\\NGXCore",
@@ -73,8 +78,7 @@ Runtime::Runtime(ID3D12Device* d, const std::filesystem::path& modelPath, bool u
         allocate = Export<decltype(allocate)>(module, "NVSDK_NGX_D3D12_AllocateParameters");
         capabilities = Export<decltype(capabilities)>(module,
             "NVSDK_NGX_D3D12_GetCapabilityParameters");
-        wchar_t executable[32768]{}; GetModuleFileNameW(nullptr, executable, (DWORD)std::size(executable));
-        const auto bundled = (std::filesystem::path(executable).parent_path() / L"runtime").wstring();
+        const auto bundled = (ExecutableDirectory() / L"runtime").wstring();
         dlssPath = model.parent_path() / L"nvngx_dlss.dll";
         if (!std::filesystem::exists(dlssPath)) dlssPath = std::filesystem::path(bundled) / L"nvngx_dlss.dll";
         const auto directory = model.parent_path().wstring();

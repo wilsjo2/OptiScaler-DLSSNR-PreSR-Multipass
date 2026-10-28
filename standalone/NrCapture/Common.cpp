@@ -64,17 +64,34 @@ double ClockMs() {
     LARGE_INTEGER now, frequency; QueryPerformanceCounter(&now); QueryPerformanceFrequency(&frequency);
     return 1000.0 * now.QuadPart / frequency.QuadPart;
 }
+std::filesystem::path ExecutableDirectory() {
+    wchar_t executable[32768]{};
+    const DWORD length = GetModuleFileNameW(nullptr, executable, (DWORD)std::size(executable));
+    if (!length) Check(HRESULT_FROM_WIN32(GetLastError()), "Find application directory");
+    if (length >= std::size(executable)) throw std::runtime_error("Application path is too long.");
+    return std::filesystem::path(executable).parent_path();
+}
+std::filesystem::path ResolveRuntimePath(const std::filesystem::path& saved, const std::filesystem::path& directory) {
+    const auto exists = [](const std::filesystem::path& path) {
+        std::error_code error;
+        return std::filesystem::is_regular_file(path, error);
+    };
+    const auto selected = (saved.is_absolute() ? saved : directory / saved).lexically_normal();
+    if (!saved.empty() && exists(selected)) return selected;
+    // A moved package must not remain tied to an obsolete saved path or the
+    // launcher's working directory. Prefer runtime/, then a DLL beside the EXE.
+    const auto bundled = directory / L"runtime" / L"nvngx_dlssnr.dll";
+    if (exists(bundled)) return bundled;
+    const auto adjacent = directory / L"nvngx_dlssnr.dll";
+    if (exists(adjacent)) return adjacent;
+    return saved.empty() ? bundled : selected;
+}
 Settings LoadSettings(const std::filesystem::path& settingsFile) {
     Settings s;
     const auto file = settingsFile.empty() ? DataDirectory() / L"settings.ini" : settingsFile;
     wchar_t path[32768]{};
     GetPrivateProfileStringW(L"NR", L"Runtime", L"", path, (DWORD)std::size(path), file.c_str());
-    s.runtime = path;
-    if (s.runtime.empty()) {
-        wchar_t executable[32768]{}; GetModuleFileNameW(nullptr, executable, (DWORD)std::size(executable));
-        auto local = std::filesystem::path(executable).parent_path() / L"runtime/nvngx_dlssnr.dll";
-        if (std::filesystem::exists(local)) s.runtime = local;
-    }
+    s.runtime = ResolveRuntimePath(path, ExecutableDirectory());
     auto number = [&](const wchar_t* key, float fallback, float low, float high) {
         wchar_t text[64]{}; GetPrivateProfileStringW(L"NR", key, L"", text, 64, file.c_str());
         wchar_t* end = nullptr; float v = wcstof(text, &end);
