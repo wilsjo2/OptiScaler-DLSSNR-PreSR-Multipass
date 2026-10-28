@@ -29,7 +29,7 @@ private:
     std::shared_ptr<Runtime> runtime;
     std::shared_ptr<Motion> opticalFlow;
     std::shared_ptr<Scaling> scaling;
-    ComPtr<ID3D12Resource> nativeAnswer;
+    ComPtr<ID3D12Resource> nativeAnswer, filteredAnswer;
     std::array<DlssNr::ModelSettings, Settings::MaxPasses> activeModels{};
     ComPtr<ID3D12RootSignature> root;
     ComPtr<ID3D12PipelineState> shader, captureColour;

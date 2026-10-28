@@ -27,7 +27,8 @@ endforeach()
 add_custom_command(OUTPUT "${MOTION_SHADERS}/CaptureColour.h"
     COMMAND "${FXC}" /nologo /Tcs_5_0 /ECaptureColour /O3 /VnCaptureColour /Fh "${MOTION_SHADERS}/CaptureColour.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/CaptureColour.hlsl"
-    DEPENDS CaptureColour.hlsl ModelResize.hlsli "${REPO}/OptiScaler/shaders/dlssnr/precompile/dlssnr.hlsl" VERBATIM)
+    DEPENDS CaptureColour.hlsl ModelResize.hlsli "${REPO}/OptiScaler/shaders/dlssnr/precompile/dlssnr.hlsl"
+        "${REPO}/OptiScaler/shaders/dlssnr/precompile/dlssnr_quality.hlsli" VERBATIM)
 target_sources(nr_capture_core PRIVATE "${MOTION_SHADERS}/CaptureColour.h")
 add_custom_command(OUTPUT "${MOTION_SHADERS}/CaptureConvert.h"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${MOTION_SHADERS}"

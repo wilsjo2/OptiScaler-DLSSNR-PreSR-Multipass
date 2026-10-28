@@ -27,16 +27,16 @@ Processor::Processor(Gpu& g) : gpu(g) {
     pipeline.CS = {CaptureColour, sizeof(CaptureColour)};
     Check(gpu.device->CreateComputePipelineState(&pipeline, IID_PPV_ARGS(&captureColour)), "Capture colour conversion");
     D3D12_DESCRIPTOR_HEAP_DESC h{}; h.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    h.NumDescriptors = 91; h.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    h.NumDescriptors = 98; h.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     Check(gpu.device->CreateDescriptorHeap(&h, IID_PPV_ARGS(&heap)), "NR descriptors");
     stride = gpu.device->GetDescriptorHandleIncrementSize(h.Type);
-    constants = gpu.Buffer(13 * 256, D3D12_HEAP_TYPE_UPLOAD);
+    constants = gpu.Buffer(14 * 256, D3D12_HEAP_TYPE_UPLOAD);
 }
 Processor::~Processor() {
     // Share the same fence-backed retention used by the in-game NR implementation.
     gpu.lifetime.Retire([model = std::move(runtime), flow = std::move(opticalFlow), a = std::move(proxy), b = std::move(original),
         c = std::move(answer), d = std::move(output), e = std::move(depth), f = std::move(motion),
-        full = std::move(fullProxy), flowSource = std::move(flowInput),
+        full = std::move(fullProxy), flowSource = std::move(flowInput), filtered = std::move(filteredAnswer),
         srInput = std::move(resizeInput), upscaled = std::move(enlarged), bounded = std::move(boundedDlss), unit = std::move(exposure),
         encoded = std::move(sdrInput), composed = std::move(sdrOutput), held = std::move(heldInput), conversion = std::move(captureColour),
         labels = std::move(labelled), filters = std::move(scaling), native = std::move(nativeAnswer), next = std::move(passInput), cb = std::move(constants), descriptors = std::move(heap), rs = std::move(root), pso = std::move(shader)] {});
@@ -52,12 +52,12 @@ void Processor::Resize(UINT w, UINT h, const Settings& s) {
     if (!w || !h || w > 7680 || h > 4320) throw std::runtime_error("Capture extent is outside the prototype's 8K limit.");
     if (s.passes < 1 || s.passes > Settings::MaxPasses) throw std::runtime_error("Choose 1-10 NR passes.");
     if (s.modelScale < 25 || s.modelScale > 200) throw std::runtime_error("Model resolution must be 25-200%.");
-    if (s.upscaler > 1 || s.transfer > 1)
+    if (s.upscaler > 1 || s.transfer > 2)
         throw std::runtime_error("Unknown upscaler or edit transfer.");
     const UINT mw = std::max(1u, (w * s.modelScale + 50) / 100);
     const UINT mh = std::max(1u, (h * s.modelScale + 50) / 100);
     const bool resized = width != w || height != h || modelWidth != mw || modelHeight != mh;
-    const bool useDlss = s.upscaler == 1 && (mw < w || mh < h);
+    const bool useDlss = s.upscaler == 1 && s.transfer != 2 && (mw < w || mh < h);
     if (s.modelScale > 100 && !scaling) scaling = std::make_shared<Scaling>(gpu);
     if (resized || (!s.estimateMotion && flowInput) || (s.estimateMotion && (mw != w || mh != h) && !flowInput)) {
         if (!gpu.Drain()) throw std::runtime_error("GPU timeout resizing model inputs.");
@@ -80,6 +80,7 @@ void Processor::Resize(UINT w, UINT h, const Settings& s) {
     if (s.passes == 1) passInput.Reset();
     else if (!passInput || resized) passInput = gpu.Texture(mw, mh, DXGI_FORMAT_R16G16B16A16_FLOAT);
     if (resized) {
+        filteredAnswer.Reset();
         labelled.Reset(); labelsReadable = false;
         nativeAnswer.Reset();
         if (mw != w || mh != h) nativeAnswer = gpu.Texture(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT);
@@ -140,7 +141,7 @@ void Processor::Dispatch(UINT offset, const DlssNrConstants& s, ID3D12Resource* 
     memcpy(static_cast<char*>(data) + cbOffset, &s, sizeof(s)); constants->Unmap(0, nullptr);
     auto* c = gpu.commands.Get(); ID3D12DescriptorHeap* heaps[]{heap.Get()};
     c->SetDescriptorHeaps(1, heaps); c->SetComputeRootSignature(root.Get());
-    c->SetPipelineState(s.Mode >= 11 && s.Mode <= 17 ? captureColour.Get() : shader.Get());
+    c->SetPipelineState(s.Mode >= 11 && s.Mode <= 18 ? captureColour.Get() : shader.Get());
     c->SetComputeRootDescriptorTable(0, GpuHandle(offset));
     c->SetComputeRootConstantBufferView(1, constants->GetGPUVirtualAddress() + cbOffset);
     c->Dispatch((s.Width + 7) / 8, (s.Height + 7) / 8, 1);
@@ -238,17 +239,29 @@ ID3D12Resource* Processor::Run(ID3D12Resource* input, const Settings& s, bool hd
         gpu.Time(GpuStage::NR, true);
         ID3D12Resource* modelAnswer = answer.Get();
         ID3D12Resource* resolveProxy = proxy.Get();
+        const bool halo = s.haloSuppression > 0 || s.haloBrightSuppression > 0;
+        if (halo) {
+            if (!filteredAnswer) filteredAnswer = gpu.Texture(modelWidth, modelHeight, DXGI_FORMAT_R16G16B16A16_FLOAT);
+            auto filter = p; filter.Mode = 18;
+            filter.HaloSuppression = std::clamp(s.haloSuppression, 0.f, 1.f);
+            filter.HaloBrightSuppression = std::clamp(s.haloBrightSuppression, 0.f, 1.f);
+            filter.HaloRadius = std::clamp(s.haloRadius, 1.f, 4.f);
+            Dispatch(91, filter, proxy.Get(), answer.Get(), nullptr, filteredAnswer.Get(), nullptr);
+            Barrier(c, filteredAnswer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            modelAnswer = filteredAnswer.Get();
+        }
+        const bool edgeAware = s.transfer == 2 && resizeInput;
         if (nativeAnswer && !resizeInput) {
-            scaling->Run(1, answer.Get(), nativeAnswer.Get(), s.downscaler, false);
+            scaling->Run(1, modelAnswer, nativeAnswer.Get(), s.downscaler, false);
             Barrier(c, nativeAnswer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             Barrier(c, fullProxy.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             modelAnswer = nativeAnswer.Get(); resolveProxy = fullProxy.Get();
         }
-        if (resizeInput) {
+        if (resizeInput && !edgeAware) {
             // Measure lighting against the input at the same resolution, before
             // enlargement. Reconstruct a native-size model image for the resolve.
             p.Mode = 16; p.Transfer = s.transfer;
-            Dispatch(35, p, proxy.Get(), answer.Get(), nullptr, resizeInput.Get(), nullptr);
+            Dispatch(35, p, proxy.Get(), modelAnswer, nullptr, resizeInput.Get(), nullptr);
             Barrier(c, resizeInput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             ID3D12Resource* field = resizeInput.Get();
             if (privateDlss) {
@@ -277,10 +290,10 @@ ID3D12Resource* Processor::Run(ID3D12Resource* input, const Settings& s, bool hd
         p.SkinDetail = s.skinDetail; p.SkinColour = s.skinColour;
         p.EnvironmentDetail = s.environmentDetail; p.EnvironmentColour = s.environmentColour;
         p.Width = width; p.Height = height;
-        p.MaxRatio = s.highlightGuard; p.Transfer = nativeAnswer ? 0 : s.transfer;
+        p.MaxRatio = s.highlightGuard; p.Transfer = edgeAware ? 5 : nativeAnswer ? 0 : std::min(s.transfer, 1u);
         p.CompareMode = s.compare == 3 ? 1 : s.compare == 2 ? 2 : 0;
         p.CompareSplit = s.compareSplit; p.CompareZoom = s.compareZoom; p.CompareSwap = s.compareSwap;
-        if (resizeInput && s.debugView != 0) { modelAnswer = answer.Get(); resolveProxy = proxy.Get(); p.Transfer = 1; }
+        if (s.debugView != 0) { modelAnswer = answer.Get(); resolveProxy = proxy.Get(); p.Transfer = 1; }
         Dispatch(7, p, resolveProxy, modelAnswer, original.Get(), sdr ? sdrOutput.Get() : output.Get(), nullptr);
         if (sdr) {
             Barrier(c, sdrOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -293,12 +306,13 @@ ID3D12Resource* Processor::Run(ID3D12Resource* input, const Settings& s, bool hd
             Barrier(c, enlarged.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             Barrier(c, boundedDlss.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
-        if (nativeAnswer) {
+        if (nativeAnswer && !edgeAware) {
             Barrier(c, nativeAnswer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             Barrier(c, fullProxy.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
         for (auto* r : {proxy.Get(), original.Get(), answer.Get()})
             Barrier(c, r, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        if (halo) Barrier(c, filteredAnswer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         Barrier(c, output.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
         gpu.Time(GpuStage::Resolve, true);
     }

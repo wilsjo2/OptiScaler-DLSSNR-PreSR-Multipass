@@ -96,6 +96,9 @@ Settings LoadSettings(const std::filesystem::path& settingsFile) {
     s.modelScale = (unsigned)number(L"ModelScale", 100, 25, 200);
     s.downscaler = (unsigned)number(L"Downscaler", 4, 0, 7);
     s.highlightGuard = number(L"HighlightGuard", 2, 1, 8);
+    s.haloSuppression = number(L"HaloSuppression", 0, 0, 1);
+    s.haloBrightSuppression = number(L"HaloBrightSuppression", 0, 0, 1);
+    s.haloRadius = number(L"HaloRadius", 2, 1, 4);
     s.compareSplit = number(L"CompareSplit", .5f, 0, 1);
     s.compareZoom = number(L"CompareZoom", 1, 1, 2);
     s.compareSwap = number(L"CompareSwap", 0, 0, 1) != 0;
@@ -104,7 +107,7 @@ Settings LoadSettings(const std::filesystem::path& settingsFile) {
     s.model.style = (unsigned)number(L"Style", 0, 0, 2);
     s.model.preset = (unsigned)number(L"Preset", 0, 0, 3);
     s.model.autoMask = number(L"AutoMask", 1, 0, 1) != 0;
-    s.transfer = (unsigned)number(L"Transfer", 1, 0, 1);
+    s.transfer = (unsigned)number(L"Transfer", 1, 0, 2);
     s.upscaler = (unsigned)number(L"Upscaler", 0, 0, 1);
     s.model.intensity = number(L"Intensity", 1, 0, 2);
     s.model.localStructure = number(L"Structure", 1, 0, 2);
@@ -162,6 +165,9 @@ void SaveSettings(const Settings& s, const std::filesystem::path& settingsFile) 
     write(L"UnlockPasses", s.unlockPasses ? L"1" : L"0");
     write(L"Downscaler", std::to_wstring(s.downscaler));
     write(L"HighlightGuard", std::to_wstring(s.highlightGuard));
+    write(L"HaloSuppression", std::to_wstring(s.haloSuppression));
+    write(L"HaloBrightSuppression", std::to_wstring(s.haloBrightSuppression));
+    write(L"HaloRadius", std::to_wstring(s.haloRadius));
     write(L"CompareSplit", std::to_wstring(s.compareSplit));
     write(L"CompareZoom", std::to_wstring(s.compareZoom));
     write(L"CompareSwap", s.compareSwap ? L"1" : L"0");

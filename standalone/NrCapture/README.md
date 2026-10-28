@@ -4,6 +4,12 @@ A standalone Windows overlay that applies NVIDIA neural rendering (NR) to a sele
 
 ## Run
 
+The October 28 build uses the shared code from OptiScaler v0.8.10. **Model** labels now identify Automatic, Original and Optimized; the selected NVIDIA runtime must support the chosen model. Preset 3 is retained for saved legacy profiles. The local testing package still contains runtime 310.8, so this update does not supply the newer optimized network.
+
+**Input and resolution → Edit transfer → Edge-aware** adds OptiScaler's brightness-guided enlargement below 100% model resolution. It uses a spatial filter and disables the private-DLSS selector while selected; the previous upscaler choice is retained. At 100% and above it leaves the existing path unchanged.
+
+The **Halo suppression** tab exposes the shared dark-rim filters and a radius of 1–4 NR pixels. Both strengths default to zero. They run once after all NR passes and before enlargement or HDR composition, and can also lighten real shadows. Debug views retain the raw model answer. In-game RR history rejection and pre-SR/depth-guide controls do not apply to external screen capture and are not exposed here.
+
 1. Run `display_filter.exe`. No administrator access is needed.
 2. Select `nvngx_dlssnr.dll`. A copy in `runtime/` beside the application is selected automatically on first use. Display Filter does not apply an Authenticode signature check to this NR DLL; the driver reports any loading or compatibility failure.
 3. Select a **Screen:** entry to filter a whole monitor, or a **Window:** entry for one application. Click **Start capture**, then minimize Display Filter or switch to another application. Use windowed or borderless mode for games.

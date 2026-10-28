@@ -70,6 +70,10 @@ void App::ReadControls() {
     else next.passOverrides[selectedPass - 1] = model;
     next.unlockPasses = checked(UnlockPasses);
     next.highlightGuard = number(HighlightGuard, 1, 8);
+    next.haloSuppression = number(HaloSuppression, 0, 1);
+    next.haloBrightSuppression = number(HaloBrightSuppression, 0, 1);
+    next.haloRadius = number(HaloRadius, 1, 4);
+    EnableWindow(Control(Upscaler), next.transfer != 2);
     next.downscaler = choice(Downscaler);
     next.holdFrame = checked(HoldFrame); next.applyModel = checked(ApplyModel);
     next.debugView = choice(DebugView);
@@ -152,7 +156,8 @@ LRESULT App::Message(UINT m, WPARAM w, LPARAM l) {
                 picker.lpstrFile = file; picker.nMaxFile = 32768; picker.Flags = OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
                 if (GetOpenFileNameW(&picker)) SetWindowTextW(Control(RuntimePath), file);
             } else if ((((id >= Strength && id <= LocalTone) || id == ReferenceWhite || id == FpsLimit || id == HighlightGuard ||
-                         id == PeakBrightness || id == BlackLevel) && event == EN_KILLFOCUS) ||
+                         id == PeakBrightness || id == BlackLevel || id == HaloSuppression ||
+                         id == HaloBrightSuppression || id == HaloRadius) && event == EN_KILLFOCUS) ||
                        ((id == Codec || id == Compare || id == Passes || id == Transfer || id == Upscaler || id == InputColour ||
                          id == Downscaler || id == Style || id == Preset || id == DebugView || id == Backend || id == FgMode) && event == CBN_SELCHANGE) ||
                        ((id == Enabled || id == MotionMode || id == SeparateSkin || id == PreviewSkin || id == AutoMask ||

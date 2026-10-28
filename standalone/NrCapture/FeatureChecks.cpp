@@ -14,6 +14,7 @@ void FeatureChecks(Processor& processor, const Settings& settings, std::vector<u
     saved.highlightGuard = 3; saved.compareSplit = .25f; saved.compareZoom = 1.5f;
     saved.compareSwap = true; saved.compareLabels = false; saved.labelScale = 2;
     saved.peakBrightnessNits = 1000; saved.blackLevelNits = -.05f;
+    saved.haloSuppression = .75f; saved.haloBrightSuppression = .25f; saved.haloRadius = 3;
     saved.upscaler = 1; saved.transfer = 0; // DLSS must not silently force matched transfer on load.
     saved.passOverrides[8] = saved.PassModel(9); saved.passOverrides[8]->localTone = .5f;
     const auto file = std::filesystem::temp_directory_path() / std::format(L"nr-feature-settings-{}-{}.ini", GetCurrentProcessId(), GetTickCount64());
@@ -155,6 +156,48 @@ void FeatureChecks(Processor& processor, const Settings& settings, std::vector<u
         if (scale >= 100 && spatial != dlss) throw std::runtime_error("Upscaler selection changed native/supersampled output.");
     }
     std::cout << "PASS real NR/DLSS at 99/100/101%, both transfers, finite output and exact upscaler bypass at/above native\n";
+    mode = settings; mode.estimateMotion = false; mode.passes = 2; mode.upscaler = 0;
+    mode.compareLabels = false; mode.inputColour = 1;
+    // A dark/bright boundary gives the filters an edit spanning a strong brightness edge.
+    for (UINT y = 0; y < processor.height; ++y) for (UINT x = 0; x < processor.width; ++x) {
+        const float v = ((x / 31 + y / 47) % 2) ? .8f : .006f;
+        for (unsigned ch = 0; ch < 3; ++ch) pixels[(size_t(y) * processor.width + x) * 4 + ch] = XMConvertFloatToHalf(v);
+    }
+    upload();
+    bool haloChanged = false;
+    for (unsigned scale : {50u, 100u, 125u}) {
+        mode.modelScale = scale; mode.transfer = 1;
+        const auto baseline = read(mode, false, 1, true);
+        mode.transfer = 2;
+        const auto edge = read(mode, false, 1, true);
+        if ((scale < 100) == (edge == baseline)) throw std::runtime_error("Edge-aware activation boundary is incorrect.");
+        mode.upscaler = 1;
+        if (read(mode, false, 1, true) != edge) throw std::runtime_error("Edge-aware unexpectedly used private DLSS.");
+        mode.upscaler = 0;
+        for (unsigned side : {0u, 1u}) {
+            mode.haloSuppression = side == 0 ? 1.f : 0.f;
+            mode.haloBrightSuppression = side == 1 ? 1.f : 0.f;
+            for (float radius : {1.f, 4.f}) {
+                mode.haloRadius = radius;
+                const auto filtered = read(mode, false, 1, true);
+                haloChanged |= filtered != edge;
+            }
+        }
+        mode.applyModel = false;
+        if (read(mode, false, 1, true) != pixels) throw std::runtime_error("Halo/edge filters changed hidden-edit output.");
+        mode.applyModel = true; mode.haloSuppression = mode.haloBrightSuppression = 0;
+        if (read(mode, false, 1, true) != edge) throw std::runtime_error("Disabling halos did not restore identical output.");
+        mode.transfer = 1;
+        if (read(mode, false, 1, true) != baseline) throw std::runtime_error("Disabling edge-aware did not restore identical output.");
+    }
+    if (!haloChanged) throw std::runtime_error("Halo controls did not change any output.");
+    mode.modelScale = 50; mode.transfer = 2; mode.inputColour = 2;
+    mode.haloSuppression = mode.haloBrightSuppression = 1;
+    for (unsigned tone = 0; tone < 5; ++tone) { mode.tone = tone; read(mode, true, 1, true); }
+    saved.transfer = 2; SaveSettings(saved, file);
+    if (LoadSettings(file) != saved) throw std::runtime_error("Edge-aware settings failed to round trip.");
+    std::filesystem::remove(file); pixels = original; upload();
+    std::cout << "PASS edge-aware and both halo controls: actual pixel changes, 50/100/125%, two passes, SDR/five HDR mappings, exact disable/hidden-edit output and saved settings\n";
     HdrOutputCheck(processor, settings, pixels, upload, read);
 }
 }

@@ -135,6 +135,8 @@ float4 BoundPrivateUpscale(uint2 pixel)
 void CaptureColour(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= gWidth || id.y >= gHeight) return;
+    // Use OptiScaler's shared filter; private mode 13 is already the label pass.
+    if (gMode == 18) { gTarget[id.xy] = NrSuppressHalo(int2(id.xy)); return; }
     if (gMode == 14 || gMode == 15) { gTarget[id.xy] = BoundPrivateUpscale(id.xy); return; }
     if (gMode == 16) { gTarget[id.xy] = PrepareModelResize(id.xy); return; }
     if (gMode == 17) { gTarget[id.xy] = RestoreModelResize(id.xy); return; }

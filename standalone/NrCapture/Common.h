@@ -47,11 +47,12 @@ struct Settings {
     unsigned modelScale = 100; // Percentage of capture width and height, 25..200.
     unsigned downscaler = 4; // Same order as OptiScaler: FSR1, Bicubic, Catmull, Lanczos2/3, Kaiser2/3, MAGIC.
     float highlightGuard = 2;
+    float haloSuppression = 0, haloBrightSuppression = 0, haloRadius = 2;
     float compareSplit = 0.5f, compareZoom = 1, labelScale = 1;
     bool compareSwap = false, compareLabels = true;
     unsigned debugView = 0;
     bool holdFrame = false, applyModel = true;
-    unsigned transfer = 1; // 0 classic composition, 1 matched residuals.
+    unsigned transfer = 1; // 0 classic composition, 1 matched residuals, 2 edge-aware (spatial only).
     unsigned upscaler = 0; // 0 bilinear, 1 private DLSS SR below native size.
     unsigned compare = 0; // 0 processed, 1 original, 2 wipe, 3 side by side (same captured frame).
     bool enabled = true;

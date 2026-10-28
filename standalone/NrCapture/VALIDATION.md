@@ -303,3 +303,17 @@ Release checks on the RTX 5090 with the D3D12 debug layer:
 An attempted software-only run failed in Windows d3d10warp.dll while executing the pre-existing encode shader, before reconstruction. The temporary WARP adapter option was removed. Final shader checks run without loading NGX; runtime/FG checks were then run sequentially after the user closed Display Filter. No new NVIDIA driver-reset event was found during these final checks.
 
 No live desktop/game image was captured, no game was launched or controlled, and the packaged app was not launched. The remaining check is the user's actual hair/skin boundary and temporal image quality.
+
+## 2026-10-28: current shared code, edge-aware enlargement and halo controls
+
+Merged main 6125a75b into the standalone source branch. Added spatial edge-aware enlargement below native model resolution, the shared dark-rim filters and radius controls, and Automatic/Original/Optimized model labels. Legacy preset 3 remains available for saved profiles. NR runtime 310.8 is unchanged; this package does not supply the newer optimized network. In-game RR history rejection is not part of the external-capture pipeline.
+
+A fresh x64 Release build passed. Tests used the RTX 5090, NVIDIA NR 310.8, the existing DLSS SR runtime, and the D3D12 debug layer:
+- Feature checks passed: settings round trips, 1/10 passes, inactive profiles, hold/resume, all eight supersampling filters, motion, comparison/debug views, private DLSS, 99/100/101% transitions and HDR controls.
+- New filters changed actual pixels. Tests covered both halo strengths and radius endpoints, 50/100/125% model resolution, two passes, SDR and all five HDR mappings. Disabling the filters restored identical pixels; hidden model edits preserved the original. Edge-aware bypassed private DLSS and had no effect at or above native size.
+- All 324 reconstruction shader fixtures passed, including neutral identity, colour boundaries, black pixels, carrier overshoot and HDR inverse-pole fallbacks.
+- The packaged runtime loaded successfully. Standalone/OptiScaler model, resolve and retained-history comparisons reported zero mean RGB difference on the tested input.
+
+The old HDR peak fixture also failed on the pre-update executable: Hybrid replace produced a 658.8-nit peak, below its fixed 1000-nit test target. The fixture now selects a target below the measured peak (up to 1000 nits), and still requires highlight reduction, the ceiling, unchanged lower tones and exact neutral restoration. No production HDR adjustment was changed.
+
+The rebuilt controls window opened and displayed the new tabs and model selector. Live capture/gameplay and visual image quality were not tested in this update. Full logs are in the source standalone/NrCapture folder as *-20261028.log. The previous executable is retained in out-before-20261028.

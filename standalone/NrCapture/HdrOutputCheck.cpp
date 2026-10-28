@@ -22,7 +22,15 @@ void HdrOutputCheck(Processor& processor, const Settings& settings, std::vector<
     for (unsigned tone = 0; tone < 5; ++tone) {
         mode.tone = tone; mode.peakBrightnessNits = mode.blackLevelNits = 0;
         const auto baseline = sample(mode);
-        mode.peakBrightnessNits = 1000;
+        float sourcePeak = 0;
+        for (size_t i = 0; i < baseline.size(); ++i) if (i % 4 != 3)
+            sourcePeak = std::max(sourcePeak, XMConvertHalfToFloat(baseline[i]));
+        if (sourcePeak <= 0) throw std::runtime_error("HDR fixture has no positive highlight.");
+        // Different NR runtimes can keep the whole image below 1000 nits.
+        // Place the test ceiling below this actual output so roll-off is exercised.
+        mode.peakBrightnessNits = std::min(1000.f, sourcePeak * 80.f * .8f);
+        const float ceiling = mode.peakBrightnessNits / 80.f;
+        std::cout << std::format("HDR mode {}: source peak {:.1f} nits, test ceiling {:.1f} nits\n", tone, sourcePeak * 80, mode.peakBrightnessNits);
         const auto peak = sample(mode);
         bool rolled = false;
         for (size_t i = 0; i < peak.size(); i += 4) {
@@ -30,8 +38,8 @@ void HdrOutputCheck(Processor& processor, const Settings& settings, std::vector<
             for (unsigned c = 0; c < 3; ++c) brightest = std::max(brightest, XMConvertHalfToFloat(baseline[i + c]));
             for (unsigned c = 0; c < 3; ++c) {
                 const float a = XMConvertHalfToFloat(baseline[i + c]), b = XMConvertHalfToFloat(peak[i + c]);
-                if (b > 12.5f || b > a) throw std::runtime_error("HDR peak control exceeded its ceiling or brightened a pixel.");
-                if (brightest <= 9.375f && peak[i + c] != baseline[i + c]) throw std::runtime_error("HDR peak changed pixels below its shoulder.");
+                if (b > ceiling || b > a) throw std::runtime_error("HDR peak control exceeded its ceiling or brightened a pixel.");
+                if (brightest <= ceiling * .75f && peak[i + c] != baseline[i + c]) throw std::runtime_error("HDR peak changed pixels below its shoulder.");
                 rolled |= b < a;
             }
         }
@@ -55,7 +63,7 @@ void HdrOutputCheck(Processor& processor, const Settings& settings, std::vector<
         mode.blackLevelNits = 0;
         if (sample(mode) != baseline) throw std::runtime_error("Neutral HDR settings did not restore exact pixels.");
     }
-    std::cout << "PASS all five HDR modes: 1000-nit peak, unchanged lower tones, shadow lift/darken, reference white and neutral round trip\n";
+    std::cout << "PASS all five HDR modes: peak roll-off, unchanged lower tones, shadow lift/darken, reference white and neutral round trip\n";
 
     mode.tone = 0;
     for (unsigned comparison : {2u, 3u}) for (bool swap : {false, true}) {

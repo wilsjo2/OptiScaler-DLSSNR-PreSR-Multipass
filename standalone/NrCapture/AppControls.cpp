@@ -63,7 +63,7 @@ void App::CreateControls() {
     label(L"Target FPS (0 = uncapped)", 590, 148, 230);
     Add(L"EDIT", std::to_wstring(settings.maxFps).c_str(), WS_BORDER | ES_NUMBER | WS_TABSTOP, 835, 145, 110, 25, FpsLimit);
     Add(WC_TABCONTROLW, L"", WS_TABSTOP | WS_CLIPSIBLINGS, 16, 188, 934, 440, Tabs);
-    for (auto text : {L"Model passes", L"Input and resolution", L"Composition", L"HDR output", L"Inspect and compare"}) {
+    for (auto text : {L"Model passes", L"Input and resolution", L"Composition", L"HDR output", L"Inspect and compare", L"Halo suppression"}) {
         TCITEMW item{}; item.mask = TCIF_TEXT; item.pszText = const_cast<wchar_t*>(text);
         TabCtrl_InsertItem(Control(Tabs), TabCtrl_GetItemCount(Control(Tabs)), &item);
     }
@@ -79,7 +79,7 @@ void App::CreateControls() {
     SendMessageW(Control(EditPass), CB_SETCURSEL, 0, 0);
     box(L"Inherit pass 1 settings (Local tone 0)", InheritPass, false, 36, 398);
     combo(L"Style", Style, {L"Standard", L"Natural", L"Cinematic"}, settings.model.style, 36, 438);
-    combo(L"Render preset", Preset, {L"Auto", L"Preset 1", L"Preset 2", L"Preset 3"}, settings.model.preset, 36, 508);
+    combo(L"Model", Preset, {L"Automatic", L"Original", L"Optimized (requires a supporting runtime)", L"Preset 3 (legacy)"}, settings.model.preset, 36, 508);
     label(L"More passes increase GPU time and memory use.", 36, 582);
     edit(L"Model intensity (0-2)", Intensity, settings.model.intensity, 506, 235);
     edit(L"Local structure (0-2)", Structure, settings.model.localStructure, 506, 280);
@@ -103,8 +103,9 @@ void App::CreateControls() {
     SendMessageW(Control(ModelScale), TBM_SETRANGE, FALSE, MAKELPARAM(25, 200));
     SendMessageW(Control(ModelScale), TBM_SETPOS, TRUE, settings.modelScale);
     combo(L"Above 100%: downsampling filter", Downscaler, {L"FSR1", L"Bicubic", L"Catmull-Rom", L"Lanczos2", L"Lanczos3", L"Kaiser2", L"Kaiser3", L"MAGIC"}, settings.downscaler, 506, 307);
-    combo(L"Below 100%: edit transfer", Transfer, {L"Classic composition", L"Matched residuals"}, settings.transfer, 506, 390);
+    combo(L"Below 100%: edit transfer", Transfer, {L"Classic composition", L"Matched residuals", L"Edge-aware (spatial)"}, settings.transfer, 506, 390);
     combo(L"Below 100%: upscaling", Upscaler, {L"Bilinear", L"Private DLSS SR"}, settings.upscaler, 506, 465);
+    EnableWindow(Control(Upscaler), settings.transfer != 2);
     label(L"Output stays at the captured screen/window size.", 506, 548);
     EnableWindow(Control(Downscaler), settings.modelScale > 100);
 
@@ -145,6 +146,11 @@ void App::CreateControls() {
     box(L"Swap comparison sides", CompareSwap, settings.compareSwap, 506, 393);
     box(L"Label comparison sides", CompareLabels, settings.compareLabels, 506, 435);
     slider(L"Label size", LabelScale, settings.labelScale, 50, 500, 506, 482);
+    buildingPage = 5;
+    edit(L"Dark rims near bright objects (0-1)", HaloSuppression, settings.haloSuppression, 36, 238);
+    edit(L"Dark rims near dark objects (0-1)", HaloBrightSuppression, settings.haloBrightSuppression, 36, 300);
+    edit(L"Radius (1-4 NR pixels)", HaloRadius, settings.haloRadius, 36, 362);
+    Add(L"STATIC", L"Experimental. Lifts fine dark rims while keeping broad lighting.\r\n\r\nBoth strengths at 0 disable the filter.\r\n\r\nCan lighten real shadows; compare before keeping it on.\r\nApplied once after all model passes, before resizing.", 0, 506, 238, 410, 220, 0);
     buildingPage = -1;
     Add(L"STATIC", status.c_str(), 0, 16, 647, 935, 83, Status);
     ShowPass(); ShowPage(); ListSources();

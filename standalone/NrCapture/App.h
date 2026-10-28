@@ -18,7 +18,8 @@ enum Id { Sources = 100, Refresh, RuntimePath, Browse, Enabled, Strength, Intens
     EnvironmentColour, SeparateSkin, PreviewSkin, InputColour, FpsLimit,
     Tabs, EditPass, InheritPass, UnlockPasses, Style, Preset, AutoMask, HighlightGuard,
     Downscaler, HoldFrame, ApplyModel, DebugView, CompareSplit, CompareZoom, CompareSwap,
-    CompareLabels, LabelScale, PassNote, Backend, FgMode, PeakBrightness, BlackLevel, PeakSlider, BlackSlider };
+    CompareLabels, LabelScale, PassNote, Backend, FgMode, PeakBrightness, BlackLevel, PeakSlider, BlackSlider,
+    HaloSuppression, HaloBrightSuppression, HaloRadius };
 inline constexpr const wchar_t* AppearanceNames[]{L"Colour strength", L"Model skin structure", L"Skin detail / lighting",
     L"Skin colour", L"Environment detail / lighting", L"Environment colour"};
 class App {
