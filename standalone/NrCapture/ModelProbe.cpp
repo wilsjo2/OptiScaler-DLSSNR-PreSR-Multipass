@@ -178,13 +178,21 @@ int wmain(int argc, wchar_t** argv) {
             ModelKernelTrace::Install();
             return RunModelOverlap(argc, argv);
         }
+        unsigned preset = 1;
+        const bool explicitPreset = argc > 1 && std::wstring_view(argv[1]) == L"--preset";
+        if (explicitPreset) {
+            if (argc < 4 || std::wstring_view(argv[2]).size() != 1 || argv[2][0] < L'0' || argv[2][0] > L'3')
+                throw std::runtime_error("--preset requires 0 (automatic), 1 (A), 2 (B), or 3 before the normal probe arguments");
+            preset = unsigned(argv[2][0] - L'0'); argc -= 2; argv += 2;
+        }
         const bool vitRepeat = argc > 1 && std::wstring_view(argv[1]) == L"--vit-repeat";
+        if (explicitPreset && vitRepeat) throw std::runtime_error("Preset selection is for unmodified forward passes only");
         if (vitRepeat) { --argc; ++argv; }
         if (argc < 6 || argc > 15)
             throw std::runtime_error("Usage: NrModelProbe <runtime.dll> <input.rgba16f> <width> <height> <output.rgba16f> [intensity=1 autoMask=1 structure=1 tone=1 trace=off|census|timed body-loops=1|2|3 bookend.fatbin bookend-mode=control|export|import|anchor|bridge|affine bridge-weights.bin]");
         const UINT width = std::stoul(argv[3]), height = std::stoul(argv[4]);
         if (!width || !height || width > 8192 || height > 8192) throw std::runtime_error("Unsupported extent.");
-        DlssNr::ModelSettings settings; settings.preset = 1; settings.localTone = 1;
+        DlssNr::ModelSettings settings; settings.preset = preset; settings.localTone = 1;
         if (argc > 6) settings.intensity = std::stof(argv[6]);
         if (argc > 7) settings.autoMask = std::stoul(argv[7]) != 0;
         if (argc > 8) settings.localStructure = std::stof(argv[8]);
@@ -197,6 +205,8 @@ int wmain(int argc, wchar_t** argv) {
         if (bodyLoops < 1 || bodyLoops > 3) throw std::runtime_error("Choose one to three complete body traversals.");
         if (bodyLoops > 1 && trace != L"off") throw std::runtime_error("Run kernel tracing and feature feedback separately.");
         const std::filesystem::path bookendControl = argc > 12 ? argv[12] : L"";
+        if (explicitPreset && (bodyLoops != 1 || !bookendControl.empty()))
+            throw std::runtime_error("Preset selection is for unmodified forward passes only");
         const std::wstring bookendMode = argc > 13 ? argv[13] : L"control";
         const bool bridge = bookendMode == L"bridge" || bookendMode == L"affine";
         if (bookendMode != L"control" && bookendMode != L"export" && bookendMode != L"import" && bookendMode != L"anchor" && !bridge)
@@ -295,9 +305,15 @@ int wmain(int argc, wchar_t** argv) {
             }
         }
         const double mean = std::accumulate(timings.begin(), timings.end(), 0.0) / timings.size();
+        std::ofstream samples(std::filesystem::path(std::filesystem::path(argv[5]).wstring() + L".timings.csv"));
+        samples << "sample,preset,gpu_ms,cpu_evaluate_ms\n" << std::setprecision(12);
+        for (size_t i = 0; i < timings.size(); ++i) samples << i << ',' << preset << ',' << timings[i] << ',' << cpuTimes[i] << '\n';
+        if (!samples) throw std::runtime_error("Cannot write probe timing samples");
         std::sort(timings.begin(), timings.end());
-        std::cout << std::format("NR {}x{}: mean {:.4f} ms, median {:.4f} ms, p10 {:.4f} ms, p95 {:.4f} ms; 20 reset evaluations after 5 warmup.\n",
-            width, height, mean, (timings[9] + timings[10]) * 0.5, timings[2], timings[19]);
+        const double p10 = timings[1] + 0.9 * (timings[2] - timings[1]);
+        const double p95 = timings[18] + 0.05 * (timings[19] - timings[18]);
+        std::cout << std::format("NR {}x{} preset {}: minimum {:.4f} ms, mean {:.4f} ms, median {:.4f} ms, p10 {:.4f} ms, p95 {:.4f} ms; 20 reset evaluations after 5 warmup.\n",
+            width, height, preset, timings.front(), mean, (timings[9] + timings[10]) * 0.5, p10, p95);
         std::cout << std::format("CPU Evaluate mean {:.4f} ms (command recording, not GPU execution).\n",
             std::accumulate(cpuTimes.begin(), cpuTimes.end(), 0.0) / cpuTimes.size());
         std::cout << "Saved first reset output as model-space RGBA16F; timing excludes transfers.\n";

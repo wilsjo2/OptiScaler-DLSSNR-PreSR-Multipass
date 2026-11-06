@@ -151,6 +151,15 @@ The standalone target shares OptiScaler's model parameter helpers, compiled colo
 ./out/Release/NrModelProbe.exe C:/NR/nvngx_dlssnr.dll C:/fixtures/model-input.rgba16f 384 216 C:/results/model-output.rgba16f 1 1 1 1 census
 ```
 
+Prefix the ordinary forward probe with `--preset 0`, `--preset 1` or `--preset 2` to request automatic selection, Model A or Model B. The runtime must actually contain that model; use the kernel census to verify routing. Explicit preset selection cannot be combined with experimental replay or bookend replacement. Ordinary runs save all 20 measured GPU/CPU samples to `<output>.timings.csv` and report minimum, mean and linearly interpolated percentiles; the extra traced evaluation remains excluded.
+
+```powershell
+./out-perf/Release/NrModelProbe.exe --preset 2 C:/NR/310.9.16/nvngx_dlssnr.dll C:/fixtures/model-input.rgba16f 3840 2160 C:/results/model-b.rgba16f 1 1 1 1 census
+python ../../tests/nr_inventory_model.py C:/NR/310.9.16/nvngx_dlssnr.dll --reference C:/research/dlssnr-pytorch --variant small --output C:/results/model-b-weights
+```
+
+The CPU inventory reads the DLL as bytes, maps every weight record/tensor region using the reviewed reference checkout, and records source hashes and layout checks. It does not load the DLL or export proprietary weight values. `--variant ht` selects the original model; `small` selects `WEIGHTS_CC_SMALL_FP8`. Use an empty output directory and retain the exact reference revision alongside the report.
+
 The optional argument after trace mode is the number of complete feature-body traversals, `1` (default), `2`, or `3`; use trace mode `off` for this experiment. It keeps one input block and one output block, copying the final 32-channel features back into the original body input before replaying every interior kernel. This requires the exact audited 310.8 DLL and validates its native launch/buffer contracts before submission. It is not equivalent to multiple complete model passes. The experimental replay uses conservative barriers and is excluded from `display_filter.exe`.
 
 `../../tests/nr_model_loop.py` compares all 152 layers executed each cycle, with an internal RGB tensor bridge, against complete feature-body recurrence. It requires a separate pinned reference checkout and locally extracted weights; its CLI and dependencies are documented in the script. It runs on the CPU and does not measure native GPU speed.
