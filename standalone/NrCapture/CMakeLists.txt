@@ -64,7 +64,7 @@ target_link_libraries(OptiScalerNR PRIVATE nr_capture_core)
 add_executable(NrCaptureCheck Check.cpp DepthCheck.cpp PassResolutionCheck.cpp QualityCheck.cpp QualityReference.cpp FeatureChecks.cpp HdrOutputCheck.cpp Capture.cpp WgcCapture.cpp DxgiCapture.cpp Presentation.cpp CaptureCheck.cpp MotionCheck.cpp GpuWaitCheck.cpp PerformanceCheck.cpp CaptureQueueCheck.cpp FrameGenerationCheck.cpp FrameGenerationPresentCheck.cpp ResidualCheck.cpp LoggingCheck.cpp)
 target_include_directories(NrCaptureCheck BEFORE PRIVATE check_adapters adapters)
 target_link_libraries(NrCaptureCheck PRIVATE nr_capture_core dbghelp)
-add_executable(NrModelProbe ModelProbe.cpp ModelKernelTrace.cpp ModelOverlap.cpp ModelCapture.cpp Capture.cpp WgcCapture.cpp DxgiCapture.cpp)
+add_executable(NrModelProbe ModelProbe.cpp ModelKernelTrace.cpp ModelOverlap.cpp ModelVitSequence.cpp ModelCapture.cpp Capture.cpp WgcCapture.cpp DxgiCapture.cpp)
 add_custom_command(OUTPUT "${MOTION_SHADERS}/ModelOverlapResize.h"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${MOTION_SHADERS}"
     COMMAND "${FXC}" /nologo /Tcs_5_0 /EPrepare /O3 /VnModelOverlapResize /Fh "${MOTION_SHADERS}/ModelOverlapResize.h"

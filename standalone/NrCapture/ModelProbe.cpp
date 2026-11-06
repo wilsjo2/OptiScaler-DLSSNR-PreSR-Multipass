@@ -3,6 +3,8 @@
 #include "ModelKernelTrace.h"
 #include "ModelOverlap.h"
 #include "ModelCapture.h"
+#include "ModelVitSequence.h"
+#include "ModelProbePrepare.h"
 #include <d3d12sdklayers.h>
 #include <algorithm>
 #include <fstream>
@@ -101,7 +103,9 @@ int VitCost(int argc, wchar_t** argv) {
     auto depth = gpu.Texture(width, height, DXGI_FORMAT_R32_FLOAT);
     auto motion = gpu.Texture(width, height, DXGI_FORMAT_R16G16_FLOAT);
     auto intermediate = gpu.Texture(width, height, DXGI_FORMAT_R16G16B16A16_FLOAT);
+    auto secondInput = gpu.Texture(width, height, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_STATE_COMMON);
     auto output = gpu.Texture(width, height, DXGI_FORMAT_R16G16B16A16_FLOAT);
+    ModelProbePrepare prepare(gpu);
     Transfer inputTransfer(gpu, colour.Get(), 8, true), depthTransfer(gpu, depth.Get(), 4, true), motionTransfer(gpu, motion.Get(), 4, true),
         firstReadback(gpu, intermediate.Get(), 8, false), secondReadback(gpu, output.Get(), 8, false);
     gpu.Begin(); Runtime::CheckResult(runtime.Create(gpu.commands.Get(), width, height, settings, 2, overrides), "Create cost features"); Complete(gpu);
@@ -121,9 +125,14 @@ int VitCost(int argc, wchar_t** argv) {
             runtime.Evaluate(gpu.commands.Get(), colour.Get(), depth.Get(), motion.Get(), intermediate.Get(), width, height, true, 0);
             if (mode == 1) ModelKernelTrace::EndVitLoop();
             if (mode == 2) {
-                Barrier(gpu.commands.Get(), intermediate.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-                runtime.Evaluate(gpu.commands.Get(), intermediate.Get(), depth.Get(), motion.Get(), output.Get(), width, height, true, 1);
-                Barrier(gpu.commands.Get(), intermediate.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                Barrier(gpu.commands.Get(), intermediate.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+                Barrier(gpu.commands.Get(), colour.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+                prepare.Run(gpu.commands.Get(), intermediate.Get(), colour.Get(), secondInput.Get());
+                Barrier(gpu.commands.Get(), secondInput.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                runtime.Evaluate(gpu.commands.Get(), secondInput.Get(), depth.Get(), motion.Get(), output.Get(), width, height, true, 1);
+                Barrier(gpu.commands.Get(), secondInput.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+                Barrier(gpu.commands.Get(), intermediate.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                Barrier(gpu.commands.Get(), colour.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             }
         } catch (...) { ModelKernelTrace::CancelVitLoop(); throw; }
         const double elapsed = ClockMs() - start;
@@ -141,19 +150,21 @@ int VitCost(int argc, wchar_t** argv) {
         if (capture) readback.Save(path(std::wstring(L".") + wideNames[mode] + (frame >= 66 ? L".last.rgba16f" : L".rgba16f")));
     }
     std::ofstream json(path(L".json"));
-    json << std::setprecision(12) << "{\"schema\":1,\"experiment\":\"interleaved-cost\",\"width\":" << width << ",\"height\":" << height
-         << ",\"alpha\":" << alpha << ",\"reset\":true,\"tone_both\":1,\"queue\":\"DIRECT\",\"modes\":[";
+    json << std::setprecision(12) << "{\"schema\":2,\"experiment\":\"interleaved-cost\",\"width\":" << width << ",\"height\":" << height
+         << ",\"alpha\":" << alpha << ",\"reset\":true,\"tone_both\":1,\"interpass\":\"clamp-original-alpha\",\"queue\":\"DIRECT\",\"modes\":[";
     for (unsigned mode = 0; mode < 3; ++mode) {
         if (times[mode].size() != 20) throw std::runtime_error("Incomplete interleaved cost sample");
         auto sorted = times[mode]; std::sort(sorted.begin(), sorted.end());
         const double mean = std::accumulate(sorted.begin(), sorted.end(), 0.0) / sorted.size();
         const double median = (sorted[9] + sorted[10]) / 2;
+        const double p10 = sorted[1] + .9 * (sorted[2] - sorted[1]);
         if (mode) json << ',';
         json << "{\"name\":\"" << names[mode] << "\",\"samples\":20,\"gpu_mean_ms\":" << mean << ",\"gpu_median_ms\":" << median
+             << ",\"gpu_minimum_ms\":" << sorted.front() << ",\"gpu_p10_ms\":" << p10
              << ",\"cpu_mean_ms\":" << std::accumulate(cpuTimes[mode].begin(), cpuTimes[mode].end(), 0.0) / cpuTimes[mode].size() << '}';
-        std::cout << std::format("Interleaved {} {}x{}: {:.4f} ms mean, {:.4f} ms median GPU; 20 samples.\n", names[mode], width, height, mean, median);
+        std::cout << std::format("Interleaved {} {}x{}: {:.4f} ms minimum, {:.4f} ms p10, {:.4f} ms mean GPU; 20 samples.\n", names[mode], width, height, sorted.front(), p10, mean);
     }
-    json << "],\"note\":\"One, ViT repeat and two complete passes interleaved on one DIRECT queue; order reverses every triplet; nine warmup evaluations. Native repeat includes conservative replay barriers, snapshot, repacks and mixing. Capture/readback excluded.\"}\n";
+    json << "],\"percentile_method\":\"linear interpolation at p*(N-1)\",\"note\":\"One, ViT repeat and two complete passes interleaved on one DIRECT queue; order reverses every triplet; nine warmup evaluations. Two-pass timing includes clamped interpass preparation with original-frame alpha. Native repeat includes conservative replay barriers, snapshot, repacks and mixing. Capture/readback excluded.\"}\n";
     if (!csv || !json) throw std::runtime_error("Cannot write interleaved cost results");
     runtime.Release(); return 0;
 }
@@ -161,6 +172,7 @@ int VitCost(int argc, wchar_t** argv) {
 int wmain(int argc, wchar_t** argv) {
     try {
         if (argc > 1 && std::wstring_view(argv[1]) == L"--capture-sequence") return RunModelCapture(argc, argv);
+        if (argc > 1 && std::wstring_view(argv[1]) == L"--vit-sequence") return RunModelVitSequence(argc, argv);
         if (argc > 1 && std::wstring_view(argv[1]) == L"--vit-cost") return VitCost(argc, argv);
         if (argc > 1 && std::wstring_view(argv[1]) == L"--overlap") {
             ModelKernelTrace::Install();

@@ -155,11 +155,19 @@ The optional argument after trace mode is the number of complete feature-body tr
 
 `../../tests/nr_model_loop.py` compares all 152 layers executed each cycle, with an internal RGB tensor bridge, against complete feature-body recurrence. It requires a separate pinned reference checkout and locally extracted weights; its CLI and dependencies are documented in the script. It runs on the CPU and does not measure native GPU speed.
 
-The native ViT experiment repeats blocks 31–38 and decodes `z + alpha * (ViT(z) - z)`, with FP16/FP8 rounding. At alpha -1 this is `2z - ViT(z)`. Alpha 0 is an exact identity control. `--vit-cost` interleaves one pass, this repeat, and two ordinary passes on the same DIRECT queue, with identical controls and separate timing samples:
+The native ViT experiment repeats blocks 31–38 and decodes `z + alpha * (ViT(z) - z)`, with FP16/FP8 rounding. At alpha -1 this is `2z - ViT(z)`. Alpha 0 is an exact identity control. `--vit-cost` interleaves one pass, this repeat, and two ordinary passes on the same DIRECT queue, with identical controls and separate timing samples. The two-pass reference clamps its intermediate RGB and restores original-frame alpha; that preparation is included in timing. Reports contain minimum, linearly interpolated p10 and mean times for 20 measured samples per mode:
 
 ```powershell
 ./out-perf/Release/NrModelProbe.exe --vit-repeat C:/NR/nvngx_dlssnr.dll C:/fixtures/model-input.rgba16f 384 216 C:/results/vit.rgba16f 1 1 1 1 off -1
 ./out-perf/Release/NrModelProbe.exe --vit-cost C:/NR/nvngx_dlssnr.dll C:/fixtures/model-input.rgba16f 384 216 C:/results/vit-cost -1
+```
+
+`--vit-sequence` compares chronological one-pass, ViT-repeat and two-pass clips using fresh features for each mode and reset only on frame zero. It saves every model-space RGBA16F output, checks finite values, records per-frame timings and verifies the native replay contract before submission. Alpha zero requires every ViT output to match the corresponding one-pass frame byte for byte. An input file produces a controlled 8/4-pixel-per-frame wrapped pan with known backward motion; a directory supplies unmodified real frames with unavailable depth/motion explicitly set to zero. Sequence timing runs one whole mode at a time, so use the interleaved static probe for the primary cost comparison. Short real clips expose history transitions but cannot establish long-duration stability.
+
+```powershell
+./out-perf/Release/NrModelProbe.exe --vit-sequence C:/NR/nvngx_dlssnr.dll C:/fixtures/model-input.rgba16f 1920 1080 C:/results/pan-control 12 6 0
+./out-perf/Release/NrModelProbe.exe --vit-sequence C:/NR/nvngx_dlssnr.dll C:/fixtures/model-input.rgba16f 3840 2160 C:/results/pan 48 6 -1
+./out-perf/Release/NrModelProbe.exe --vit-sequence C:/NR/nvngx_dlssnr.dll C:/fixtures/real-sequence 2560 1440 C:/results/real 8 1 -1
 ```
 
 `--overlap` measures pass 2 of frame N alongside pass 1 of frame N+1, with independent NR features and two COMPUTE queues. Modes are `single` (one queue), `serial` (two queues with an explicit dependency), and `parallel`. Append a second extent and `reset` or `sequence` to test different pass resolutions and retained histories. Mixed-resolution runs clamp and area-downsample A's output on B's queue, preserving the original frame's alpha. Reports include separate NR, handoff and complete-pair minimum, 10th percentile and mean timings; six warmup waves are excluded. Percentiles use linear interpolation at p*(N-1).
