@@ -153,6 +153,8 @@ The standalone target shares OptiScaler's model parameter helpers, compiled colo
 
 Prefix the ordinary forward probe with `--preset 0`, `--preset 1` or `--preset 2` to request automatic selection, Model A or Model B. The runtime must actually contain that model; use the kernel census to verify routing. Explicit preset selection cannot be combined with experimental replay or bookend replacement. Ordinary runs save all 20 measured GPU/CPU samples to `<output>.timings.csv` and report minimum, mean and linearly interpolated percentiles; the extra traced evaluation remains excluded.
 
+`--style 0`, `--style 1` and `--style 2` select Standard, Natural and Cinematic for the ordinary forward probe. Place preset/style options before the runtime path, in either order. The selected style is recorded in its timing CSV and log. For static full-pass comparisons, preserve the native FP16 first output, clamp only its RGB before the second evaluation, and retain original-frame alpha; do not resize or convert through a PNG between passes.
+
 ```powershell
 ./out-perf/Release/NrModelProbe.exe --preset 2 C:/NR/310.9.16/nvngx_dlssnr.dll C:/fixtures/model-input.rgba16f 3840 2160 C:/results/model-b.rgba16f 1 1 1 1 census
 python ../../tests/nr_inventory_model.py C:/NR/310.9.16/nvngx_dlssnr.dll --reference C:/research/dlssnr-pytorch --variant small --output C:/results/model-b-weights
