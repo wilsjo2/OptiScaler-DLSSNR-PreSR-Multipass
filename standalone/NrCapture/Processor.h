@@ -27,6 +27,7 @@ public:
 private:
     friend struct ResidualProbe;
     friend struct QualityProbe; // Headless stage/guide comparisons; no live capture or UI.
+    friend struct DepthProbe; // Controlled raw-NR depth sensitivity check.
     friend struct PassResolutionProbe; // Headless per-stage history diagnostics.
     explicit Processor(Gpu& gpu); // Shader-only construction for the friend fixture; no NGX runtime.
     Gpu& gpu;

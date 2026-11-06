@@ -128,9 +128,14 @@ The commands below assume your current directory is `standalone/NrCapture`. NVID
 ./out/Release/NrCaptureCheck.exe --display-info 1
 ./out/Release/NrCaptureCheck.exe --runtime C:/NR/nvngx_dlssnr.dll --passes 2 --motion 1 --width 3840 --height 2160 --frames 12 --image C:/fixtures/frame.png
 ./out/Release/NrCaptureCheck.exe --runtime C:/NR/nvngx_dlssnr.dll --upscaler 1 --scale 50 --passes 2 --motion 1 --width 3840 --height 2160 --frames 12 --image C:/fixtures/frame.png
+./out/Release/NrCaptureCheck.exe --runtime C:/NR/nvngx_dlssnr.dll --depth-check 1 --width 640 --height 360 --frames 20 --image C:/fixtures/frame.png --depth-output ./out/depth-check
 ./out/Release/NrCaptureCheck.exe --runtime C:/NR/nvngx_dlssnr.dll --pass-resolution-check 1 --width 640 --height 360 --image C:/fixtures/frame.png --pass-resolution-output ./out/pass-resolution
 ./out/Release/NrCaptureCheck.exe --settings C:/fixtures/profile.ini --performance-check 1 --performance-modes 1 --performance-moving 1 --width 3840 --height 2160 --frames 40 --image C:/fixtures/frame.png
 ```
+
+The **depth check** measures raw NR sensitivity to flat depth, horizontal/vertical/radial gradients, moving circle/rectangle layers, reversed layers, checkerboards, a moving depth step, deterministic noise and image luminance. It pans the supplied SDR fixture, moves two textured/tinted foreground shapes and varies brightness. Every pattern receives the same colour sequence. Three suites reset every frame, retain history with zero motion, or retain history with analytic current-to-previous motion. Each trial starts a fresh feature; an identical flat-depth replay measures run-to-run variation. Known motion describes the synthetic transformations; newly exposed pixels use zero vectors.
+
+This probe fixes one NR pass at native fixture resolution, normal depth (`DepthInverted=0`), and SDR encoding, preserving the requested model tuning. It bypasses composition, private SR, FG and motion estimation to isolate the NR response. Use 4–120 frames. It verifies uploaded colour, depth and motion by GPU readback, checks finite output and a working colour response, and writes `frames.csv`, `summary.csv`, metadata and PNG previews. Enable the D3D12 debug layer with `$env:NR_CAPTURE_DEBUG = '1'`. A successful check means the experiment completed correctly; identical output across depth maps is a valid finding. Differences establish sensitivity, not improved image quality or accurate reconstructed scene depth.
 
 The **pass-resolution check** verifies actual mixed-pass model dimensions, independent reconstruction choices, shared and per-pass foveation, selected-pass wireframe output, settings persistence, upstream history resets, hold/resizing, HDR and exact bypasses. It writes processed images and pass-specific wireframe PNGs for inspection. Run with the D3D12 debug layer enabled to check resource-state errors as well.
 
@@ -139,6 +144,31 @@ The **performance check** accumulates GPU stage intervals across all independent
 The fixture capture checks open **only their own test windows**. The window fixture check covers capture, NR, composed output, click-through/focus, resize and restart. The monitor check covers the primary screen with test windows and checks capture exclusion against an independent window capture, application switching, control pause/resume and restart. Its latest run did not complete successfully; see `VALIDATION.md`. Neither check launches a game. The image check accepts ordinary WIC images and tightly packed RGBA16F `.raw` files at the specified dimensions. Its PNG previews are SDR views, not HDR reference images.
 
 The standalone target shares OptiScaler's model parameter helpers, compiled colour shader/constants and GPU retirement implementation. A small compile-time native-object adapter replaces game-wrapper identity resolution. Private DLSS calls the app's own NGX dispatcher directly; no OptiScaler hooks, global configuration, game-facing upscaler infrastructure, game loader or quirk code is linked. Existing game projects and release DLLs are not rebuilt by this target.
+
+`NrModelProbe.exe` is a separate model research tool. It accepts model-space RGBA16F directly, saves the first reset output and a `.last` output, and measures 20 evaluations after warmup. Optional `census` or `timed` tracing reuses the earlier NVAPI kernel wrapper in the probe process; the latter inserts per-launch timestamps and changes scheduling, so its group costs are approximate. The extra traced evaluation is excluded from the baseline mean. See `VALIDATION.md` for the audited runtime and results.
+
+```powershell
+./out/Release/NrModelProbe.exe C:/NR/nvngx_dlssnr.dll C:/fixtures/model-input.rgba16f 384 216 C:/results/model-output.rgba16f 1 1 1 1 census
+```
+
+The optional argument after trace mode is the number of complete feature-body traversals, `1` (default), `2`, or `3`; use trace mode `off` for this experiment. It keeps one input block and one output block, copying the final 32-channel features back into the original body input before replaying every interior kernel. This requires the exact audited 310.8 DLL and validates its native launch/buffer contracts before submission. It is not equivalent to multiple complete model passes. The experimental replay uses conservative barriers and is excluded from `display_filter.exe`.
+
+`../../tests/nr_model_loop.py` compares all 152 layers executed each cycle, with an internal RGB tensor bridge, against complete feature-body recurrence. It requires a separate pinned reference checkout and locally extracted weights; its CLI and dependencies are documented in the script. It runs on the CPU and does not measure native GPU speed.
+
+The native ViT experiment repeats blocks 31–38 and decodes `z + alpha * (ViT(z) - z)`, with FP16/FP8 rounding. At alpha -1 this is `2z - ViT(z)`. Alpha 0 is an exact identity control. `--vit-cost` interleaves one pass, this repeat, and two ordinary passes on the same DIRECT queue, with identical controls and separate timing samples:
+
+```powershell
+./out-perf/Release/NrModelProbe.exe --vit-repeat C:/NR/nvngx_dlssnr.dll C:/fixtures/model-input.rgba16f 384 216 C:/results/vit.rgba16f 1 1 1 1 off -1
+./out-perf/Release/NrModelProbe.exe --vit-cost C:/NR/nvngx_dlssnr.dll C:/fixtures/model-input.rgba16f 384 216 C:/results/vit-cost -1
+```
+
+`--overlap` measures pass 2 of frame N alongside pass 1 of frame N+1, with independent NR features and two COMPUTE queues. Modes are `single` (one queue), `serial` (two queues with an explicit dependency), and `parallel`. The probe alternates original/translated inputs, checks every output against DIRECT-queue references, records feature kernel censuses, and saves calibrated GPU intervals to CSV/JSON. It drains each paired wave before recording another; its measured pair time is not steady-state capture throughput. Upload/readback/parity checks are outside NR timing.
+
+```powershell
+./out-perf/Release/NrModelProbe.exe --overlap C:/NR/nvngx_dlssnr.dll C:/fixtures/model-input.rgba16f 960 540 C:/results/overlap parallel 40
+```
+
+`../../tests/nr_second_pass_ablation.py` ranks 49 shape-preserving block bypasses in pass 2 using the CPU reconstruction and actual native first-pass inputs. It also checks selected blocks and two explicit combinations on altered fixtures. Its quality estimates and timestamp-derived native cost proxies are separate from measured native bypass savings. See `VALIDATION.md` for results, artifact locations, and limitations.
 
 The source follows the parent project's GPLv3 license. NVIDIA runtime files are user-supplied and retain their own terms; a locally prepared testing folder is not a public redistributable release.
 

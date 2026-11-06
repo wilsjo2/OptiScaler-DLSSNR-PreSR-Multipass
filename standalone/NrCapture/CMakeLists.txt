@@ -61,9 +61,31 @@ target_link_libraries(nr_capture_core PUBLIC d3d12 d3d11 dxgi windowsapp dcomp
 add_executable(OptiScalerNR WIN32 App.cpp AppControls.cpp AppSession.cpp Capture.cpp WgcCapture.cpp DxgiCapture.cpp Presentation.cpp)
 set_target_properties(OptiScalerNR PROPERTIES OUTPUT_NAME display_filter)
 target_link_libraries(OptiScalerNR PRIVATE nr_capture_core)
-add_executable(NrCaptureCheck Check.cpp PassResolutionCheck.cpp QualityCheck.cpp QualityReference.cpp FeatureChecks.cpp HdrOutputCheck.cpp Capture.cpp WgcCapture.cpp DxgiCapture.cpp Presentation.cpp CaptureCheck.cpp MotionCheck.cpp GpuWaitCheck.cpp PerformanceCheck.cpp CaptureQueueCheck.cpp FrameGenerationCheck.cpp FrameGenerationPresentCheck.cpp ResidualCheck.cpp LoggingCheck.cpp)
+add_executable(NrCaptureCheck Check.cpp DepthCheck.cpp PassResolutionCheck.cpp QualityCheck.cpp QualityReference.cpp FeatureChecks.cpp HdrOutputCheck.cpp Capture.cpp WgcCapture.cpp DxgiCapture.cpp Presentation.cpp CaptureCheck.cpp MotionCheck.cpp GpuWaitCheck.cpp PerformanceCheck.cpp CaptureQueueCheck.cpp FrameGenerationCheck.cpp FrameGenerationPresentCheck.cpp ResidualCheck.cpp LoggingCheck.cpp)
 target_include_directories(NrCaptureCheck BEFORE PRIVATE check_adapters adapters)
 target_link_libraries(NrCaptureCheck PRIVATE nr_capture_core dbghelp)
+add_executable(NrModelProbe ModelProbe.cpp ModelKernelTrace.cpp ModelOverlap.cpp)
+add_custom_command(OUTPUT "${MOTION_SHADERS}/ModelLoopCopy.h"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${MOTION_SHADERS}"
+    COMMAND "${FXC}" /nologo /Tcs_5_0 /ECopyLatent /O3 /VnModelLoopCopy /Fh "${MOTION_SHADERS}/ModelLoopCopy.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/ModelLoopCopy.hlsl"
+    DEPENDS ModelLoopCopy.hlsl VERBATIM)
+target_sources(NrModelProbe PRIVATE "${MOTION_SHADERS}/ModelLoopCopy.h")
+add_custom_command(OUTPUT "${MOTION_SHADERS}/ModelBookendBridge.h"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${MOTION_SHADERS}"
+    COMMAND "${FXC}" /nologo /Tcs_5_0 /EBridgeBookends /O3 /VnModelBookendBridge /Fh "${MOTION_SHADERS}/ModelBookendBridge.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/ModelBookendBridge.hlsl"
+    DEPENDS ModelBookendBridge.hlsl VERBATIM)
+target_sources(NrModelProbe PRIVATE "${MOTION_SHADERS}/ModelBookendBridge.h")
+add_custom_command(OUTPUT "${MOTION_SHADERS}/ModelLatentMix.h"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${MOTION_SHADERS}"
+    COMMAND "${FXC}" /nologo /Tcs_5_0 /EMixLatent /O3 /VnModelLatentMix /Fh "${MOTION_SHADERS}/ModelLatentMix.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/ModelLatentMix.hlsl"
+    DEPENDS ModelLatentMix.hlsl VERBATIM)
+target_sources(NrModelProbe PRIVATE "${MOTION_SHADERS}/ModelLatentMix.h")
+target_include_directories(NrModelProbe PRIVATE "${REPO}/OptiScaler/include" "${MOTION_SHADERS}")
+target_link_directories(NrModelProbe PRIVATE "${REPO}/OptiScaler/library/detours")
+target_link_libraries(NrModelProbe PRIVATE nr_capture_core "${REPO}/OptiScaler/library/detours/detours.lib")
 add_executable(NrMfgUnlockCheck AdaMfgUnlockCheck.cpp)
 target_include_directories(NrMfgUnlockCheck PRIVATE . "${REPO}/OptiScaler" "${REPO}/external/nvngx_dlss_sdk")
 target_compile_definitions(NrMfgUnlockCheck PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)

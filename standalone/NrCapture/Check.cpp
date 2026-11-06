@@ -5,6 +5,7 @@
 #include "Colour.h"
 #include "FramePacer.h"
 #include "FeatureChecks.h"
+#include "DepthCheck.h"
 #include "PassResolutionCheck.h"
 #include <DirectXPackedVector.h>
 #include <wincodec.h>
@@ -93,7 +94,7 @@ void SavePng(const std::filesystem::path& file, const std::vector<HALF>& values,
     Check(frame->WritePixels(h, w * 4, (UINT)rgb.size(), rgb.data()), "PNG pixels");
     Check(frame->Commit(), "PNG frame commit"); Check(encoder->Commit(), "PNG commit");
 }
-void ModelCheck(const Settings& settings, UINT w, UINT h, unsigned count, const std::filesystem::path& image, bool appearanceCheck, bool alignmentCheck, bool historyCheck, bool qualityCheck, bool featureCheck, bool performanceCheck, bool passResolutionCheck, const std::filesystem::path& passResolutionOutput, unsigned performanceModes, bool performanceMoving) {
+void ModelCheck(const Settings& settings, UINT w, UINT h, unsigned count, const std::filesystem::path& image, bool appearanceCheck, bool alignmentCheck, bool historyCheck, bool qualityCheck, bool featureCheck, bool performanceCheck, bool depthCheck, const std::filesystem::path& depthOutput, bool passResolutionCheck, const std::filesystem::path& passResolutionOutput, unsigned performanceModes, bool performanceMoving) {
     Gpu gpu; Processor processor(gpu, settings.runtime); processor.Resize(w, h, settings);
     ComPtr<ID3D12InfoQueue> diagnostics; gpu.device.As(&diagnostics);
     Log("Check: NR creation submitted and completed.");
@@ -117,6 +118,12 @@ void ModelCheck(const Settings& settings, UINT w, UINT h, unsigned count, const 
         gpu.Submit(); if (!gpu.Drain()) throw std::runtime_error("Upload timeout");
     };
     uploadPixels();
+    if (depthCheck) {
+        std::cout << "Depth fixture: " << (image.empty() ? "generated colour tiles" : image.string()) << '\n';
+        nr::DepthCheck(gpu, processor, input.Get(), settings, count,
+            depthOutput.empty() ? DataDirectory() / "validation" / "depth-check" : depthOutput, SavePng);
+        return;
+    }
     if (performanceCheck) { nr::PerformanceCheck(gpu, processor, input.Get(), settings, count, performanceModes, performanceMoving); return; }
     if (qualityCheck) { nr::QualityCheck(gpu, processor, input.Get(), settings); return; }
     auto read = [&](Settings s, bool hdr, float desktopWhite = 0, bool reset = false) {
@@ -443,8 +450,8 @@ int wmain(int argc, wchar_t** argv) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
     try {
-        nr::Settings settings; UINT width = 1920, height = 1080, frames = 20; std::filesystem::path image, fgPlugins, passResolutionOutput; std::wstring window;
-        bool passResolutionCheck = false, performanceMoving = false;
+        nr::Settings settings; UINT width = 1920, height = 1080, frames = 20; std::filesystem::path image, fgPlugins, depthOutput, passResolutionOutput; std::wstring window;
+        bool depthCheck = false, passResolutionCheck = false, performanceMoving = false;
         unsigned performanceModes = 15;
         bool capture = false, monitor = false, lifecycle = false, motion = false, displayInfo = false, appearance = false, alignment = false, history = false, pacing = false, quality = false, features = false, performance = false, captureQueue = false, residual = false, logging = false, resizeCheck = false;
         for (int i = 1; i < argc; ++i) {
@@ -468,6 +475,8 @@ int wmain(int argc, wchar_t** argv) {
             else if (key == L"--alignment-check") alignment = std::stoul(argv[++i]) != 0;
             else if (key == L"--history-check") history = std::stoul(argv[++i]) != 0;
             else if (key == L"--quality-check") quality = std::stoul(argv[++i]) != 0;
+            else if (key == L"--depth-check") depthCheck = std::stoul(argv[++i]) != 0;
+            else if (key == L"--depth-output") depthOutput = argv[++i];
             else if (key == L"--pass-resolution-check") passResolutionCheck = std::stoul(argv[++i]) != 0;
             else if (key == L"--pass-resolution-output") passResolutionOutput = argv[++i];
             else if (key == L"--fg-check") fgPlugins = argv[++i];
@@ -515,7 +524,7 @@ int wmain(int argc, wchar_t** argv) {
         else if (lifecycle) RuntimeLifecycleCheck(settings);
         else if (monitor) nr::MonitorCheck(settings);
         else if (capture) { if (frames < 10) throw std::runtime_error("Capture checks require at least 10 frames."); nr::CaptureCheck(settings, width, height, frames); }
-        else ModelCheck(settings, width, height, frames, image, appearance, alignment, history, quality, features, performance, passResolutionCheck, passResolutionOutput, performanceModes, performanceMoving);
+        else ModelCheck(settings, width, height, frames, image, appearance, alignment, history, quality, features, performance, depthCheck, depthOutput, passResolutionCheck, passResolutionOutput, performanceModes, performanceMoving);
         return 0;
     } catch (const winrt::hresult_error& e) { std::cerr << nr::Narrow(e.message().c_str()) << '\n'; return 1; }
       catch (const std::exception& e) { std::cerr << e.what() << '\n'; nr::Log(e.what()); return 1; }

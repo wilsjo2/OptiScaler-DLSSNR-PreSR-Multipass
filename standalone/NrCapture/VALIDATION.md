@@ -317,6 +317,35 @@ A fresh x64 Release build passed. Tests used the RTX 5090, NVIDIA NR 310.8, the 
 The old HDR peak fixture also failed on the pre-update executable: Hybrid replace produced a 658.8-nit peak, below its fixed 1000-nit test target. The fixture now selects a target below the measured peak (up to 1000 nits), and still requires highlight reduction, the ceiling, unchanged lower tones and exact neutral restoration. No production HDR adjustment was changed.
 
 The rebuilt controls window opened and displayed the new tabs and model selector. Live capture/gameplay and visual image quality were not tested in this update. Full logs are in the source standalone/NrCapture folder as *-20261028.log. The previous executable is retained in out-before-20261028.
+## 2026-11-05: nonconstant depth sensitivity probe
+
+Added `--depth-check 1` to the headless checker. The Release checker built successfully, and the probe completed on the RTX 5090 / driver 621.01 under the D3D12 debug layer without error/corruption messages. The experiment uses the existing saved Cyberpunk image (`out-flicker/capture-preview.png`), resized to 640x360. The source is panned, two textured/tinted foreground shapes move independently, and brightness varies over 20 frames. No live capture is involved.
+
+There are 11 depth maps: flat far, flat mid, horizontal/vertical/radial gradients, moving foreground shapes, reversed shapes, checkerboard, moving step, deterministic noise and image luminance. A twelfth trial repeats flat far. All trials see identical colour sequences. Three suites use reset on every frame, retained history with zero motion, or retained history with known synthetic motion. Every trial creates a fresh feature, and each uploaded colour/depth/motion texture is verified by GPU readback. Measurements use raw FP16 NR output, before composition, private SR, FG or PNG encoding.
+
+Runtime: the packaged NVIDIA NR 310.8.0.0, verified as the actually loaded DLL, SHA-256 `E16BCF15E16E13F527491CDF7845B2FE6521A738D8F7C9C721866A8496E1FC8E`. Model preset/style 0/0; intensity/structure/tone 1/1/1; skin structure -1; automatic masking on. Depth is R32_FLOAT, normal (`DepthInverted=0`), at native fixture resolution. The source PNG SHA-256 is `24BC69DFE8C2FCF3436C35BE30D432B0FE7B4CC0FD9EE369CE3A802901B41192`.
+
+Results from 36 trials / 720 probe evaluations:
+
+| Comparison | Maximum absolute RGB difference |
+| --- | ---: |
+| Every tested depth map versus flat far, within each suite | 0 |
+| Repeated flat far versus its first run | 0 |
+| Retained history / zero motion versus reset every frame | 0.260864258 |
+| Retained history / known motion versus reset every frame | 0.623046875 |
+| Known motion versus zero motion, both retaining history | 0.606445312 |
+
+NR was active: the per-frame mean absolute edit from the altered input ranged from 0.026350674 to 0.037267467. Outputs responded to the changing image. All supplied depth patterns reached GPU memory as intended, and every output remained finite. **No raw RGB sensitivity to depth was observed in this runtime/configuration**, while history and motion had measurable effects. This supports deferring a depth-estimation model until a runtime/configuration demonstrates a depth response. It does not prove that all NR models ignore depth, and it does not evaluate private SR or frame generation's depth use.
+
+From the repository root, reproduce with:
+
+```powershell
+$env:NR_CAPTURE_DEBUG = '1'
+./standalone/NrCapture/out-depth/Release/NrCaptureCheck.exe --runtime 'C:/NR/nvngx_dlssnr.dll' --depth-check 1 --width 640 --height 360 --frames 20 --image ./standalone/NrCapture/out-flicker/capture-preview.png --depth-output ./standalone/NrCapture/out-depth/results-640
+```
+
+`out-depth` is a separate CMake build of the `NrCaptureCheck` target. Reports and PNG previews are in `out-depth/results-640/` (`frames.csv`, `summary.csv`, `metadata.txt`); the run log is `depth-check-640.log`. The packaged overlay executable was not rebuilt or replaced. For another machine, supply its NR runtime and an SDR test image; the README shows the standard build command.
+
 ## Independent pass resolution and foveation (November 6, 2026)
 
 Both standalone and addon Release/x64 builds succeeded. Standalone validation used the saved Cyberpunk street/vendor fixture at 640x360 with NR 310.8 and `NR_CAPTURE_DEBUG=1`.
@@ -371,3 +400,125 @@ Evidence: `out-perf/motion.log`, `pass-resolution.log`, `features.log`, `quality
 The original performance check incorrectly reset independent FG preparation every frame when NR motion was off. This has been corrected to match the live app's reset condition. The initial `out-perf/baseline-fg/` results are explicitly marked invalid and are not used for improvement claims. Benchmark FG preparation excludes actual interpolation and presentation.
 
 A supplementary retained-motion run with two independent 50% passes plus independent FG guide preparation measured 24.66 -> 20.46 ms GPU span; its full-resolution FG motion interval fell from 5.02 -> 3.07 ms. Final NR-output hashes matched. This single old/new pair is supporting evidence for the motion-search changes, not a measured interpolation or live-game FPS result. Logs: out-perf/fg-motion-old and out-perf/fg-motion-new.
+
+## NR model map and full-body recurrence (2026-11-06)
+
+The earlier NVFP4 implementation was recovered first: d2b65cda / v0.7.2-hybrid replaced eight ViT feed-forward expansion/contraction pairs (blocks 31-38); other operators remained NVIDIA FP8. Later db065ec2 and 67fa0e5a supplied kernel profiling and bottleneck-reuse hooks. Recovered source/provenance: out-model-map/nvfp4-history/recovered-files.json. The new native probe reuses that NVAPI boundary.
+
+### Local model and measured floor
+
+Audited runtime 310.8.0.0 SHA256: e16bcf15e16e13f527491cdf7845b2fe6521a738d8f7c9c721866a8496e1fc8e. WEIGHTS_HT has 153 records, 71 blocks, 152 executable layers and 641 mapped tensor regions. Resource SHA256: 836f445d06ecd2e59bb9f17b84b91c143396fd76ccda1c9dc7fe81d5edd548f4. The encoder/decoder uses 32/64/128/256/512-channel stages around eight 1024-channel ViT blocks. Record offsets and layouts: out-model-map/weights.
+
+Native tracing confirms 156 kernel calls per ordinary evaluation at 320x180, 960x540 and 3840x2160. The 320x180 input uses a 320x320 working image. An ascending/descending six-resolution sweep measured roughly 2.2-2.8 ms median at small sizes, 3.3-3.5 ms at 1080p and 7.3-8.8 ms at 4K. The user's live GPU workload remained active; these do not establish an intrinsic minimum or uncontended benchmark.
+
+A 320x180 instrumented evaluation took 2.24 ms: split-Swin approximately 0.70 ms, ViT 0.63 ms and 256-channel Swin 0.49 ms. Pre-block, post-block and final copy together were approximately 0.038 ms. At 960x540 those three deep groups accounted for about 2.04 ms of 2.60 ms. Per-launch timestamps alter scheduling, so these are approximate interval attributions. The evidence does not support treating the entire 2.5 ms as removable image-entry/exit overhead. CPU launch time is separate from GPU elapsed time.
+
+NrModelProbe feeds model-space RGBA16F directly, excluding capture, scaling and colour composition. Frames 5-24 supply timings; frame 25 is the excluded trace/control sample. Release build and D3D12 debug checks passed. Off/census/timed modes produced bit-identical frame-25 output at 384x216, SHA256 4fd957bfc0fddd185a1f04f8fe1d987282756a110f63ee5e71098b8d608d9ac4.
+
+### Full-model controls before pruning
+
+tests/nr_model_loop.py uses locally extracted weights and the separate mauri870/dlssnr-pytorch reference at commit 3beef7935a8ef976b47ab78b906e75600c52d2de. It compares:
+
+- Complete model cycles: all 152 layers each cycle, linked by internal RGB tensors with crop/clamp/mirror-padding and optional FP16 rounding. No uint8 conversion or intermediate image readback.
+- Complete feature-body cycles: pre-block 0 once, all 150 interior layers in blocks 1-69 each cycle, post-block 70 once. Interior encoder skips are recomputed; the original pre-block skip and residual RGB reference survive. Two cycles execute 302 learned layers versus 304 for two complete passes.
+
+One-cycle schedulers match exactly. Both boundary blocks contain learned attention/projections and nonlinear processing. Later tone conditioning enters through the pre-block, so feature-only repetition cannot reproduce independent later tone settings. CPU checks cover original, translated and contrast-altered 384x216 images, including style 2 with tone 1 then 0. The reconstruction is single-frame only; no temporal-quality claim is made.
+
+### Native full-body feedback
+
+The native experiment copies final 32-channel features into the original body-input buffer, resets completion counters and replays all 152 body kernels (150 learned layers plus two layout repacks). The final post-block executes once. No interior stage is pruned. Each extra body also adds one counter-clear kernel and one GPU copy dispatch. At 384x216 the feedback tensor is 983,040 FP8 bytes.
+
+The probe requires the exact audited DLL hash and kernel names/parameter layouts. Pool allocation, UAV state and GetGPUVirtualAddress provenance were checked in the runtime. Alias, dimension, counter-span and preserved-skip guards run before submission. Conservative global UAV barriers separate replayed kernels. This code is linked only into NrModelProbe, not display_filter.
+
+Native two-body tests completed 26 reset evaluations on each of three images with D3D12 debugging enabled, finite output and no validation errors. Repeating the base test produced identical first and final outputs. Compared with two complete native passes (style 0, tone/structure/intensity 1 on both):
+
+| Fixture | One normal pass PSNR | Full body repeated twice PSNR |
+| --- | ---: | ---: |
+| Original | 27.89 dB | 12.40 dB |
+| Translated | 28.08 dB | 12.51 dB |
+| Contrast altered | 26.34 dB | 12.51 dB |
+
+The native feature loop produces severe colour noise, qualitatively matching the reconstruction. Matching tensor dimensions does not make decoder features suitable encoder inputs. This direct loop fails the two-pass-quality objective. Its conservative implementation measured about 5.0-5.3 ms median at 384x216; these are correctness-test timings, not an optimized result or a speedup claim.
+
+Native evidence: out-model-map/native/full-body-native-results.json and .csv, full-body-*-2.log, full-body-base-2-repeat.log, and native-full-loop-comparison.png. Kernel traces and resolution measurements are beside them. CPU controls remain under out-model-map/ablation/full-body-loops. Reproduce from the standalone directory:
+
+```powershell
+./out-perf/Release/NrModelProbe.exe <absolute-runtime.dll> <model-space-input.rgba16f> 384 216 <output.rgba16f> 1 1 1 1 off 2
+```
+
+The previously delivered performance standalone remains the runnable application. Feature feedback was not promoted into its rendering path.
+
+## Narrow NR bookend bridge experiment (2026-11-06)
+
+The narrow boundaries are after block70's full-resolution Swin output and before block0's Swin input. The learned RGB projection is3x32; the reset-mode colour lift is32x3. Their composition has rank3, so direct32-channel identity is invalid. CPU exact fusion preserves composition clamps, FP16 rounding, noise/conditioning, mirror padding and the output residual anchor; both lifted features and final two-pass output match the complete reconstruction exactly on three384x216 fixtures.
+
+The native probe now extracts the audited DLL's PTX and JITs only its bookends. Original JIT control, export-only, pre-lift self-import and raw-half residual-anchor control each passed26 D3D12-debug evaluations with bit-identical base output. The final two-cycle path preserves both pre/post Swin bodies and every interior layer; it removes the first post RGB tail, imports the next lifted features, and carries a small residual anchor. Its factored shader is approximate because the original lift is already FP16-rounded and it changes projection accumulation.
+
+Against actual two-full-pass DLL output, native PSNR was42.40/41.67/41.67dB and SSIM0.99729/0.99733/0.99631 for original/translated/contrast fixtures. All26 evaluations per fixture were finite, debug validation passed, and first/final images matched exactly. Removing the first RGB tail was bit-exact against the earlier export-only bridge on all three images. Final files: out-model-map/bookends/native/latent-*.rgba16f; metrics: native-bookend-results.json; CPU controls: bookends/reference/fused.
+
+This is a correctness prototype only. Large FP16 feature buffers and conservative per-kernel barriers remain. Existing low-resolution traces put complete pre/post/copy work at about0.038ms; a rank3 bridge cannot remove the repeated backbone's cost. No speed improvement or live-application integration is claimed. Work moved to compute-queue overlap, native negative ViT repetition and second-pass block ablation at the user's direction.
+
+## Queue overlap, native negative ViT repeat and pass-2 bypasses (2026-11-06)
+
+These experiments follow the user's redirection away from bookend fusion. All native work used the same audited NR 310.8 DLL on RTX 5090 / driver 621.01. The game remained running; one snapshot showed 85% GPU utilization before the benchmarks. Timings are workload-contended observations, not isolated hardware minima. No live capture session or game settings were changed.
+
+### Independent features on compute queues
+
+ModelOverlap runs two distinct NR features on the same device, with explicit tone 1 on both. A produces frame N+1 into a different intermediate from the one B reads for frame N. Producer/consumer and slot-reuse fences, COMMON-state handoffs, and a common submission gate are explicit. Each feature has at most one evaluation in flight. Inputs alternate between the base image and a (7,3) translation. Every A/B output matched the corresponding DIRECT reference exactly, including all 480 measured waves and warmups. D3D12 debug validation passed. Initial kernel censuses each contain 156 calls and show distinct writable counter/feature arenas.
+
+Each mode ran twice at each resolution, with 40 measured waves after six warmups per run. Order was single, parallel, forced-serial, parallel, single, forced-serial. Values below average the two run means, in milliseconds:
+
+| Input | One compute queue | Two queues, forced serial | Two queues, parallel | Parallel reduction vs one queue |
+| --- | ---: | ---: | ---: | ---: |
+| 384x216 | 9.122 | 11.984 | 5.502 | 39.7% |
+| 960x540 | 8.172 | 11.557 | 5.934 | 27.4% |
+
+Parallel timestamp intervals overlapped by 5.250 / 5.927 ms on average. Forced-serial overlap was zero; single-queue overlap was zero / 0.009 ms (calibration noise). Timestamps use each actual queue's frequency and clock calibration. Interval overlap alone does not prove simultaneous kernel execution, but the repeated pair-makespan reduction establishes useful overlap under these conditions. Each wave drains before rerecording and performs readback outside NR timing; this is not a measurement of steady-state capture FPS or end-to-end latency. Two-queue forced serialization adds scheduling cost, so the conservative comparison is against the single queue.
+
+Evidence: out-model-map/overlap/paired-summary.csv and .json; timing-*-*.csv/.json/.log, per-feature A/B trace files and saved reference/output images. ModelOverlap.cpp is linked only into NrModelProbe.
+
+### Actual DLL ViT repetition at alpha -1
+
+The new mode snapshots the first ViT result, replays the original repack and all eight ViT blocks (42 native launches including the final repack), mixes 2z minus the repeated result, rounds through FP16 to FP8, and decodes once. Only the ViT completion-counter span is cleared. Strict DLL, ABI, arena, counter, dimension and external-alias checks run before submission. Native repacking preserves padded token lanes. Conservative barriers remain between replayed kernels.
+
+Alpha 0 restored the ordinary one-pass result bit-for-bit over 26 reset evaluations. Alpha -1 completed 26 reset evaluations on each of the three altered fixtures with finite output, no D3D12 errors and identical first/final images. Exhaustive CPU checks of the mixing shader's conversion rules covered all 65,536 half encodings and 64,516 finite FP8 pairs without mismatch.
+
+| 384x216 fixture | One pass vs actual two-pass target | Native ViT repeat vs target | Repeat SSIM |
+| --- | ---: | ---: | ---: |
+| Original | 27.89 dB | 31.93 dB | 0.97974 |
+| Translated | 28.08 dB | 31.36 dB | 0.97765 |
+| Contrast altered | 26.34 dB | 30.91 dB | 0.96305 |
+
+The repeat captured 68.4–82.2% of the second-pass change's directional amplitude, with cosine 0.747–0.825. This is improved agreement, not equivalent two-pass output or an objective image-quality judgment. At 960x540 the base fixture improved from 26.67 to 29.40 dB; directional amplitude was 43.5% and cosine 0.685. No retained-history or game-motion stability claim is made.
+
+Cost was measured in one process, interleaving one pass, the ViT repeat and two complete passes on the same DIRECT queue. Both full passes use tone 1, reset true and RGBA16F handoff. Nine warmup evaluations precede 20 samples per mode; triplet order reverses, although ViT remains in the middle. Each size ran twice; averages of run means:
+
+| Input | One full pass | One pass + ViT repeat | Two full passes |
+| --- | ---: | ---: | ---: |
+| 384x216 | 4.318 ms | 5.337 ms | 8.809 ms |
+| 960x540 | 4.204 ms | 5.040 ms | 8.204 ms |
+
+The repeat added about 1.019 / 0.836 ms to one pass and cost about 39% less than two passes in these runs. The 384x216 repeat run means varied from 4.371 to 6.303 ms, so the absolute cost is not stable under this GPU load. Timing includes snapshot, repacks, mixing and conservative barriers; readback is excluded. All interleaved first/final outputs matched their independent native controls and repeated-run counterparts exactly. CPU time includes evaluation/final validation and excludes BeginVitLoop setup.
+
+Evidence: out-model-map/vit-repeat/quality-summary.csv/json, native-vit-comparison.png, cost-summary.csv/json, cost-*.csv/json/log and alpha0/alpha-minus1 outputs. The exact audited graph/counter contracts are in vit-repeat-audit.
+
+### Second-pass block bypass quality/cost catalog
+
+The catalog maps all 71 blocks and identifies 49 conservative identity candidates: 28 plain Swin blocks, 13 complete split-Swin blocks, and eight complete ViT blocks. Ten layout-boundary blocks require separate repacking work; twelve geometry/bookend blocks are excluded from simple whole-block identity. All candidate destinations are distinct from their inputs and feed subsequent completion counters, so omitting launches alone is invalid: a native replacement must forward/repack data and publish completion correctly.
+
+The CPU sweep feeds each candidate the ACTUAL native first-pass output, then bypasses only selected blocks in pass 2. The complete second-pass reconstruction is the ablation control, and actual native two-pass output is a separate fidelity target. Baseline replay remained tensor-exact after every sweep. Coverage: 49 individual blocks on the base image, six selected blocks on translated/contrast inputs, and two combinations across all three images (67 ablated evaluations).
+
+| Block | Family | Worst PSNR vs complete reference, three fixtures | Largest additional native-reference PSNR loss | Instrumented 4K interval proxy |
+| --- | --- | ---: | ---: | ---: |
+| 42 | Decoder split-Swin | 46.46 dB | 0.788 dB | 0.0574 ms |
+| 43 | Decoder split-Swin | 45.99 dB | 1.245 dB | 0.0588 ms |
+| 44 | Decoder split-Swin | 45.74 dB | 0.261 dB | 0.0548 ms |
+| 41 | Decoder split-Swin | 44.68 dB | 0.495 dB | 0.0595 ms |
+| 46 | Decoder split-Swin | 41.90 dB | 1.117 dB | 0.0594 ms |
+| 52 | Decoder Swin-256 | 43.58 dB | 2.066 dB | 0.0689 ms |
+
+Blocks 42–44 are the least disruptive small group in this sample. Bypassing all three together scored 42.62–43.52 dB against the full reference and lost 1.03–1.82 dB of fidelity to the native target. Bypassing 41+42+43+44+46+52 fell to 35.23–36.83 dB and lost 5.06–5.96 dB. Individual ViT block omissions were much more disruptive (28.04–36.37 dB versus complete reference on the base image).
+
+These bypasses were evaluated in the CPU reconstruction, not injected into the DLL. Native full-reference fidelity of roughly 40.7–42.9 dB bounds interpretation. Cost columns come from earlier per-launch traces, which perturb scheduling; replacement copy/repack/counter work is not included. They are not measured savings. The three-block interval sum is only about 0.171 ms at 4K, and quality costs do not combine independently. Inputs cover three versions of one scene and fixed controls, not a broad temporal corpus.
+
+Evidence: out-model-map/pass2-ablation/catalog (71-block contracts, all 49 ranked candidates, native ranges and quality/cost tables); quality/results.csv, quality/combined/results.csv. Reproducer: tests/nr_second_pass_ablation.py. No body bypass was promoted to the standalone or addon rendering path.
