@@ -170,6 +170,13 @@ The native ViT experiment repeats blocks 31–38 and decodes `z + alpha * (ViT(z
 ./out-perf/Release/NrModelProbe.exe --vit-sequence C:/NR/nvngx_dlssnr.dll C:/fixtures/real-sequence 2560 1440 C:/results/real 8 1 -1
 ```
 
+`../../tests/nr_analyse_vit_outputs.py` independently analyses these native outputs on the CPU at 1080p, 1440p and 4K. It reads FP16 RGB without quantization or resizing, compares one/ViT output against two complete passes, checks all RGBA values for finiteness, and verifies alpha-zero identity byte for byte. Sequence analysis removes the known pan and excludes wrapped edges before measuring adjacent changes. Real animation remains in real-clip changes; those values are not pure flicker measurements. Dependencies are NumPy, SciPy and Pillow, plus matplotlib for optional native-pixel contact sheets. A complete native sequence JSON and its exact indexed frame files are required.
+
+```powershell
+python ../../tests/nr_analyse_vit_outputs.py static --prefix C:/results/vit-cost --output C:/results/vit-quality --contacts
+python ../../tests/nr_analyse_vit_outputs.py sequence --prefix C:/results/pan --output C:/results/pan-quality --contacts
+```
+
 `--overlap` measures pass 2 of frame N alongside pass 1 of frame N+1, with independent NR features and two COMPUTE queues. Modes are `single` (one queue), `serial` (two queues with an explicit dependency), and `parallel`. Append a second extent and `reset` or `sequence` to test different pass resolutions and retained histories. Mixed-resolution runs clamp and area-downsample A's output on B's queue, preserving the original frame's alpha. Reports include separate NR, handoff and complete-pair minimum, 10th percentile and mean timings; six warmup waves are excluded. Percentiles use linear interpolation at p*(N-1).
 
 Sequence references and concurrent playback start with separate fresh feature pairs, reset only frame zero, and compare every A/B output byte. A single input file produces a controlled moving pan with known backward motion vectors. A directory instead supplies real frames named `frame-0000.rgba16f` onward, with zero motion/depth explicitly labelled unavailable. Forty measured waves require 47 input frames. Every paired wave drains before recording another; this measures model/queue scheduling, not steady-state capture throughput, final reconstruction or application latency. Uploads, readbacks and parity checks are excluded from timing.

@@ -549,3 +549,75 @@ The appropriate performance baseline is one queue, not the forced two-queue seri
 Artifacts: `out-model-map/validation-20261106/overlap-summary.csv` and `.json`; per-run CSV/JSON/logs and load snapshots under `game-on-reset/` and `game-on-sequence/`; native traces and exact output samples beside each run. Full raw/model capture and contact sheet are under `wow-animation/`. Runner and summarizer scripts are retained with these local artifacts. Reset-run probe SHA256: 253862d9605815a380c6a923f4d6caf046a2dcd9eef73ae8ebcf8e8f9c92307a. Sequence-run/final probe SHA256: 921a0514214c9c6192b3a0ef1baaefa734396aa21bc7b66ff95dfea4641e5ef3; the intervening rebuild only added the reviewed failure-path guard. DLL SHA256 remains e16bcf15e16e13f527491cdf7845b2fe6521a738d8f7c9c721866a8496e1fc8e.
 
 The game-closed control is ready and the user has been asked to close WoW and stop live capture. It has not yet run. ViT alpha=-1 validation at these resolutions is deliberately pending that control, following the requested order; no new ViT quality or flicker conclusion is claimed. Existing genuine 4K WoW, Cyberpunk, Kingdom Come II and Factorio captures have been identified for its four-scene set.
+
+## Headless Cyberpunk at 1080p, 1440p and 4K (2026-11-06)
+
+The user redirected validation to Cyberpunk and authorized control of running programs. WoW and Display Filter were closed through their normal UI before this matrix; neither supplied any new input. This is headless NrModelProbe replay of saved Cyberpunk captures, not a live Cyberpunk benchmark. The game-closed control is now complete. There is still desktop GPU activity, and clock drift limits small performance conclusions. Bookend-bridge and block-bypass development remains stopped. No overlap or ViT option was added to the application, and no new application executable was built.
+
+Product changes were committed separately as `b16dc70b`, pre-existing research as `9aa9e01b`, overlap/capture validation as `2641d88d`, and the reviewed ViT temporal harness as `f2acc516` before building it. Only NrModelProbe was rebuilt. Release build passed with existing Detours missing-PDB linker warnings; 1080p retained-history alpha-zero and 4K alpha-minus-one static D3D12-debug runs passed.
+
+### Input provenance and protocol
+
+The old `out-model-map/native/input-3840x2160.rgba16f` was an upscaled 960x540 preview. It is excluded here: previous 4K inference dimensions did not establish genuine 4K source detail. The replacement corpus contains four distinct genuine 3840x2160 Cyberpunk sources: nightclub, car and portrait photomode PNGs plus a vendor model-proxy capture. The three PNGs use RGB/255 and alpha 1. `before_00..07.raw` are already encoded model proxies from `nr.colorCopy`, not untouched scene-linear captures; values are preserved without double encoding. Historical internal render/upscaling and proxy-encoding settings are unavailable. 1080p/1440p fixtures use area filtering directly from 4K; the 4K raw inputs are byte-identical to their originals. Source/output hashes and exact paths are in the artifact `manifest.json`.
+
+The real clip has eight distinct chronological frames with animation/traffic and a stationary camera. It has no recorded timestamps or geometric guides; no FPS/duration is inferred. Its motion/depth guides are explicitly zero. Longer tests use a controlled wrapped 8/4-pixel pan of the genuine vendor capture with known backward motion and zero depth. This is synthetic motion of real captured content, not a longer recorded game sequence. The real eight frames are never looped to inflate sample count.
+
+Hardware/runtime: RTX 5090, driver 621.01, NR 310.8.0.0. DLL SHA256 `e16bcf15e16e13f527491cdf7845b2fe6521a738d8f7c9c721866a8496e1fc8e`. Overlap probe SHA256 `921a0514214c9c6192b3a0ef1baaefa734396aa21bc7b66ff95dfea4641e5ef3`; new ViT probe SHA256 `5b708324c423d5204fc81eb500cd1a7be94104c086ab648e88b509e16a96b6b7`. All percentages below scale each dimension: 25% width/height is 6.25% of the pixels.
+
+### Overlap with retained history
+
+All features use preset 1, intensity/structure/tone 1 and auto-mask. For each size pair, two runs per mode measured 40 waves after six warmups, in order single/parallel/serial/parallel/single/serial. Statistics pool 80 samples per mode; p10 is linear interpolation at 0.1*(N-1). Both histories reset only on frame zero. Every output is checked against fresh chronological DIRECT references. The primary performance baseline is one COMPUTE queue, not forced two-queue serialization.
+
+Full-pair GPU time includes the second feature's mixed-resolution clamp/area-downsample handoff. Equal-size overlap retains the earlier raw-output handoff without that clamp; comparisons within each row use identical preparation. Capture, upload/readback, validation, SR, final reconstruction/composition and presentation are excluded. Each paired wave drains before the next wave: these are scheduling/makespan measurements, not steady-state app FPS or capture-to-display latency.
+
+| A -> B | One queue min / p10 / mean ms | Parallel min / p10 / mean ms | Parallel mean change |
+|---|---:|---:|---:|
+| 1920x1080 -> 1920x1080 | 5.5468 / 6.6792 / 7.5854 | 6.2096 / 6.2407 / 7.1005 | -6.39% |
+| 1920x1080 -> 480x270 | 4.7766 / 4.8034 / 6.0171 | 3.4399 / 3.4608 / 4.2101 | -30.03% |
+| 2560x1440 -> 2560x1440 | 8.0538 / 8.6771 / 9.7285 | 7.4355 / 8.2701 / 9.5059 | -2.29% |
+| 2560x1440 -> 640x360 | 6.7898 / 6.9719 / 7.8264 | 5.4157 / 5.4351 / 6.3350 | -19.06% |
+| 3840x2160 -> 3840x2160 | 15.4847 / 18.6261 / 19.2861 | 15.6030 / 18.9227 / 19.6006 | +1.63% |
+| 3840x2160 -> 960x540 | 9.2667 / 10.2502 / 12.3378 | 11.3989 / 11.6158 / 12.5482 | +1.71% |
+
+Mixed-size overlap helps at 1080p and 1440p in this matrix; neither 4K configuration improves. At 4K/25%, p10 worsens 13.32%, and the two single-queue run means span 11.85..12.82 ms versus parallel 12.44..12.65 ms. Full/full changes are small and 1440p/4K repeat-mean ranges overlap. Overlapping timestamp intervals establish concurrent scheduling, not free physical execution; at 4K the intervals lengthen while total pair time fails to improve.
+
+All 42 runs passed: 36 performance runs plus six parallel real-eight-frame parity runs. Including warmups there are 1,698 paired waves, 3,396 paired feature-output comparisons and 42 priming A0 comparisons: 3,438 byte-exact outputs. Main performance has 1,440 measured waves. Each real-eight-frame run evaluates A0..7 and B0..6, so it has seven pairs and only one post-warmup timing sample; it is parity evidence, not a performance distribution. An independent CPU audit recalculated all CSV statistics, checked chronology/reset/dimensions, and rehashed 27 unique inputs against Cyberpunk provenance.
+
+### ViT repeat at alpha -1: static cost and agreement
+
+The repeat uses the real DLL, repeats only the eight ViT blocks, mixes `2z - ViT(z)`, and decodes once. Every evaluation validates the audited DLL/ABI, 156 original launches, 42 replayed kernels and counter/alias contracts. Snapshot, repacks, mix and conservative replay barriers are timed. This remains a DLL-specific probe experiment with no on-disk DLL modification.
+
+At each resolution, four scenes each run 20 samples per mode in interleaved one/ViT/two triplets, reversing order every triplet, after nine warmup evaluations. Both full passes use tone 1 and reset true. The two-pass reference clamps intermediate RGB and restores original-frame alpha; its preparation is timed. The table pools 80 samples per mode/resolution. This DIRECT/reset experiment differs from the COMPUTE/retained-history overlap experiment; compare modes within a table, not absolute timings between tables. Feature creation, uploads and readback are excluded. Reported CPU Evaluate time excludes BeginVitLoop setup and is not total CPU recording time.
+
+| Resolution | One pass min / p10 / mean ms | ViT repeat min / p10 / mean ms | Two passes min / p10 / mean ms |
+|---|---:|---:|---:|
+| 1920x1080 | 2.7643 / 2.7733 / 3.2039 | 3.4971 / 3.5048 / 4.0893 | 5.4863 / 5.5042 / 6.5057 |
+| 2560x1440 | 3.6369 / 3.6515 / 4.2128 | 4.4221 / 4.4444 / 5.1569 | 7.2333 / 7.9840 / 8.5668 |
+| 3840x2160 | 6.7187 / 6.9314 / 7.5767 | 8.4833 / 8.9719 / 9.4431 | 14.1925 / 14.6035 / 15.5056 |
+
+The repeat costs 37.14%, 39.80% and 39.10% less than two full passes on mean GPU time, adding 0.8854 / 0.9440 / 1.8664 ms over one pass. One-pass minimum rises from 2.7643 ms at 1080p to 6.7187 ms at 4K: the earlier tiny-input floor does not describe cost across these target sizes.
+
+All 12 static cases move closer to two complete passes in raw RGB error: PSNR gains range +2.81..+6.30 dB, with 44..70% projection onto the second-pass change. This is agreement with a chosen reference, not perceptual ground truth or equivalent two-pass output. SSIM is slightly lower than one pass for all three car cases (about -0.0011) and essentially tied/slightly lower for the 4K portrait (-0.000061). Native crops show tone moving toward two passes without reproducing every local structural change. All 36 modes have finite, byte-identical first/last reset outputs.
+
+The new chronological harness gives each mode fresh features, resets only frame zero, saves every output, and uses the same clamped/original-alpha two-pass handoff. Six alpha-zero controls (12-frame pan plus eight real frames at each size) matched one-pass RGBA bytes on all 60 corresponding frames, including warmups. All six alpha-minus-one runs (48-frame pan and eight real frames at each size) completed with finite outputs: 504 mode outputs. Separate whole-mode sequence timings are secondary because clocks can drift; the interleaved table above is the primary cost comparison.
+
+### ViT retained-history stability
+
+The CPU analyser reads raw FP16 RGB without image resizing/quantization, checks full RGBA finiteness and alpha-zero identity, and uses 11x11 Gaussian SSIM (sigma 1.5). Its stripe SSIM, motion-alignment sign and byte checks were independently checked. The synthetic clip discards six warmups, leaving 42 frames and 41 transitions; the real clip discards frame zero, leaving seven frames and six transitions. Pan metrics use a common source-space crop after exact 8/4-pixel unrolling, excluding wrapped edges plus a 32-pixel margin. The input within that crop is analytically unchanged; global attention can still see moving/wrapped context outside it.
+
+Adjacent RMS is the root mean square of consecutive-frame RGB changes. Change-error is RMS((candidate[t]-candidate[t-1]) - (two[t]-two[t-1])). A change-error ratio above 1 means ViT follows two-pass temporal changes less closely than one pass does. For real clips, input animation remains in the adjacent RMS; it must not all be labelled flicker.
+
+| Sequence | PSNR vs two: one -> ViT dB | Adjacent RMS: one / ViT / two | Change-error ratio ViT / one |
+|---|---:|---:|---:|
+| 1080p-pan | 27.50 -> 30.82 | 0.002254 / 0.002805 / 0.002481 | 1.406 |
+| 1080p-real8 | 27.99 -> 31.10 | 0.017473 / 0.017671 / 0.017955 | 1.221 |
+| 1440p-pan | 27.34 -> 31.56 | 0.001962 / 0.002679 / 0.002178 | 1.435 |
+| 1440p-real8 | 27.31 -> 30.49 | 0.017222 / 0.017539 / 0.017456 | 1.279 |
+| 2160p-pan | 28.48 -> 31.87 | 0.001854 / 0.002171 / 0.001981 | 1.327 |
+| 2160p-real8 | 28.92 -> 32.30 | 0.017852 / 0.017668 / 0.017349 | 1.175 |
+
+All three controlled pans improve per-frame agreement while increasing aligned variation. ViT adjacent RMS is approximately 13%, 23% and 10% above two passes at 1080p, 1440p and 4K. Its temporal change-error versus two passes is worse than the one-pass baseline on all six clips. The eight-frame real clip has unavailable motion guides and initial history settling, so it cannot establish long-duration gameplay stability. Native crop inspection and per-transition plots complement the raw numerical results; there is no claim of equivalent two-pass detail or flicker-free operation.
+
+Decision: retain the guarded ViT probe for research, but do not carry its DLL-specific replay into the application on this evidence. Its 37-40% static model-time reduction versus two full-size passes is substantial, but the temporal penalty is consistent and structural agreement is incomplete. These full-size ViT results are not a measured replacement for the mixed 100%/25% pipeline. Queue overlap remains a conditional 1080p/1440p mixed-size result, with no demonstrated 4K gain. No further block or bookend experiments were performed.
+
+All local artifacts are under `out-model-map/validation-cyberpunk-20261106/`: `manifest.json` (source provenance), `overlap-summary.csv/json`, `overlap-audit.txt/json`, `vit-cost-summary.csv/json`, `vit-static-cost-audit.txt/json`, `quality-temporal-report.txt`, `analysis-summary.csv/json`, `temporal-pan-analysis.png`, and per-frame raw outputs/timing CSVs. Native run commands and executable/runtime hashes are in the `vit-*-manifest.json` files and overlap run manifests. Reproduction runners and independent audits remain alongside the ignored artifacts. The reviewed reusable CPU analyser is retained in `../../tests/nr_analyse_vit_outputs.py`, with commands in README.md. Large captures, DLLs and build outputs are not committed.
