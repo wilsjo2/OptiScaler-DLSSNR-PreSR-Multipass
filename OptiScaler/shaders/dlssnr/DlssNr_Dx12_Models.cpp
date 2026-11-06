@@ -4,15 +4,15 @@
 bool DlssNr_Dx12::State::PrepareRunModels(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device,
                                           const DlssNrFrameInfo& frame, const D3D12_RESOURCE_DESC& desc,
                                           DlssNr::ColorExtent native, DlssNr::ColorExtent work, float workScale,
-                                          unsigned int requestedPasses, bool spatial)
+                                          unsigned int requestedPasses, bool spatial, bool codecOnly)
 {
-    const auto& cfg = *Config::Instance();
+    const auto& cfg = RunConfig();
     const auto width = native.width, height = native.height;
     const auto workWidth = work.width, workHeight = work.height;
     const bool cropColor = frame.BeforeUpscale && (width != desc.Width || height != desc.Height);
     const bool reduced = workWidth != width || workHeight != height;
-    const auto modelFormat = spatial ? DXGI_FORMAT_R16G16B16A16_FLOAT : desc.Format;
-    ReleaseSurfacesIfFormatChanged(modelFormat, desc.Format);
+    const auto modelFormat = spatial || codecOnly ? DXGI_FORMAT_R16G16B16A16_FLOAT : desc.Format;
+    ReleaseSurfacesIfFormatChanged(modelFormat, desc.Format, codecOnly ? modelFormat : desc.Format);
 
     const bool resolutionChanged =
         nr.width != width || nr.height != height || nr.workWidth != workWidth || nr.workHeight != workHeight;
@@ -53,7 +53,7 @@ bool DlssNr_Dx12::State::PrepareRunModels(ID3D12GraphicsCommandList* cmdList, ID
     if (nr.output == nullptr)
     {
         nr.output = CreateScratch(device, modelFormat, workWidth, workHeight);
-        nr.colorCopy = CreateScratch(device, desc.Format, width, height);
+        nr.colorCopy = CreateScratch(device, codecOnly ? modelFormat : desc.Format, width, height);
         nr.hdrCopy = CreateScratch(device, desc.Format, width, height);
         nr.workWidth = workWidth;
         nr.workHeight = workHeight;
@@ -138,6 +138,12 @@ bool DlssNr_Dx12::State::PrepareRunModels(ID3D12GraphicsCommandList* cmdList, ID
 
     // Prepare at most one missing layer per submission. Repeated CPU calls in the same epoch
     // cannot evaluate creation work or create another layer before the first one is submitted.
+    if (codecOnly)
+    {
+        for (auto& model : nr.models)
+            model.RetryAfterFailure();
+        return !nr.passScratchFailed;
+    }
     for (unsigned int pass = requestedPasses; pass < DlssNr::MaxPassCount; ++pass)
     {
         nr.models[pass].RetryAfterFailure();

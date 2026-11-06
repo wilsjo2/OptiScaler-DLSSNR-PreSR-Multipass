@@ -53,6 +53,16 @@ struct DlssNr_Dx12::State
     using NrState = DlssNr::Detail::ModelStateDx12;
     NrState nr;
     DlssNr_Dx12& shader;
+    // A private stage resolves its own profile without mutating the live menu configuration.
+    const Config* passConfig = nullptr;
+    const Config& RunConfig() const { return passConfig ? *passConfig : *Config::Instance(); }
+    std::array<std::unique_ptr<DlssNr_Dx12>, DlssNr::MaxPassCount> independentPasses;
+    std::vector<DlssNr::Profiles::ResolutionSettings> independentSizes;
+    std::vector<DlssNr::ModelSettings> independentModels;
+    bool independentActive = false;
+    std::string independentStatus;
+    std::string independentSpatialStatus;
+    void ReleaseIndependentPasses();
     struct Enlarger
     {
         template <typename T> using ComPtr = Microsoft::WRL::ComPtr<T>;
@@ -65,6 +75,7 @@ struct DlssNr_Dx12::State
         uint64_t lastFrame = 0;
         bool submitted = false, failed = false, depthInverted = false, readable = false, reset = true;
         bool structural = false;
+        DlssNr::PrivateUpscaler backend = DlssNr::PrivateUpscaler::DLSS;
         ~Enlarger() { dlss.reset(); } // Release NGX before its borrowed input/output resources.
     };
     std::unique_ptr<Enlarger> enlarger;
@@ -132,7 +143,8 @@ struct DlssNr_Dx12::State
 
     void ParkNrResource(ID3D12Resource*& resource);
 
-    void ReleaseSurfacesIfFormatChanged(DXGI_FORMAT modelFormat, DXGI_FORMAT nativeFormat);
+    void ReleaseSurfacesIfFormatChanged(DXGI_FORMAT modelFormat, DXGI_FORMAT nativeFormat,
+                                        DXGI_FORMAT proxyFormat = DXGI_FORMAT_UNKNOWN);
     bool PrepareSpatialResources(ID3D12Device* device, const DlssNr::Spatial::Layout& layout);
     void ReleaseSpatialResources();
     void ReleaseSupersamplers();
@@ -462,7 +474,7 @@ struct DlssNr_Dx12::State
 
     bool PrepareRunModels(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, const DlssNrFrameInfo& frame,
                           const D3D12_RESOURCE_DESC& desc, DlssNr::ColorExtent native, DlssNr::ColorExtent work,
-                          float workScale, unsigned int requestedPasses, bool spatial);
+                          float workScale, unsigned int requestedPasses, bool spatial, bool codecOnly = false);
     struct EncodeContext
     {
         ID3D12GraphicsCommandList* cmdList;
@@ -481,6 +493,8 @@ struct DlssNr_Dx12::State
     };
     void EncodeInput(EncodeContext& context);
     DlssNrConstants MakeResolveConstants(const EncodeContext& context, unsigned int effectivePasses);
+    bool RunIndependentPasses(EncodeContext& encoded, ID3D12Resource* depth, ID3D12Resource* motion,
+                              unsigned int passes, ID3D12CommandQueue* queue);
     OptiScaler::RollingVitals vitals;
     void EndGpuTiming(ID3D12GraphicsCommandList* cmdList);
 

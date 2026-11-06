@@ -423,6 +423,20 @@ bool Config::Reload(std::filesystem::path iniPath)
                 pass.tone.set_from_config(readFloat("DlssNr", std::format("Pass{}LocalTone", i + 2).c_str()));
                 pass.skin.set_from_config(readFloat("DlssNr", std::format("Pass{}SkinStructure", i + 2).c_str()));
                 pass.autoMask.set_from_config(readBool("DlssNr", std::format("Pass{}AutoMask", i + 2).c_str()));
+                pass.workingScale.set_from_config(readFloat("DlssNr", std::format("Pass{}WorkingScale", i + 2)));
+                pass.scalingDownscaler.set_from_config(
+                    readEnum<Scaler>("DlssNr", std::format("Pass{}ScalingDownscaler", i + 2)));
+                pass.transfer.set_from_config(readUInt("DlssNr", std::format("Pass{}Transfer", i + 2)));
+                pass.privateUpscaler.set_from_config(readInt("DlssNr", std::format("Pass{}PrivateUpscaler", i + 2)));
+                pass.spatialCompression.set_from_config(readBool("DlssNr", std::format("Pass{}SpatialCompression", i + 2)));
+                pass.spatialCenterX.set_from_config(readFloat("DlssNr", std::format("Pass{}SpatialCenterX", i + 2)));
+                pass.spatialCenterY.set_from_config(readFloat("DlssNr", std::format("Pass{}SpatialCenterY", i + 2)));
+                pass.spatialWorkX.set_from_config(readFloat("DlssNr", std::format("Pass{}SpatialWorkX", i + 2)));
+                pass.spatialWorkY.set_from_config(readFloat("DlssNr", std::format("Pass{}SpatialWorkY", i + 2)));
+                pass.spatialOffsetX.set_from_config(readFloat("DlssNr", std::format("Pass{}SpatialOffsetX", i + 2)));
+                pass.spatialOffsetY.set_from_config(readFloat("DlssNr", std::format("Pass{}SpatialOffsetY", i + 2)));
+                pass.spatialShiftX.set_from_config(readFloat("DlssNr", std::format("Pass{}SpatialShiftX", i + 2)));
+                pass.spatialShiftY.set_from_config(readFloat("DlssNr", std::format("Pass{}SpatialShiftY", i + 2)));
             }
             DlssNrReversibleMode.set_from_config(readUInt("DlssNr", "ReversibleMode"));
             DlssNrApplyModel.set_from_config(readBool("DlssNr", "ApplyModel"));
@@ -1423,6 +1437,32 @@ bool Config::SaveIni(std::filesystem::path destination)
                          GetFloatValue(pass.skin.value_for_config()).c_str());
             ini.SetValue("DlssNr", std::format("Pass{}AutoMask", i + 2).c_str(),
                          GetBoolValue(pass.autoMask.value_for_config()).c_str());
+            ini.SetValue("DlssNr", std::format("Pass{}WorkingScale", i + 2).c_str(),
+                         GetFloatValue(pass.workingScale.value_for_config()).c_str());
+            ini.SetValue("DlssNr", std::format("Pass{}ScalingDownscaler", i + 2).c_str(),
+                         GetIntValue(pass.scalingDownscaler.value_for_config()).c_str());
+            ini.SetValue("DlssNr", std::format("Pass{}Transfer", i + 2).c_str(),
+                         GetIntValue(pass.transfer.value_for_config()).c_str());
+            ini.SetValue("DlssNr", std::format("Pass{}PrivateUpscaler", i + 2).c_str(),
+                         GetIntValue(pass.privateUpscaler.value_for_config()).c_str());
+            ini.SetValue("DlssNr", std::format("Pass{}SpatialCompression", i + 2).c_str(),
+                         GetBoolValue(pass.spatialCompression.value_for_config()).c_str());
+            ini.SetValue("DlssNr", std::format("Pass{}SpatialCenterX", i + 2).c_str(),
+                         GetFloatValue(pass.spatialCenterX.value_for_config()).c_str());
+            ini.SetValue("DlssNr", std::format("Pass{}SpatialCenterY", i + 2).c_str(),
+                         GetFloatValue(pass.spatialCenterY.value_for_config()).c_str());
+            ini.SetValue("DlssNr", std::format("Pass{}SpatialWorkX", i + 2).c_str(),
+                         GetFloatValue(pass.spatialWorkX.value_for_config()).c_str());
+            ini.SetValue("DlssNr", std::format("Pass{}SpatialWorkY", i + 2).c_str(),
+                         GetFloatValue(pass.spatialWorkY.value_for_config()).c_str());
+            ini.SetValue("DlssNr", std::format("Pass{}SpatialOffsetX", i + 2).c_str(),
+                         GetFloatValue(pass.spatialOffsetX.value_for_config()).c_str());
+            ini.SetValue("DlssNr", std::format("Pass{}SpatialOffsetY", i + 2).c_str(),
+                         GetFloatValue(pass.spatialOffsetY.value_for_config()).c_str());
+            ini.SetValue("DlssNr", std::format("Pass{}SpatialShiftX", i + 2).c_str(),
+                         GetFloatValue(pass.spatialShiftX.value_for_config()).c_str());
+            ini.SetValue("DlssNr", std::format("Pass{}SpatialShiftY", i + 2).c_str(),
+                         GetFloatValue(pass.spatialShiftY.value_for_config()).c_str());
         }
         ini.SetValue("DlssNr", "ReversibleMode",
                      GetIntValue(Instance()->DlssNrReversibleMode.value_for_config()).c_str());

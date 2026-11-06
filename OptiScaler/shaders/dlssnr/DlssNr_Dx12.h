@@ -31,6 +31,8 @@
 // halo filter 1, unpack 1, private enlargement 2 and resolve 1. Twelve queued frames need 144 slots.
 #define DLSSNR_NUM_OF_HEAPS 144
 
+class Config;
+
 class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
 {
   private:
@@ -67,6 +69,11 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     ID3D12PipelineState* _spatialGuidesPipelineState = nullptr;
     // Denoise-first step 2: resample NR's edit by the jitter and put it onto the raw render.
     ID3D12PipelineState* _denoiseFirstPipelineState = nullptr;
+    ID3D12PipelineState* _rawResidualPipelineState = nullptr;
+
+    bool DispatchConfigured(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour, ID3D12Resource* depth,
+                            ID3D12Resource* motion, ID3D12Resource* output, const DlssNrFrameInfo& frame,
+                            ID3D12CommandQueue* queue, const Config* profile);
 
     // Caller holds the owner and state locks. All NR compute shaders share this descriptor layout.
     bool DispatchCompute(ID3D12GraphicsCommandList* cmd, const DlssNrConstants& constants,

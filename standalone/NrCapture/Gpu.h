@@ -38,7 +38,11 @@ private:
     ComPtr<ID3D12QueryHeap> timeQueries;
     ComPtr<ID3D12Resource> timeReadback;
     UINT64 timeFrequency = 0;
-    std::array<bool, unsigned(GpuStage::Count)> timed{};
+    // Independent passes repeat the same stages. Keep each interval instead of
+    // overwriting the first pass's timestamps with the final composition pass.
+    static constexpr unsigned MaxTimingIntervals = Settings::MaxPasses + 2;
+    std::array<unsigned, unsigned(GpuStage::Count)> timed{};
+    std::array<bool, unsigned(GpuStage::Count)> timingActive{};
     bool recordingTimes = false, pendingTimes = false;
 };
 }

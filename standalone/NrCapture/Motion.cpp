@@ -73,6 +73,16 @@ bool Motion::Estimate(ID3D12Resource* input, bool reset) {
         Constants p{UINT(to.Width),to.Height,UINT(from.Width),from.Height,UINT(reset),UINT(i!=0),i ? 2u : 4u,cutLimit};
         Dispatch(i,0,p,source,source,source,current[i].Get());
     }
+    if (reset) {
+        // The cut decision is already known. Seed the next frame's luma history
+        // and record zero vectors, without running searches or stalling the CPU
+        // to read back a cut counter that cannot change the answer. Flow levels
+        // are all recomputed before they are consumed on the next normal frame.
+        Constants p{width,height,0,0,1,0,0,cutLimit};
+        Dispatch(Levels*2,2,p,current[0].Get(),previous[0].Get(),flow[0].Get(),vectors.Get());
+        history=true; frame=1-frame;
+        return true;
+    }
     for (int i=Levels-1; i>=0; --i) {
         auto size=flow[i]->GetDesc(); auto* coarser=i+1<int(Levels) ? flow[i+1].Get() : current[i].Get();
         Constants p{UINT(size.Width),size.Height,0,0,UINT(reset),UINT(i+1<int(Levels)),0,cutLimit};

@@ -3,6 +3,8 @@
 #include "Runtime.h"
 #include "Motion.h"
 #include "Scaling.h"
+#include "Spatial.h"
+#include <vector>
 #include <shaders/dlssnr/DlssNr_Common.h>
 namespace nr {
 class Processor {
@@ -20,12 +22,31 @@ public:
     bool historyReset = true; // Actual reset sent to NR for the last processed frame.
     // Current-to-previous full-resolution guides, valid through frame completion.
     ID3D12Resource* FullResolutionMotion() const { return fullResolutionMotion; }
-    ID3D12Resource* ModelInput() const { return proxy.Get(); } // Diagnostic readback; UAV after Run completes.
+    ID3D12Resource* ModelInput() const { return advanced ? chainInput.Get() : proxy.Get(); } // Diagnostic readback; UAV after Run completes.
+    std::pair<UINT, UINT> PassModelSize(unsigned pass) const;
 private:
     friend struct ResidualProbe;
     friend struct QualityProbe; // Headless stage/guide comparisons; no live capture or UI.
+    friend struct PassResolutionProbe; // Headless per-stage history diagnostics.
     explicit Processor(Gpu& gpu); // Shader-only construction for the friend fixture; no NGX runtime.
     Gpu& gpu;
+    bool modelStage = false, composeOnly = false, advanced = false;
+    bool stageResetPending = true;
+    bool clampStageInput = false;
+    std::vector<std::shared_ptr<Processor>> stages;
+    std::vector<Settings> stageSettings;
+    ID3D12Resource* externalAnswer = nullptr;
+    ID3D12Resource* preparedProxy = nullptr;
+    ID3D12Resource* chainMotionInput = nullptr;
+    ID3D12Resource* sharedMotionVectors = nullptr;
+    ID3D12Resource* usedMotionVectors = nullptr;
+    bool reuseChainMotion = true; // Test probe can compare the independent-estimation reference.
+    ComPtr<ID3D12Resource> chainInput;
+    std::shared_ptr<Spatial> spatialShader;
+    DlssNr::Spatial::Layout spatialLayout{};
+    ComPtr<ID3D12Resource> packedProxy, packedAnswer, packedDepth, packedMotion, packedPassInput;
+    ComPtr<ID3D12Resource> gridOutput;
+    bool gridReadable = false;
     std::shared_ptr<Runtime> runtime;
     std::shared_ptr<Motion> opticalFlow;
     std::shared_ptr<Scaling> scaling;
@@ -52,6 +73,12 @@ private:
     bool lastHdr = false;
     bool lastSdr = false;
     float lastWhitePoint = 0;
+    void ResizeLegacy(UINT width, UINT height, const Settings& settings);
+    ID3D12Resource* RunLegacy(ID3D12Resource* input, const Settings& settings, bool hdr, bool resetHistory,
+                             float desktopWhitePoint, float frameTimeMs, int processedFps, int outputFps);
+    ID3D12Resource* RunChain(ID3D12Resource* input, const Settings& settings, bool hdr, bool resetHistory,
+                            float desktopWhitePoint, float frameTimeMs, int processedFps, int outputFps);
+    ID3D12Resource* Preview(ID3D12Resource* input, const Settings& settings);
     D3D12_CPU_DESCRIPTOR_HANDLE Cpu(UINT index) const;
     D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle(UINT index) const;
     void Dispatch(UINT offset, const DlssNrConstants& settings, ID3D12Resource* source,

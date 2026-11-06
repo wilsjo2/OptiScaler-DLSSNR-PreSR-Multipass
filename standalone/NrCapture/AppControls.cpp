@@ -6,6 +6,8 @@ void App::ShowPage() {
 }
 void App::ShowPass() {
     Settings value; { std::lock_guard lock(mutex); value = settings; }
+    for (int id : {EditPass, ResolutionPass, FoveationPass})
+        SendMessageW(Control(id), CB_SETCURSEL, selectedPass, 0);
     const auto model = value.PassModel(selectedPass);
     const bool inherit = selectedPass && !value.passOverrides[selectedPass - 1];
     SendMessageW(Control(InheritPass), BM_SETCHECK, inherit ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -20,6 +22,41 @@ void App::ShowPass() {
     for (int id : {Intensity, Structure, LocalTone, SkinStructure, Style, Preset, AutoMask}) EnableWindow(Control(id), !inherit);
     SetWindowTextW(Control(PassNote), selectedPass >= value.passes ? L"Inactive pass: edits are saved for when this pass is enabled." :
         inherit ? L"Inherits pass 1, with Local tone 0. Uncheck inheritance to edit." : L"Model changes take effect when an edit is committed.");
+    const auto resolution = value.PassResolution(selectedPass);
+    const bool inheritResolution = selectedPass && !value.passResolutionOverrides[selectedPass - 1];
+    for (int id : {InheritResolution, InheritFoveation}) {
+        SendMessageW(Control(id), BM_SETCHECK, inheritResolution ? BST_CHECKED : BST_UNCHECKED, 0);
+        EnableWindow(Control(id), selectedPass != 0);
+    }
+    SendMessageW(Control(ModelScale), TBM_SETPOS, TRUE, resolution.modelScale);
+    SetWindowTextW(Control(ScaleLabel), std::format(L"Pass {} resolution: {}% per dimension", selectedPass + 1, resolution.modelScale).c_str());
+    SendMessageW(Control(Downscaler), CB_SETCURSEL, resolution.downscaler, 0);
+    SendMessageW(Control(Transfer), CB_SETCURSEL, resolution.transfer, 0);
+    SendMessageW(Control(Upscaler), CB_SETCURSEL, resolution.upscaler, 0);
+    EnableWindow(Control(ModelScale), !inheritResolution);
+    EnableWindow(Control(Transfer), !inheritResolution);
+    EnableWindow(Control(Upscaler), !inheritResolution && resolution.transfer != 2);
+    EnableWindow(Control(Downscaler), !inheritResolution && resolution.modelScale > 100);
+    const auto& spatial = resolution.spatial;
+    SendMessageW(Control(FoveationEnabled), BM_SETCHECK, spatial.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+    EnableWindow(Control(FoveationEnabled), !inheritResolution);
+    for (auto [id, amount] : {std::pair{FoveationCenterWidth, spatial.centerX}, {FoveationCenterHeight, spatial.centerY},
+         {FoveationWorkWidth, spatial.workX}, {FoveationWorkHeight, spatial.workY},
+         {FoveationPositionX, spatial.offsetX + 50}, {FoveationPositionY, spatial.offsetY + 50},
+         {FoveationShiftX, spatial.shiftX}, {FoveationShiftY, spatial.shiftY}}) {
+        SetWindowTextW(Control(id), std::format(L"{:.2f}", amount).c_str());
+        EnableWindow(Control(id), !inheritResolution && spatial.enabled);
+    }
+    SendMessageW(Control(ShowFoveation), BM_SETCHECK, value.showFoveation ? BST_CHECKED : BST_UNCHECKED, 0);
+    const wchar_t* note = selectedPass >= value.passes ? L"Inactive pass: this profile is saved for later. Show area can preview its grid." :
+        inheritResolution ? L"Inherits pass 1 resolution and foveation. Uncheck inheritance to edit this pass." :
+        L"This pass has its own resolution, reconstruction and foveation settings.";
+    SetWindowTextW(Control(ResolutionNote), note);
+    std::wstring foveationNote = note;
+    if (!spatial.enabled) foveationNote += L" Foveation is off; Show area displays a regular grid.";
+    else if (spatial.workX == 100 && spatial.workY == 100)
+        foveationNote += L" Both working extents are 100%, so this pass is not compressed.";
+    SetWindowTextW(Control(FoveationNote), foveationNote.c_str());
 }
 void App::CreateControls() {
     auto label = [&](const wchar_t* text, int x, int y, int width = 410, int id = 0) { Add(L"STATIC", text, 0, x, y, width, 22, id); };
@@ -63,7 +100,7 @@ void App::CreateControls() {
     label(L"Target FPS (0 = uncapped)", 590, 148, 230);
     Add(L"EDIT", std::to_wstring(settings.maxFps).c_str(), WS_BORDER | ES_NUMBER | WS_TABSTOP, 835, 145, 110, 25, FpsLimit);
     Add(WC_TABCONTROLW, L"", WS_TABSTOP | WS_CLIPSIBLINGS, 16, 188, 934, 440, Tabs);
-    for (auto text : {L"Model passes", L"Input and resolution", L"Composition", L"HDR output", L"Inspect and compare", L"Halo suppression"}) {
+    for (auto text : {L"Model passes", L"Input and resolution", L"Composition", L"HDR output", L"Inspect and compare", L"Halo suppression", L"Foveation"}) {
         TCITEMW item{}; item.mask = TCIF_TEXT; item.pszText = const_cast<wchar_t*>(text);
         TabCtrl_InsertItem(Control(Tabs), TabCtrl_GetItemCount(Control(Tabs)), &item);
     }
@@ -98,15 +135,19 @@ void App::CreateControls() {
     SendMessageW(Control(WhiteSlider), TBM_SETPOS, TRUE, (LPARAM)std::lround(std::sqrt(settings.referenceWhiteNits * 100)));
     box(L"Estimate motion (experimental)", MotionMode, settings.estimateMotion, 36, 472);
     Add(L"STATIC", L"Auto follows the display, not the source content.\r\nScreen capture has no engine depth or motion guides.", 0, 36, 524, 410, 65, 0);
-    label(std::format(L"Model resolution: {}% per dimension", settings.modelScale).c_str(), 506, 232, 410, ScaleLabel);
-    Add(TRACKBAR_CLASSW, L"", TBS_NOTICKS | WS_TABSTOP, 506, 260, 410, 30, ModelScale);
+    combo(L"Edit pass resolution", ResolutionPass, {}, 0, 506, 232);
+    for (unsigned i = 1; i <= Settings::MaxPasses; ++i)
+        SendMessageW(Control(ResolutionPass), CB_ADDSTRING, 0, (LPARAM)std::format(L"Pass {}", i).c_str());
+    box(L"Inherit pass 1 resolution + foveation", InheritResolution, false, 506, 289);
+    label(L"", 506, 324, 410, ScaleLabel);
+    Add(TRACKBAR_CLASSW, L"", TBS_NOTICKS | WS_TABSTOP, 506, 348, 410, 30, ModelScale);
     SendMessageW(Control(ModelScale), TBM_SETRANGE, FALSE, MAKELPARAM(25, 200));
     SendMessageW(Control(ModelScale), TBM_SETPOS, TRUE, settings.modelScale);
-    combo(L"Above 100%: downsampling filter", Downscaler, {L"FSR1", L"Bicubic", L"Catmull-Rom", L"Lanczos2", L"Lanczos3", L"Kaiser2", L"Kaiser3", L"MAGIC"}, settings.downscaler, 506, 307);
-    combo(L"Below 100%: edit transfer", Transfer, {L"Classic composition", L"Matched residuals", L"Edge-aware (spatial)"}, settings.transfer, 506, 390);
-    combo(L"Below 100%: upscaling", Upscaler, {L"Bilinear", L"Private DLSS SR"}, settings.upscaler, 506, 465);
+    combo(L"Above 100%: downsampling filter", Downscaler, {L"FSR1", L"Bicubic", L"Catmull-Rom", L"Lanczos2", L"Lanczos3", L"Kaiser2", L"Kaiser3", L"MAGIC"}, settings.downscaler, 506, 388);
+    combo(L"Below 100%: edit transfer", Transfer, {L"Classic composition", L"Matched residuals", L"Edge-aware (spatial)"}, settings.transfer, 506, 452);
+    combo(L"Below 100%: upscaling", Upscaler, {L"Bilinear", L"Private DLSS SR"}, settings.upscaler, 506, 516);
     EnableWindow(Control(Upscaler), settings.transfer != 2);
-    label(L"Output stays at the captured screen/window size.", 506, 548);
+    Add(L"STATIC", L"", 0, 506, 578, 410, 38, ResolutionNote);
     EnableWindow(Control(Downscaler), settings.modelScale > 100);
 
     buildingPage = 2;
@@ -151,6 +192,23 @@ void App::CreateControls() {
     edit(L"Dark rims near dark objects (0-1)", HaloBrightSuppression, settings.haloBrightSuppression, 36, 300);
     edit(L"Radius (1-4 NR pixels)", HaloRadius, settings.haloRadius, 36, 362);
     Add(L"STATIC", L"Experimental. Lifts fine dark rims while keeping broad lighting.\r\n\r\nBoth strengths at 0 disable the filter.\r\n\r\nCan lighten real shadows; compare before keeping it on.\r\nApplied once after all model passes, before resizing.", 0, 506, 238, 410, 220, 0);
+    buildingPage = 6;
+    combo(L"Edit pass foveation", FoveationPass, {}, 0, 36, 232);
+    for (unsigned i = 1; i <= Settings::MaxPasses; ++i)
+        SendMessageW(Control(FoveationPass), CB_ADDSTRING, 0, (LPARAM)std::format(L"Pass {}", i).c_str());
+    box(L"Inherit pass 1 resolution + foveation", InheritFoveation, false, 36, 291);
+    box(L"Enable foveation for this pass", FoveationEnabled, false, 36, 333);
+    edit(L"Focus width (%)", FoveationCenterWidth, 80, 36, 383);
+    edit(L"Focus height (%)", FoveationCenterHeight, 80, 36, 428);
+    edit(L"Focus centre X (0-100%)", FoveationPositionX, 50, 36, 473);
+    edit(L"Focus centre Y (0-100%)", FoveationPositionY, 50, 36, 518);
+    edit(L"Working width (%)", FoveationWorkWidth, 90, 506, 235);
+    edit(L"Working height (%)", FoveationWorkHeight, 90, 506, 280);
+    edit(L"Work shift X (%)", FoveationShiftX, 0, 506, 325);
+    edit(L"Work shift Y (%)", FoveationShiftY, 0, 506, 370);
+    box(L"Show area (distorted wireframe grid)", ShowFoveation, false, 506, 423);
+    Add(L"STATIC", L"Working size reduces outer detail while keeping the focus at this pass's resolution.\r\nWork shift redistributes outer detail.\r\n\r\nShow area previews the selected pass. Focus the source to view it.", 0, 506, 464, 410, 108, 0);
+    Add(L"STATIC", L"", 0, 36, 578, 880, 38, FoveationNote);
     buildingPage = -1;
     Add(L"STATIC", status.c_str(), 0, 16, 647, 935, 83, Status);
     ShowPass(); ShowPage(); ListSources();

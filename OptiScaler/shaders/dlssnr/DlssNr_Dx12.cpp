@@ -9,6 +9,7 @@
 #include "precompile/dlssnr_spatial_Shader.h"
 #include "precompile/dlssnr_spatial_guides_Shader.h"
 #include "precompile/dlssnr_denoise_first_Shader.h"
+#include "precompile/dlssnr_raw_residual_Shader.h"
 
 namespace
 {
@@ -145,7 +146,15 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
 {
     std::lock_guard ownersLock(nrOwnersMutex);
     std::lock_guard stateLock(_state->mutex);
-    return DispatchCompute(InCmdList, InConstants, _pipelineState, InSource, InModel, InOriginal, InMotion, InPrevEdit,
+    auto* pipeline = _pipelineState;
+    if (InConstants.Mode == DlssNrMode_RawResidual)
+    {
+        if (!_rawResidualPipelineState)
+            CreateComputePipeline(_device, &_rawResidualPipelineState, dlssnr_raw_residual_cso,
+                                  sizeof(dlssnr_raw_residual_cso), nullptr);
+        pipeline = _rawResidualPipelineState;
+    }
+    return DispatchCompute(InCmdList, InConstants, pipeline, InSource, InModel, InOriginal, InMotion, InPrevEdit,
                            OutTarget, OutKeep, immutableSlot);
 }
 
@@ -310,6 +319,8 @@ DlssNr_Dx12::~DlssNr_Dx12()
         heap.ReleaseHeaps();
     if (_finishedColorPipelineState)
         _finishedColorPipelineState->Release();
+    if (_rawResidualPipelineState)
+        _rawResidualPipelineState->Release();
     for (auto& buffer : _constantBuffers)
     {
         if (buffer != nullptr)
@@ -494,15 +505,33 @@ bool DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmd, ID3D12Resource* colou
                            ID3D12Resource* motion, ID3D12Resource* output, const DlssNrFrameInfo& frame,
                            ID3D12CommandQueue* queue)
 {
+    return DispatchConfigured(cmd, colour, depth, motion, output, frame, queue, nullptr);
+}
+
+bool DlssNr_Dx12::DispatchConfigured(ID3D12GraphicsCommandList* cmd, ID3D12Resource* colour, ID3D12Resource* depth,
+                                      ID3D12Resource* motion, ID3D12Resource* output, const DlssNrFrameInfo& frame,
+                                      ID3D12CommandQueue* queue, const Config* profile)
+{
     std::lock_guard ownersLock(nrOwnersMutex);
-    ActivateNrOwner(this);
+    if (!profile)
+        ActivateNrOwner(this);
     std::lock_guard stateLock(_state->mutex);
-    _state->ConsumeControls();
+    const auto* previous = _state->passConfig;
+    _state->passConfig = profile;
+    if (!profile)
+        _state->ConsumeControls();
     struct Publish
     {
         State& s;
-        ~Publish() { s.Publish(); }
-    } publish { *_state };
+        const Config* previous;
+        bool publish;
+        ~Publish()
+        {
+            s.passConfig = previous;
+            if (publish)
+                s.Publish();
+        }
+    } publish { *_state, previous, profile == nullptr };
     if (!_init || !cmd || !colour || !depth || !motion || !output)
         return false;
     auto info = frame;

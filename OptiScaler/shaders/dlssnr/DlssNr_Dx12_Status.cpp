@@ -16,6 +16,14 @@ auto DlssNr_Dx12::State::DeferredDlssStatus() -> std::string
 
 auto DlssNr_Dx12::State::RetryAfterFailure() -> void
 {
+    for (auto& pass : independentPasses)
+        if (pass)
+        {
+            for (auto& model : pass->_state->nr.models)
+                model.RetryAfterFailure();
+            std::fill(std::begin(pass->_state->nr.passCreateFailed), std::end(pass->_state->nr.passCreateFailed), false);
+            pass->_state->RetryAfterFailure();
+        }
     ReleaseEnlarger();
     enlargementStatus.clear();
     nr.failed = false;
@@ -52,6 +60,9 @@ auto DlssNr_Dx12::State::ConsumeControls() -> void
 auto DlssNr_Dx12::State::Publish() -> void
 {
     std::string spatialStatus = "Off";
+    if (independentActive)
+        spatialStatus = independentSpatialStatus.empty() ? "Preparing independent pass profiles"
+                                                        : independentSpatialStatus;
     if (nr.spatialLayout.requested)
     {
         if (!nr.spatialLayout.active)
@@ -64,8 +75,9 @@ auto DlssNr_Dx12::State::Publish() -> void
                             std::to_string(nr.spatialLayout.modelW) + "x" + std::to_string(nr.spatialLayout.modelH);
     }
     DlssNr::PublishStatus(&shader, DlssNr::Backend::Dx12,
-                          { !nr.failed && modelRunning && enlargementStatus.empty(),
-                            nr.failed ? nr.reason : enlargementStatus, lastGpuTime, frames, spatialStatus,
+                          { !nr.failed && modelRunning && enlargementStatus.empty() && independentStatus.empty(),
+                            nr.failed ? nr.reason : !independentStatus.empty() ? independentStatus : enlargementStatus,
+                            lastGpuTime, frames, spatialStatus,
                             nr.spatialActive });
 }
 

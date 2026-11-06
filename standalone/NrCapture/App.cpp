@@ -50,9 +50,67 @@ void App::ReadControls() {
     SendMessageW(Control(WhiteSlider), TBM_SETPOS, TRUE, (LPARAM)std::lround(std::sqrt(next.referenceWhiteNits * 100)));
     SendMessageW(Control(PeakSlider), TBM_SETPOS, TRUE, (LPARAM)std::lround(std::sqrt(next.peakBrightnessNits * 100)));
     SendMessageW(Control(BlackSlider), TBM_SETPOS, TRUE, (LPARAM)std::lround(next.blackLevelNits * 100));
-    next.modelScale = (unsigned)SendMessageW(Control(ModelScale), TBM_GETPOS, 0, 0);
-    next.transfer = (unsigned)SendMessageW(Control(Transfer), CB_GETCURSEL, 0, 0);
-    next.upscaler = (unsigned)SendMessageW(Control(Upscaler), CB_GETCURSEL, 0, 0);
+    const bool inheritResolution = selectedPass && checked(InheritResolution);
+    auto resolution = next.PassResolution(selectedPass);
+    if (!inheritResolution) {
+        resolution.modelScale = (unsigned)SendMessageW(Control(ModelScale), TBM_GETPOS, 0, 0);
+        resolution.transfer = choice(Transfer); resolution.upscaler = choice(Upscaler);
+        resolution.downscaler = choice(Downscaler);
+        auto& spatial = resolution.spatial;
+        spatial.enabled = checked(FoveationEnabled);
+        spatial.centerX = number(FoveationCenterWidth, 1, 99);
+        spatial.centerY = number(FoveationCenterHeight, 1, 99);
+        spatial.workX = number(FoveationWorkWidth, 25, 100);
+        spatial.workY = number(FoveationWorkHeight, 25, 100);
+        spatial.offsetX = number(FoveationPositionX, 0, 100) - 50;
+        spatial.offsetY = number(FoveationPositionY, 0, 100) - 50;
+        spatial.shiftX = number(FoveationShiftX, -50, 50);
+        spatial.shiftY = number(FoveationShiftY, -50, 50);
+        if (spatial.enabled) {
+            const auto before = spatial;
+            const float minimumWork = DlssNr::Spatial::MinimumWorkPercent(resolution.modelScale * .01f);
+            // Keep the focus inside the image and reserve a peripheral budget.
+            // Commit the adjusted numbers back to the controls so the mapping is explicit.
+            auto constrain = [&](float& center, float& work, float& offset, float& shift) {
+                work = std::max(work, minimumWork);
+                center = std::min(center, work - 1);
+                const float maxOffset = DlssNr::Spatial::MaxCenterOffset(center);
+                offset = std::clamp(offset, -maxOffset, maxOffset);
+                const auto limits = DlssNr::Spatial::WorkShiftLimits(center, work, offset);
+                shift = std::clamp(shift, limits.first, limits.second);
+            };
+            constrain(spatial.centerX, spatial.workX, spatial.offsetX, spatial.shiftX);
+            constrain(spatial.centerY, spatial.workY, spatial.offsetY, spatial.shiftY);
+            UINT testWidth = 1920, testHeight = 1080;
+            const auto source = SendMessageW(Control(Sources), CB_GETCURSEL, 0, 0);
+            RECT bounds{};
+            if (source >= 0 && size_t(source) < sources.size() && sources[source].Bounds(bounds)) {
+                testWidth = UINT(bounds.right - bounds.left); testHeight = UINT(bounds.bottom - bounds.top);
+            }
+            auto layout = DlssNr::Spatial::Build(spatial, testWidth, testHeight, resolution.modelScale * .01f);
+            if (!layout.active && layout.reason == "work shift leaves less than one work pixel on one side") {
+                spatial.shiftX = spatial.shiftY = 0;
+                layout = DlssNr::Spatial::Build(spatial, testWidth, testHeight, resolution.modelScale * .01f);
+            }
+            if (!layout.active && layout.reason != "work is 100% on both axes")
+                throw std::runtime_error("Foveation: " + layout.reason + ". Increase the working size or reduce the focus width/height.");
+            if (spatial != before) {
+                for (auto [id, amount] : {std::pair{FoveationCenterWidth, spatial.centerX}, {FoveationCenterHeight, spatial.centerY},
+                     {FoveationWorkWidth, spatial.workX}, {FoveationWorkHeight, spatial.workY},
+                     {FoveationPositionX, spatial.offsetX + 50}, {FoveationPositionY, spatial.offsetY + 50},
+                     {FoveationShiftX, spatial.shiftX}, {FoveationShiftY, spatial.shiftY}})
+                    SetWindowTextW(Control(id), std::format(L"{:.2f}", amount).c_str());
+                SetWindowTextW(Control(FoveationNote), L"Adjusted the focus/work bounds to keep the selected mapping valid.");
+            }
+        }
+    }
+    if (!selectedPass) {
+        next.modelScale = resolution.modelScale; next.downscaler = resolution.downscaler;
+        next.transfer = resolution.transfer; next.upscaler = resolution.upscaler; next.spatial = resolution.spatial;
+    } else if (inheritResolution) next.passResolutionOverrides[selectedPass - 1].reset();
+    else next.passResolutionOverrides[selectedPass - 1] = resolution;
+    next.showFoveation = checked(ShowFoveation);
+    if (next.showFoveation) next.foveationPreviewPass = selectedPass;
     auto slider = [&](int id) { return (float)SendMessageW(Control(id), TBM_GETPOS, 0, 0) / 100; };
     next.colourStrength = slider(Colour); model.skinStructure = slider(SkinStructure);
     next.skinDetail = slider(SkinDetail); next.skinColour = slider(SkinColour);
@@ -73,14 +131,13 @@ void App::ReadControls() {
     next.haloSuppression = number(HaloSuppression, 0, 1);
     next.haloBrightSuppression = number(HaloBrightSuppression, 0, 1);
     next.haloRadius = number(HaloRadius, 1, 4);
-    EnableWindow(Control(Upscaler), next.transfer != 2);
-    next.downscaler = choice(Downscaler);
+    EnableWindow(Control(Upscaler), !inheritResolution && resolution.transfer != 2);
     next.holdFrame = checked(HoldFrame); next.applyModel = checked(ApplyModel);
     next.debugView = choice(DebugView);
     next.compareSplit = slider(CompareSplit); next.compareZoom = slider(CompareZoom);
     next.compareSwap = checked(CompareSwap); next.compareLabels = checked(CompareLabels);
     next.labelScale = slider(LabelScale);
-    EnableWindow(Control(Downscaler), next.modelScale > 100);
+    EnableWindow(Control(Downscaler), !inheritResolution && resolution.modelScale > 100);
     next.inputColour = (unsigned)SendMessageW(Control(InputColour), CB_GETCURSEL, 0, 0);
     next.maxFps = (unsigned)std::lround(number(FpsLimit, 0, 360));
     next.enabled = SendMessageW(Control(Enabled), BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -125,7 +182,7 @@ LRESULT App::Message(UINT m, WPARAM w, LPARAM l) {
             } else if (id == BlackSlider) {
                 SetWindowTextW(Control(BlackLevel), std::format(L"{:.2f}", position / 100.0).c_str());
             } else if (id == ModelScale) {
-                SetWindowTextW(Control(ScaleLabel), std::format(L"Model resolution: {}% per dimension", position).c_str());
+                SetWindowTextW(Control(ScaleLabel), std::format(L"Pass {} resolution: {}% per dimension", selectedPass + 1, position).c_str());
             } else if (id >= Colour && id <= EnvironmentColour) {
                 SetWindowTextW(Control(id + 1000), std::format(L"{}: {:.2f}", AppearanceNames[id - Colour], position / 100.0).c_str());
             } else if (id == CompareSplit || id == CompareZoom || id == LabelScale) {
@@ -140,9 +197,23 @@ LRESULT App::Message(UINT m, WPARAM w, LPARAM l) {
             const int id = LOWORD(w), event = HIWORD(w);
             if (id == Refresh) ListSources();
             else if (id == Start) StartCapture();
-            else if (id == EditPass && event == CBN_SELCHANGE) {
-                ReadControls(); selectedPass = (unsigned)SendMessageW(Control(EditPass), CB_GETCURSEL, 0, 0); ShowPass();
+            else if ((id == EditPass || id == ResolutionPass || id == FoveationPass) && event == CBN_SELCHANGE) {
+                const auto nextPass = (unsigned)SendMessageW(Control(id), CB_GETCURSEL, 0, 0);
+                try { ReadControls(); }
+                catch (...) {
+                    for (int selector : {EditPass, ResolutionPass, FoveationPass})
+                        SendMessageW(Control(selector), CB_SETCURSEL, selectedPass, 0);
+                    throw;
+                }
+                selectedPass = std::min(nextPass, Settings::MaxPasses - 1);
+                { std::lock_guard lock(mutex); if (settings.showFoveation) settings.foveationPreviewPass = selectedPass; }
+                ShowPass();
             } else if (id == InheritPass && event == BN_CLICKED) { ReadControls(); ShowPass(); }
+            else if ((id == InheritResolution || id == InheritFoveation) && event == BN_CLICKED) {
+                const auto state = SendMessageW(Control(id), BM_GETCHECK, 0, 0);
+                SendMessageW(Control(id == InheritResolution ? InheritFoveation : InheritResolution), BM_SETCHECK, state, 0);
+                ReadControls(); ShowPass();
+            }
             else if (id == UnlockPasses && event == BN_CLICKED) {
                 ReadControls(); Settings value; { std::lock_guard lock(mutex); value = settings; }
                 SendMessageW(Control(Passes), CB_RESETCONTENT, 0, 0);
@@ -157,12 +228,14 @@ LRESULT App::Message(UINT m, WPARAM w, LPARAM l) {
                 if (GetOpenFileNameW(&picker)) SetWindowTextW(Control(RuntimePath), file);
             } else if ((((id >= Strength && id <= LocalTone) || id == ReferenceWhite || id == FpsLimit || id == HighlightGuard ||
                          id == PeakBrightness || id == BlackLevel || id == HaloSuppression ||
-                         id == HaloBrightSuppression || id == HaloRadius) && event == EN_KILLFOCUS) ||
+                         id == HaloBrightSuppression || id == HaloRadius ||
+                         (id >= FoveationCenterWidth && id <= FoveationShiftY)) && event == EN_KILLFOCUS) ||
                        ((id == Codec || id == Compare || id == Passes || id == Transfer || id == Upscaler || id == InputColour ||
                          id == Downscaler || id == Style || id == Preset || id == DebugView || id == Backend || id == FgMode) && event == CBN_SELCHANGE) ||
                        ((id == Enabled || id == MotionMode || id == SeparateSkin || id == PreviewSkin || id == AutoMask ||
-                         id == HoldFrame || id == ApplyModel || id == CompareSwap || id == CompareLabels) && event == BN_CLICKED)) {
-                ReadControls(); if (id == Passes) ShowPass();
+                         id == HoldFrame || id == ApplyModel || id == CompareSwap || id == CompareLabels ||
+                         id == FoveationEnabled || id == ShowFoveation) && event == BN_CLICKED)) {
+                ReadControls(); if (id == Passes || id == FoveationEnabled) ShowPass();
             }
             return 0;
         }

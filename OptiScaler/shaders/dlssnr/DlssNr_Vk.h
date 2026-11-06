@@ -61,6 +61,7 @@ class DlssNr_Vk : public Shader_Vk
     VkPipeline _finishedPipeline = VK_NULL_HANDLE;
     VkPipeline _spatialPipeline = VK_NULL_HANDLE;
     VkPipeline _spatialGuidesPipeline = VK_NULL_HANDLE;
+    VkPipeline _rawResidualPipeline = VK_NULL_HANDLE;
     VkImageLayout _intermediateLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
     VkDeviceSize _slotStride = 0; // sizeof(DlssNrConstants), rounded up to the device's alignment

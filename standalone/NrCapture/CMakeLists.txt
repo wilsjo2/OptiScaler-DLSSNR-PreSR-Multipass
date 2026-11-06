@@ -3,7 +3,7 @@ project(OptiScalerNR LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 get_filename_component(REPO "../.." ABSOLUTE)
-add_library(nr_capture_core STATIC Common.cpp Colour.cpp Gpu.cpp GpuTimings.cpp Runtime.cpp RuntimeDlss.cpp Processor.cpp Motion.cpp Scaling.cpp CaptureQueue.cpp FrameGeneration.cpp FrameGenerationFocus.cpp FrameGenerationOutput.cpp
+add_library(nr_capture_core STATIC Common.cpp Colour.cpp Gpu.cpp GpuTimings.cpp Runtime.cpp RuntimeDlss.cpp Processor.cpp ProcessorStages.cpp Motion.cpp Scaling.cpp Spatial.cpp CaptureQueue.cpp FrameGeneration.cpp FrameGenerationFocus.cpp FrameGenerationOutput.cpp
     AdaMfgUnlock.cpp
     "${REPO}/OptiScaler/dlssnr/DlssNr_GpuLifetime.cpp"
     "${REPO}/OptiScaler/dlssnr/DlssNr_CompatibilityRuntime.cpp")
@@ -42,6 +42,12 @@ add_custom_command(OUTPUT "${MOTION_SHADERS}/FrameGenerationEncode.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/FrameGenerationOutput.hlsl"
     DEPENDS FrameGenerationOutput.hlsl VERBATIM)
 target_sources(nr_capture_core PRIVATE "${MOTION_SHADERS}/FrameGenerationEncode.h")
+add_custom_command(OUTPUT "${MOTION_SHADERS}/SpatialPreview.h"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${MOTION_SHADERS}"
+    COMMAND "${FXC}" /nologo /Tcs_5_0 /EPreview /O3 /VnSpatialPreview /Fh "${MOTION_SHADERS}/SpatialPreview.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/SpatialPreview.hlsl"
+    DEPENDS SpatialPreview.hlsl "${REPO}/OptiScaler/shaders/dlssnr/precompile/dlssnr_spatial_warp.hlsli" VERBATIM)
+target_sources(nr_capture_core PRIVATE "${MOTION_SHADERS}/SpatialPreview.h")
 target_include_directories(nr_capture_core PRIVATE "${MOTION_SHADERS}")
 target_include_directories(nr_capture_core PUBLIC . "${REPO}/OptiScaler" "${REPO}/external/nvngx_dlss_sdk" "${REPO}/external/streamline" "${REPO}/external/nvapi"
     )
@@ -55,7 +61,7 @@ target_link_libraries(nr_capture_core PUBLIC d3d12 d3d11 dxgi windowsapp dcomp
 add_executable(OptiScalerNR WIN32 App.cpp AppControls.cpp AppSession.cpp Capture.cpp WgcCapture.cpp DxgiCapture.cpp Presentation.cpp)
 set_target_properties(OptiScalerNR PROPERTIES OUTPUT_NAME display_filter)
 target_link_libraries(OptiScalerNR PRIVATE nr_capture_core)
-add_executable(NrCaptureCheck Check.cpp QualityCheck.cpp QualityReference.cpp FeatureChecks.cpp HdrOutputCheck.cpp Capture.cpp WgcCapture.cpp DxgiCapture.cpp Presentation.cpp CaptureCheck.cpp MotionCheck.cpp GpuWaitCheck.cpp PerformanceCheck.cpp CaptureQueueCheck.cpp FrameGenerationCheck.cpp FrameGenerationPresentCheck.cpp ResidualCheck.cpp LoggingCheck.cpp)
+add_executable(NrCaptureCheck Check.cpp PassResolutionCheck.cpp QualityCheck.cpp QualityReference.cpp FeatureChecks.cpp HdrOutputCheck.cpp Capture.cpp WgcCapture.cpp DxgiCapture.cpp Presentation.cpp CaptureCheck.cpp MotionCheck.cpp GpuWaitCheck.cpp PerformanceCheck.cpp CaptureQueueCheck.cpp FrameGenerationCheck.cpp FrameGenerationPresentCheck.cpp ResidualCheck.cpp LoggingCheck.cpp)
 target_include_directories(NrCaptureCheck BEFORE PRIVATE check_adapters adapters)
 target_link_libraries(NrCaptureCheck PRIVATE nr_capture_core dbghelp)
 add_executable(NrMfgUnlockCheck AdaMfgUnlockCheck.cpp)

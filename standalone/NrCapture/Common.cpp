@@ -135,8 +135,33 @@ Settings LoadSettings(const std::filesystem::path& settingsFile) {
     s.captureBackend = (unsigned)number(L"CaptureBackend", 0, 0, 1);
     s.frameGeneration = (unsigned)number(L"FrameGeneration", 1, 1, 4);
     s.estimateMotion = number(L"EstimateMotion", 0, 0, 1) != 0;
+    const auto readSpatial = [&](const std::wstring& prefix, DlssNr::Spatial::Settings spatial) {
+        const auto value = [&](const wchar_t* key, float fallback, float low, float high) {
+            return number((prefix + key).c_str(), fallback, low, high);
+        };
+        spatial.enabled = value(L"SpatialCompression", spatial.enabled ? 1.f : 0.f, 0, 1) != 0;
+        spatial.centerX = value(L"SpatialCenterX", spatial.centerX, 1, 99);
+        spatial.centerY = value(L"SpatialCenterY", spatial.centerY, 1, 99);
+        spatial.workX = value(L"SpatialWorkX", spatial.workX, 25, 100);
+        spatial.workY = value(L"SpatialWorkY", spatial.workY, 25, 100);
+        spatial.offsetX = value(L"SpatialOffsetX", spatial.offsetX, -49, 49);
+        spatial.offsetY = value(L"SpatialOffsetY", spatial.offsetY, -49, 49);
+        spatial.shiftX = value(L"SpatialShiftX", spatial.shiftX, -49, 49);
+        spatial.shiftY = value(L"SpatialShiftY", spatial.shiftY, -49, 49);
+        return spatial;
+    };
+    s.spatial = readSpatial(L"", s.spatial);
     for (unsigned pass = 1; pass < Settings::MaxPasses; ++pass) {
         const auto key = [&](const wchar_t* field) { return std::format(L"Pass{}.{}", pass + 1, field); };
+        if (number(key(L"ResolutionOverride").c_str(), 0, 0, 1) != 0) {
+            auto resolution = s.PassResolution(pass);
+            resolution.modelScale = (unsigned)number(key(L"ModelScale").c_str(), float(resolution.modelScale), 25, 200);
+            resolution.downscaler = (unsigned)number(key(L"Downscaler").c_str(), float(resolution.downscaler), 0, 7);
+            resolution.transfer = (unsigned)number(key(L"Transfer").c_str(), float(resolution.transfer), 0, 2);
+            resolution.upscaler = (unsigned)number(key(L"Upscaler").c_str(), float(resolution.upscaler), 0, 1);
+            resolution.spatial = readSpatial(std::format(L"Pass{}.", pass + 1), resolution.spatial);
+            s.passResolutionOverrides[pass - 1] = resolution;
+        }
         if (number(key(L"Override").c_str(), 0, 0, 1) == 0) continue;
         auto model = s.PassModel(pass);
         model.intensity = number(key(L"Intensity").c_str(), model.intensity, 0, 2);
@@ -193,8 +218,29 @@ void SaveSettings(const Settings& s, const std::filesystem::path& settingsFile) 
     write(L"Style", std::to_wstring(s.model.style));
     write(L"Preset", std::to_wstring(s.model.preset));
     write(L"AutoMask", s.model.autoMask ? L"1" : L"0");
+    const auto writeSpatial = [&](const std::wstring& prefix, const DlssNr::Spatial::Settings& spatial) {
+        write((prefix + L"SpatialCompression").c_str(), spatial.enabled ? L"1" : L"0");
+        write((prefix + L"SpatialCenterX").c_str(), std::to_wstring(spatial.centerX));
+        write((prefix + L"SpatialCenterY").c_str(), std::to_wstring(spatial.centerY));
+        write((prefix + L"SpatialWorkX").c_str(), std::to_wstring(spatial.workX));
+        write((prefix + L"SpatialWorkY").c_str(), std::to_wstring(spatial.workY));
+        write((prefix + L"SpatialOffsetX").c_str(), std::to_wstring(spatial.offsetX));
+        write((prefix + L"SpatialOffsetY").c_str(), std::to_wstring(spatial.offsetY));
+        write((prefix + L"SpatialShiftX").c_str(), std::to_wstring(spatial.shiftX));
+        write((prefix + L"SpatialShiftY").c_str(), std::to_wstring(spatial.shiftY));
+    };
+    writeSpatial(L"", s.spatial);
     for (unsigned pass = 1; pass < Settings::MaxPasses; ++pass) {
         const auto key = [&](const wchar_t* field) { return std::format(L"Pass{}.{}", pass + 1, field); };
+        write(key(L"ResolutionOverride").c_str(), s.passResolutionOverrides[pass - 1] ? L"1" : L"0");
+        if (s.passResolutionOverrides[pass - 1]) {
+            const auto resolution = s.PassResolution(pass);
+            write(key(L"ModelScale").c_str(), std::to_wstring(resolution.modelScale));
+            write(key(L"Downscaler").c_str(), std::to_wstring(resolution.downscaler));
+            write(key(L"Transfer").c_str(), std::to_wstring(resolution.transfer));
+            write(key(L"Upscaler").c_str(), std::to_wstring(resolution.upscaler));
+            writeSpatial(std::format(L"Pass{}.", pass + 1), resolution.spatial);
+        }
         write(key(L"Override").c_str(), s.passOverrides[pass - 1] ? L"1" : L"0");
         if (!s.passOverrides[pass - 1]) continue;
         const auto model = s.PassModel(pass);

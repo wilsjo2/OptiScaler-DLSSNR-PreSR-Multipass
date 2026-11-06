@@ -135,6 +135,30 @@ float4 BoundPrivateUpscale(uint2 pixel)
 void CaptureColour(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= gWidth || id.y >= gHeight) return;
+    if (gMode == 20) {
+        // Raw encoded stages have already reconstructed to the capture size.
+        // Their replace resolve only keeps the model's nonnegative RGB and the
+        // input alpha; final scene/skin/HDR composition belongs to the host.
+        float2 uv = (id.xy + 0.5) / float2(gWidth, gHeight);
+        float3 model = gModel.SampleLevel(gLinear, uv, 0).rgb;
+        gTarget[id.xy] = float4(max(model, 0.0), gOriginal.Load(int3(id.xy, 0)).a);
+        return;
+    }
+    if (gMode == 21) {
+        float4 sample = gSource.Load(int3(id.xy, 0));
+        float4 encoded = float4(LinearToSrgb(max(sample.rgb / WhitePoint(), 0.0)), sample.a);
+        // Keep the exact same FP16 carrier that the ordinary SDR encode stores,
+        // so final composition can reuse this initial conversion.
+        gTarget[id.xy] = encoded; gKeep[id.xy] = encoded;
+        return;
+    }
+    if (gMode == 19) {
+        // Independent stages retain the legacy inter-pass bounded input.
+        float4 sample = gSource.Load(int3(id.xy, 0));
+        float4 bounded = float4(saturate(SanitizeFinite3(sample.rgb, 0.5)), sample.a);
+        gTarget[id.xy] = bounded; gKeep[id.xy] = bounded;
+        return;
+    }
     // Use OptiScaler's shared filter; private mode 13 is already the label pass.
     if (gMode == 18) { gTarget[id.xy] = NrSuppressHalo(int2(id.xy)); return; }
     if (gMode == 14 || gMode == 15) { gTarget[id.xy] = BoundPrivateUpscale(id.xy); return; }

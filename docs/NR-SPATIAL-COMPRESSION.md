@@ -27,6 +27,12 @@ Settings live under `[DlssNr]`:
 
 `WorkingScale` keeps its existing meaning and range. The packaged INI uses `auto` for these defaults.
 
+For independent layouts, select **Edit pass → Resolution and upscaling** and enable that pass's resolution
+override. The same spatial keys accept a `Pass2`…`Pass30` prefix, and absent fields inherit pass 1. Each
+stage packs and unpacks its own layout before handing a native-size encoded answer to the next stage.
+Final scene composition occurs once. Status reports each pass's dimensions and spatial fallback;
+compressed-input preview shows the final pass. See [per-pass processing and validation](../OptiScaler/dlssnr/README.md#independent-resolution-and-upscaling-per-pass).
+
 ## Processing and history
 
 The pack stage samples the encoded colour proxy with an adaptive peripheral filter. Depth is point-sampled from its active region. Motion is converted to native pixel displacement and warped through both endpoints, rather than multiplied by a single scale; offscreen endpoints use the mapping's edge extension. Packed guides and colour share one geometry.

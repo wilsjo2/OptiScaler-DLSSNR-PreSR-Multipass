@@ -8,8 +8,9 @@ public:
     explicit Motion(Gpu& gpu);
     void Resize(UINT width, UINT height);
     void Reset() { history = false; }
-    // Input must be NON_PIXEL_SHADER_RESOURCE. Submits the open list and waits
-    // for four bytes of scene-cut metadata, then opens a new list for NR.
+    // Input must be NON_PIXEL_SHADER_RESOURCE. Normal frames submit and wait
+    // for four bytes of scene-cut metadata, then open a new list. Known-reset
+    // frames only record luma history and zero vectors into the current list.
     bool Estimate(ID3D12Resource* input, bool reset);
     ID3D12Resource* Vectors() const { return vectors.Get(); }
 private:

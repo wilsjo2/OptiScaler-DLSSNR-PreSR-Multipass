@@ -12,6 +12,8 @@ try {
     & "$PSScriptRoot/run_nr_pipeline_capture.ps1"
     & "$PSScriptRoot/run_nr_streamline_hooks.ps1"
     & "$PSScriptRoot/run_nr_menu_overlay.ps1"
+    & "$PSScriptRoot/run_nr_pass_profiles_smoke.ps1"
+    & "$PSScriptRoot/run_nr_raw_residual_smoke.ps1"
     function RunSmoke($name, $libraries, $arguments = @(), $includes = @()) {
         $exe = Join-Path $out "$name.exe"
         & cl.exe /nologo /std:c++20 /EHsc /DNOMINMAX "/Fo$out/$name.obj" "/Fe$exe" @includes "$PSScriptRoot/$name.cpp" @libraries

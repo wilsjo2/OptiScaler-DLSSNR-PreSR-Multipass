@@ -13,10 +13,11 @@ RWTexture2D<float2> Result : register(u0);
 [numthreads(8,8,1)]
 void Resolve(uint3 id : SV_DispatchThreadID) {
     if (id.x >= Width || id.y >= Height) return;
+    if (Reset) { Result[id.xy] = 0; return; }
     float4 estimate = Coarse.SampleLevel(LinearClamp, (id.xy + 0.5) / float2(Width, Height), 0);
     // Low-confidence regions and scene cuts use zero vectors. The host resets NR
     // history for the same scene-cut frame after reading the tiny cut counter.
-    Result[id.xy] = (Reset || Cuts[uint2(0,0)] > CutLimit || estimate.w < 0.5) ? 0 : estimate.xy * 4;
+    Result[id.xy] = (Cuts[uint2(0,0)] > CutLimit || estimate.w < 0.5) ? 0 : estimate.xy * 4;
 }
 #else
 RWTexture2D<float4> Result : register(u0);
@@ -34,14 +35,16 @@ void Luma(uint3 id : SV_DispatchThreadID) {
 // An 8x8 group reuses the current image's 5x5 patches. Cache the 12x12 halo
 // once instead of reloading the same texels for every displacement candidate.
 groupshared float CurrentTile[144];
-float Cost(int2 p, float2 offset, float rejectAbove) {
+groupshared float PreviousZeroTile[144];
+float Cost(int2 p, float2 offset, float rejectAbove, bool cachedZero) {
     float error = 0;
     int2 local = p % 8 + 2;
     [unroll] for (int y=-2; y<=2; ++y) {
         [unroll] for (int x=-2; x<=2; ++x) {
             int2 q = clamp(p + int2(x,y), int2(0,0), int2(Width-1,Height-1));
             float a = CurrentTile[(local.y+y)*12+local.x+x];
-            float b = Previous.SampleLevel(LinearClamp, (q + offset + 0.5) / float2(Width,Height), 0).x;
+            float b = cachedZero ? PreviousZeroTile[(local.y+y)*12+local.x+x]
+                : Previous.SampleLevel(LinearClamp, (q + offset + 0.5) / float2(Width,Height), 0).x;
             error += abs(a-b);
         }
         // Remaining terms and the displacement penalty are non-negative. A
@@ -54,7 +57,11 @@ float Cost(int2 p, float2 offset, float rejectAbove) {
 void Estimate(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint3 lane : SV_GroupThreadID) {
     for (uint i=lane.y*8+lane.x; i<144; i+=64) {
         int2 q = int2(group.xy*8) + int2(i%12,i/12) - 2;
-        CurrentTile[i] = Current.Load(int3(clamp(q,int2(0,0),int2(Width-1,Height-1)),0)).x;
+        q = clamp(q,int2(0,0),int2(Width-1,Height-1));
+        CurrentTile[i] = Current.Load(int3(q,0)).x;
+        // Keep the same normalized SampleLevel coordinates as Cost(p, 0).
+        // Texture.Load would change filtering/coordinate rounding at some sizes.
+        PreviousZeroTile[i] = Previous.SampleLevel(LinearClamp, (float2(q) + 0.5) / float2(Width,Height), 0).x;
     }
     GroupMemoryBarrierWithGroupSync();
     if (id.x >= Width || id.y >= Height) return;
@@ -63,7 +70,7 @@ void Estimate(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint3 la
     // Always consider zero displacement: static UI and flat areas must not inherit
     // a nearby object's motion merely because the coarser estimate moved.
     float2 best = 0;
-    float bestCost = Cost(p,0,1e30), bestScore = bestCost;
+    float bestCost = Cost(p,0,1e30,true), bestScore = bestCost;
     // No candidate can beat a perfect zero-displacement match (ties retain zero).
     if (bestCost == 0) { Result[id.xy] = float4(0,0,0,1); return; }
     if (HasCoarse) {
@@ -71,7 +78,12 @@ void Estimate(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint3 la
         [unroll] for (int y=-1; y<=1; ++y) [unroll] for (int x=-1; x<=1; ++x) {
             int2 q=clamp(p/2+int2(x,y),int2(0,0),int2(cw-1,ch-1));
             float2 candidate=round(Coarse.Load(int3(q,0)).xy*2);
-            float cost=Cost(p,candidate,bestScore), score=cost+0.00002*dot(candidate,candidate);
+            // Zero and the current best were already scored. Nonnegative patch
+            // error also cannot rescue a penalty that already loses the tie.
+            if (all(candidate == 0) || all(candidate == best)) continue;
+            float penalty=0.00002*dot(candidate,candidate);
+            if (penalty >= bestScore) continue;
+            float cost=Cost(p,candidate,bestScore,false), score=cost+penalty;
             if (score<bestScore) { best=candidate; bestCost=cost; bestScore=score; }
         }
     }
@@ -79,16 +91,22 @@ void Estimate(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint3 la
     int radius = HasCoarse ? 2 : 4;
     [loop] for (int y=-radius; y<=radius; ++y) [loop] for (int x=-radius; x<=radius; ++x) {
         float2 candidate = centre + float2(x,y);
-        float cost = Cost(p,candidate,bestScore);
-        float score = cost + 0.00002 * dot(candidate,candidate);
+        if (all(candidate == 0) || all(candidate == best)) continue;
+        float penalty = 0.00002 * dot(candidate,candidate);
+        if (penalty >= bestScore) continue;
+        float cost = Cost(p,candidate,bestScore,false);
+        float score = cost + penalty;
         if (score < bestScore) { best = candidate; bestCost = cost; bestScore = score; }
     }
     // Refine to half a pyramid pixel (two full-resolution pixels at the finest level).
     centre = best;
     [unroll] for (int y=-1; y<=1; ++y) [unroll] for (int x=-1; x<=1; ++x) {
         float2 candidate = centre + float2(x,y)*0.5;
-        float cost = Cost(p,candidate,bestScore);
-        float score = cost + 0.00002 * dot(candidate,candidate);
+        if (all(candidate == 0) || all(candidate == best)) continue;
+        float penalty = 0.00002 * dot(candidate,candidate);
+        if (penalty >= bestScore) continue;
+        float cost = Cost(p,candidate,bestScore,false);
+        float score = cost + penalty;
         if (score < bestScore) { best = candidate; bestCost = cost; bestScore = score; }
     }
     if (!HasCoarse && bestCost > 0.12) InterlockedAdd(Cuts[uint2(0,0)],1);

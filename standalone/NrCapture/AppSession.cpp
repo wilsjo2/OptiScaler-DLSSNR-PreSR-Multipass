@@ -148,10 +148,20 @@ void App::Run(CaptureSource source, Settings initial) {
             if (fresh) { latencySum += lastFrame - capture.timestamp; ++frames; resets += processor.historyReset ? 1 : 0; }
             if (lastFrame - reportAt >= 2000 && frames) {
                 DXGI_QUERY_VIDEO_MEMORY_INFO memory{}; g.adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &memory);
-                auto text = std::format("{}x{} | model {}x{} ({}) | {} | {:.1f} processed fps | {:.1f} ms source-frame age at Present return | {:.0f} MiB app VRAM | {} motion | {} pass(es) | {:.0f}-nit reference white",
-                    capture.width, capture.height, processor.modelWidth, processor.modelHeight,
-                    current.modelScale > 100 ? "supersampled" : current.modelScale == 100 ? "native" :
-                        current.upscaler == 1 ? (current.transfer == 1 ? "DLSS SR edit" : "DLSS SR colour") : "bilinear",
+                std::string passSizes;
+                for (unsigned pass = 0; pass < current.passes; ++pass) {
+                    const auto resolution = current.PassResolution(pass);
+                    const auto layout = DlssNr::Spatial::Build(resolution.spatial, capture.width, capture.height, resolution.modelScale * .01f);
+                    const auto [modelWidth, modelHeight] = processor.PassModelSize(pass);
+                    const char* reconstruction = resolution.modelScale > 100 ? "supersampled" :
+                        resolution.modelScale == 100 ? "native" : resolution.transfer == 2 ? "edge-aware" :
+                        resolution.upscaler == 1 ? "DLSS SR" : "bilinear";
+                    if (!passSizes.empty()) passSizes += ", ";
+                    passSizes += std::format("P{} {}x{} {}{}", pass + 1, modelWidth, modelHeight,
+                        reconstruction, layout.active ? "/foveated" : "");
+                }
+                auto text = std::format("{}x{} | {} | {} | {:.1f} processed fps | {:.1f} ms source-frame age at Present return | {:.0f} MiB app VRAM | {} motion | {} pass(es) | {:.0f}-nit reference white",
+                    capture.width, capture.height, passSizes,
                     current.inputColour == 1 || (current.inputColour == 0 && !hdr) ? "finished SDR" : "HDR proxy",
                     frames * 1000.0 / (lastFrame - reportAt),
                     latencySum / frames, memory.CurrentUsage / 1048576.0, current.estimateMotion ? "estimated" : "zero", current.passes,
@@ -170,6 +180,7 @@ void App::Run(CaptureSource source, Settings initial) {
                     initial.captureBackend ? "DXGI" : "WGC", acquiredFps, timings.gpuWait / frames, timings.present / frames);
                 if (current.holdFrame) text += " | held frame";
                 if (!current.applyModel) text += " | edit hidden";
+                if (current.showFoveation) text += std::format(" | wireframe: pass {}", current.foveationPreviewPass + 1);
                 Say(Wide(text));
                 if (diagnostics || lastFrame - lastLog >= 30000) { Log(text); lastLog = lastFrame; }
                 if (diagnostics) {

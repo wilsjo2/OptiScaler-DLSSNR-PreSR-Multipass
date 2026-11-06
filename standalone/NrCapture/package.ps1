@@ -32,6 +32,7 @@ foreach ($file in @('README.md', 'VALIDATION.md', 'ALIGNMENT.md', 'PARITY.md', '
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../../LICENSE') -Destination (Join-Path $target 'LICENSE') -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../../Licenses/MFGUnlock_LICENSE.txt') -Destination (Join-Path $target 'MFGUnlock_LICENSE.txt') -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../../Licenses/RenoDX_ATTRIBUTION.txt') -Destination (Join-Path $target 'RenoDX_ATTRIBUTION.txt') -Force
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../../external/peripheral_warp/LICENSE') -Destination (Join-Path $target 'PeripheralWarp_LICENSE.txt') -Force
 $runtimeHash = $null
 if ($Runtime) {
     $runtimeDirectory = Join-Path $target 'runtime'

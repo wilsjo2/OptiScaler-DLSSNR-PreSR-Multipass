@@ -9,6 +9,7 @@
 #include <nvsdk_ngx_vk.h>
 #include <shaders/output_scaling/OS_Vk.h>
 #include <mutex>
+#include <vector>
 
 namespace DlssNr
 {
@@ -115,6 +116,20 @@ constexpr uint32_t kTimingSlots = 4;
 
 struct ModelVk::Impl
 {
+    // Each independently sized stage owns its constants, descriptors and temporal history.
+    // The model is destroyed before the shader it references.
+    struct IndependentPass
+    {
+        std::unique_ptr<DlssNr_Vk> shader;
+        std::unique_ptr<Impl> model;
+        ImageVk output;
+        ModelSettings settings;
+        Profiles::ResolutionSettings resolution;
+    };
+    std::vector<IndependentPass> independentPasses;
+    uint32_t independentWidth = 0, independentHeight = 0;
+    bool independentBeforeSr = false, independentRayReconstruction = false;
+    StatusSnapshot independentStatus;
     VkState state;
     bool reported = false;
     bool warnedVkSuper = false;
@@ -123,12 +138,8 @@ struct ModelVk::Impl
     bool warnedDeferred = false;
     std::mutex mutex;
     uint64_t retryGeneration = ReadControlRequests().retryGeneration;
-    Impl(DlssNr_Vk& shader) { state.pass = &shader; }
-    ~Impl()
-    {
-        Shutdown();
-        ClearStatus(this);
-    }
+    explicit Impl(DlssNr_Vk& shader);
+    ~Impl();
 
     void Fail(const char* why);
     bool CreateImage(ImageVk& img, uint32_t width, uint32_t height, VkFormat format);
@@ -147,10 +158,17 @@ struct ModelVk::Impl
     bool FormatCanHoldLinearHdr(VkFormat format);
     bool PrepareModels(VkCommandBuffer cmdBuffer, const DlssNrFrameInfo_Vk& frame, uint32_t width, uint32_t height,
                        uint32_t workWidth, uint32_t workHeight, float workScale, unsigned int passes,
-                       const Spatial::Layout& spatial);
+                       const Spatial::Layout& spatial, const Config& config);
+    bool PrepareIndependent(uint32_t width, uint32_t height, unsigned int passes,
+                            const DlssNrFrameInfo_Vk& frame, const Config& config);
+    void ReleaseIndependent();
+    bool EvaluateIndependent(VkCommandBuffer cmdBuffer, const VkImageInfo& depth, const VkImageInfo& motion,
+                             const VkImageInfo& target, const DlssNrFrameInfo_Vk& frame, const Config& config,
+                             const DlssNrConstants& encode, VkImageView exposure);
     bool Evaluate(VkCommandBuffer cmdBuffer, const VkImageInfo& colourInfo, const VkImageInfo& depthInfo,
                   const VkImageInfo& motionInfo, const VkImageInfo& target, const DlssNrFrameInfo_Vk& frame,
-                  VkInstance instance, VkPhysicalDevice physicalDevice, VkDevice device, VkImageLayout inputLayout);
+                  VkInstance instance, VkPhysicalDevice physicalDevice, VkDevice device, VkImageLayout inputLayout,
+                  const Config* passConfig = nullptr);
     void Shutdown();
 };
 } // namespace DlssNr

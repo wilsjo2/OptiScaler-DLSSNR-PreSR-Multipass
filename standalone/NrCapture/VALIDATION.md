@@ -317,3 +317,57 @@ A fresh x64 Release build passed. Tests used the RTX 5090, NVIDIA NR 310.8, the 
 The old HDR peak fixture also failed on the pre-update executable: Hybrid replace produced a 658.8-nit peak, below its fixed 1000-nit test target. The fixture now selects a target below the measured peak (up to 1000 nits), and still requires highlight reduction, the ceiling, unchanged lower tones and exact neutral restoration. No production HDR adjustment was changed.
 
 The rebuilt controls window opened and displayed the new tabs and model selector. Live capture/gameplay and visual image quality were not tested in this update. Full logs are in the source standalone/NrCapture folder as *-20261028.log. The previous executable is retained in out-before-20261028.
+## Independent pass resolution and foveation (November 6, 2026)
+
+Both standalone and addon Release/x64 builds succeeded. Standalone validation used the saved Cyberpunk street/vendor fixture at 640x360 with NR 310.8 and `NR_CAPTURE_DEBUG=1`.
+
+`NrCaptureCheck --pass-resolution-check 1` passed:
+
+- Independent 50/125/67% passes evaluated at 320x180, 800x450 and 429x241, with distinct private-DLSS, bilinear and edge-aware results.
+- Shared-profile foveation evaluated both passes at 448x270. Independent layouts evaluated pass 1 at 448x270 and pass 2 at 480x316, against ordinary sizes of 640x360 and 800x450.
+- Per-pass centre changes, selected/inactive-pass grid previews, exact restoration after hiding the grid, settings persistence and inactive-profile isolation.
+- Temporal accumulation resumed after local and upstream layout resets; the test directly inspected the downstream pass's reset flag.
+- Frozen-source preservation across source changes and pass resizing, original alpha, finite output, SDR/HDR processing and exact disabled/zero-strength/hidden-edit/skin bypasses.
+- No D3D12 error/corruption diagnostics during these checks.
+
+The existing `--feature-check 1` suite passed, including 1/10-pass transitions, supersampling filters, private DLSS, motion, appearance/comparison and all five HDR mappings. The existing `--quality-check 1 --passes 2 --motion 1` check also passed: raw, composed and 12-frame temporal comparisons with the actual OptiScaler wrapper all had zero mean RGB difference on the unchanged shared-profile path.
+
+Evidence: `out-per-pass/pass-resolution.log`, `features.log`, `quality.log`, and `results/`. Both selected-pass wireframe PNGs were visually inspected: spacing becomes denser in each pass's fixed central region and wider toward its compressed periphery. The new controls were reviewed in source; a live GUI/capture session was not restarted because the user's existing Display Filter was running. These checks do not establish in-game performance or visual parity for independent addon passes. Addon profile and raw-reconstruction WARP checks passed; no game was launched or addon installed into a running game.
+
+## Performance update (November 6, 2026)
+
+The investigation used the actual current standalone per-pass build as the baseline. A separate instrumented baseline executable was preserved in `out-perf/baseline/` before pipeline changes. Original settings and the running user application were not replaced.
+
+Confirmed code costs and changes:
+
+- Independent passes estimated the same captured source repeatedly, with a blocking scene-cut readback per estimate. Passes with identical ordinary dimensions and input filter now share the exact estimate and independently transform it for foveation. Local/upstream resets retain their previous semantics.
+- The independent chain encoded the source again during final composition. The initial encoded proxy and original carrier are now reused. Intermediate raw stages use a small equivalent resolve after reconstruction instead of running the general appearance shader.
+- The compose-only host allocated unused proxy, NR answer, depth and zero-motion textures. Removing them saves 24 bytes per capture pixel: 189.8 MiB at 3840x2160. The unused SDR input carrier is also avoided when applicable.
+- Motion search now caches the zero-offset previous-image patches, skips previously scored or provably losing candidates, and avoids search dispatches/readback waits on already-known reset frames. Normal-frame scene cuts are still detected immediately.
+- The old GPU stage timer overwrote prior passes with the final pass. It now accumulates distinct timestamp intervals. The benchmark also measures per-frame Resize (only a few microseconds in these runs), uses a deterministic moving fixture and hashes final RGBA output outside timing.
+
+### Repeated 4K comparison
+
+RTX 5090, driver 621.01, NR 310.8; saved Cyberpunk fixture translated by 7/3 pixels per frame. HDR/Hybrid composed, 213-nit reference, Original model, Cinematic style. Each run measured 60 frames after five warmup frames. Each profile ran old/new/new/old in separate processes, with two runs averaged for each build. Debug validation was disabled for timing. Game/desktop activity continued sharing the GPU; these are headless processing measurements, not isolated timings or live game FPS. No capture, presentation or FG interpolation is included in this table.
+
+| Pass profile | Baseline GPU span | Updated GPU span | Interpretation |
+| --- | ---: | ---: | --- |
+| One native pass, motion off (control) | 14.94 ms | 14.29 ms | Unchanged rendering path; variation illustrates contention/noise |
+| 100% then 25%, bilinear, motion off | 20.63 ms | 20.45 ms | No meaningful measured throughput improvement |
+| 100% then 25%, private DLSS, motion off | 21.21 ms | 21.26 ms | No meaningful measured throughput improvement |
+| 25% private DLSS then 100%, motion off | 21.58 ms | 21.26 ms | No meaningful measured throughput improvement |
+| Two independent 50% passes, motion on | 20.19 ms | 17.15 ms | About 15.1% less GPU processing time |
+
+For the final row, the accumulated input-motion interval fell from 8.35 to 4.63 ms (about 44.5%). The earlier single sweep measured 23.59 to 17.21 ms for that case; the repeated comparison above is the reported result. Full-resolution NR remains the dominant cost in the motion-off cases. The severe reported live slowdown with a quarter-resolution extra pass was not established as fixed by these measurements.
+
+A 25% pass has 6.25% of native NR pixels, but still reconstructs to the capture size. Capture, optional private SR, external FG guides/interpolation and presentation retain output-resolution costs. Addon percentages can refer to the engine render subrect before upscaling, and it receives engine guides. Therefore identical percentages/pass counts alone do not establish matched standalone/addon workloads. The matched-input wrapper correctness comparison still passes; no live addon performance comparison is claimed.
+
+### Correctness and evidence
+
+Release build, D3D12-debug-layer per-pass and motion checks, full feature regression checks, and the two-pass temporal quality/reference check passed. The new shared-motion check compares a moving six-frame sequence against independent estimates, including distinct foveation layouts and a local reset, with exact output equality. All seven saved source/processed/wireframe PNGs matched the earlier per-pass version. All six initial benchmark output hashes and all repeated old/new hashes matched for their respective fixture/profile/frame counts. No model scale, appearance control, preset or reconstruction setting was reduced to obtain these results.
+
+Evidence: `out-perf/motion.log`, `pass-resolution.log`, `features.log`, `quality.log`, `paired-measurements.csv`, `paired-summary.csv`, and the `paired-old-*` / `paired-new-*` logs. Profiles and reproduction scripts are in `out-perf/profiles`, `bench.ps1` and `paired.ps1`.
+
+The original performance check incorrectly reset independent FG preparation every frame when NR motion was off. This has been corrected to match the live app's reset condition. The initial `out-perf/baseline-fg/` results are explicitly marked invalid and are not used for improvement claims. Benchmark FG preparation excludes actual interpolation and presentation.
+
+A supplementary retained-motion run with two independent 50% passes plus independent FG guide preparation measured 24.66 -> 20.46 ms GPU span; its full-resolution FG motion interval fell from 5.02 -> 3.07 ms. Final NR-output hashes matched. This single old/new pair is supporting evidence for the motion-search changes, not a measured interpolation or live-game FPS result. Logs: out-perf/fg-motion-old and out-perf/fg-motion-new.

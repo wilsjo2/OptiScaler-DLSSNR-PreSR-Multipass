@@ -10,6 +10,7 @@
 #include <array>
 #include <optional>
 #include <dlssnr/DlssNr_ModelParameters.h>
+#include <shaders/dlssnr/DlssNr_Spatial.h>
 namespace nr {
 template<class T> using ComPtr = Microsoft::WRL::ComPtr<T>;
 void Check(HRESULT result, const char* operation);
@@ -31,11 +32,17 @@ struct Handle {
     Handle(const Handle&) = delete;
     Handle& operator=(const Handle&) = delete;
 };
+struct PassResolutionSettings {
+    unsigned modelScale = 100, downscaler = 4, transfer = 1, upscaler = 0;
+    DlssNr::Spatial::Settings spatial{};
+    bool operator==(const PassResolutionSettings&) const = default;
+};
 struct Settings {
     static constexpr unsigned MaxPasses = 10;
     std::filesystem::path runtime;
     DlssNr::ModelSettings model{0, 0, 1, 1, 1, -1, true}; // Match OptiScaler's first-pass defaults.
     std::array<std::optional<DlssNr::ModelSettings>, MaxPasses - 1> passOverrides{};
+    std::array<std::optional<PassResolutionSettings>, MaxPasses - 1> passResolutionOverrides{};
     bool unlockPasses = false;
     float strength = 1.0f;
     float colourStrength = 1.0f;
@@ -56,6 +63,9 @@ struct Settings {
     bool holdFrame = false, applyModel = true;
     unsigned transfer = 1; // 0 classic composition, 1 matched residuals, 2 edge-aware (spatial only).
     unsigned upscaler = 0; // 0 bilinear, 1 private DLSS SR below native size.
+    DlssNr::Spatial::Settings spatial{}; // Pass 1's peripheral compression; later passes can override it.
+    bool showFoveation = false; // Session-only wireframe preview of one pass's actual mapping.
+    unsigned foveationPreviewPass = 0;
     unsigned compare = 0; // 0 processed, 1 original, 2 wipe, 3 side by side (same captured frame).
     bool enabled = true;
     bool estimateMotion = false;
@@ -69,6 +79,15 @@ struct Settings {
     DlssNr::ModelSettings PassModel(unsigned pass) const {
         if (pass && passOverrides.at(pass - 1)) return *passOverrides[pass - 1];
         auto value = model; if (pass) value.localTone = 0; return value;
+    }
+    PassResolutionSettings PassResolution(unsigned pass) const {
+        if (pass && passResolutionOverrides.at(pass - 1)) return *passResolutionOverrides[pass - 1];
+        return {modelScale, downscaler, transfer, upscaler, spatial};
+    }
+    bool HasPassResolutionOverrides() const {
+        for (unsigned pass = 1; pass < std::min(passes, MaxPasses); ++pass)
+            if (passResolutionOverrides[pass - 1]) return true;
+        return false;
     }
     auto Models() const {
         std::array<DlssNr::ModelSettings, MaxPasses> result{};

@@ -2,6 +2,12 @@
 
 Choose this Enlargement mode below 100% model resolution for ordinary post-upscale or finished-picture NR. Keep both early-generation options off. INI: `Transfer=2`; spatial Matched residual remains the default (`1`). At 100%, ordinary full-resolution NR replaces the private context.
 
+The private upscaler selector now also chooses the backend used by temporal enlargement (DLSS, FSR 2.2,
+FidelityFX or XeSS, subject to the selected backend being available). **Edit pass → Resolution and
+upscaling** can override model scale, enlargement and backend for each pass. Each stage reconstructs its
+encoded answer; overall HDR, strength and skin composition runs once after the chain. Native Vulkan
+continues to reject temporal enlargement explicitly. See [per-pass controls and validation](../OptiScaler/dlssnr/README.md#independent-resolution-and-upscaling-per-pass).
+
 ## Optional lighting and colour reconstruction
 
 `Lighting + colour` (`Transfer=3`) brings the Display Filter structural composition path into OptiScaler. It measures lighting gain and chromaticity changes against the exact low-resolution model input, resizes those separately with bilinear filtering, and reconstructs the answer on the full-resolution proxy. Existing HDR composition, strength and skin controls then apply once. Native Vulkan and DX12 processing share this shader path, including pre-upscale and finished-picture placement. The resolution here is the NR injection surface, not necessarily the swapchain size.

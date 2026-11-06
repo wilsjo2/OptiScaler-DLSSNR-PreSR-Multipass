@@ -7,16 +7,17 @@ This build implements the in-game NR controls that apply to a finished captured 
 | Model passes | 1–2 normally, unlock up to 10; independent feature handles, tuning and history |
 | Pass editing | All ten profiles can be edited while inactive; later passes inherit pass 1 with tone 0, or use a complete custom profile |
 | Model controls | Intensity, local structure, local tone, skin structure, Standard/Natural/Cinematic style, Automatic/Original/Optimized model labels (runtime support required), legacy preset 3, auto skin mask |
-| Working resolution | 25–200%; captured output dimensions stay fixed |
+| Working resolution | 25–200% independently per pass; captured output dimensions stay fixed |
 | Supersampling | Same compiled Bicubic input enlargement and eight reduction filters as OptiScaler; FSR1 selection uses its own shader for both directions |
 | Subnative enlargement | Classic, matched residuals and private DLSS SR, plus spatial edge-aware enlargement; synthetic guides remain a limitation |
+| Foveation | Per-pass peripheral compression with a fixed adjustable centre, independent bands/budgets, and a temporary warped wireframe preview |
 | Halo suppression | Shared dark-rim filters around bright/dark objects, strengths 0–1, radius 1–4 NR pixels; disabled by default |
 | Colour | All five HDR mappings; reference white; explicit SDR/HDR input interpretation |
 | Composition | Detail and colour strengths, 1–8× highlight guard, independent skin/environment detail and colour, mask preview |
 | Inspection | Frozen capture, hidden model edit while NR runs, original view, wipe/split, side-by-side/zoom, swap, labels/size, three debug views |
 | Standalone operation | Monitor/window selection, bounded capture queue, optional motion estimation, adjustable FPS limit, stop hotkey |
 
-Pass inheritance is selected for the whole profile instead of separate per-field reset buttons. The labels use a small built-in bitmap font rather than the game's ImGui font. Hold/inspection states are session-only so the application starts with an ordinary live processed picture. Existing INI values are retained; new profile and composition fields are stored alongside them.
+Model tuning and resolution/foveation have separate inheritance switches. Each switch controls its whole profile rather than individual fields. The labels use a small built-in bitmap font rather than the game's ImGui font. Hold/inspection states are session-only so the application starts with an ordinary live processed picture. Existing INI values are retained; new profile and composition fields are stored alongside them.
 
 Game-owned features have no external-capture equivalent: pre-SR placement, carrying an early edit across SR/RR, fitting that edit to a later engine HDR buffer, native depth/motion/exposure guides, game frame generation, graphics-API bridges and game quirks. The standalone does not add hooks or access another process to provide these.
 

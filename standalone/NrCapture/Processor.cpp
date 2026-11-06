@@ -27,19 +27,24 @@ Processor::Processor(Gpu& g) : gpu(g) {
     pipeline.CS = {CaptureColour, sizeof(CaptureColour)};
     Check(gpu.device->CreateComputePipelineState(&pipeline, IID_PPV_ARGS(&captureColour)), "Capture colour conversion");
     D3D12_DESCRIPTOR_HEAP_DESC h{}; h.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    h.NumDescriptors = 98; h.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    h.NumDescriptors = 105; h.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     Check(gpu.device->CreateDescriptorHeap(&h, IID_PPV_ARGS(&heap)), "NR descriptors");
     stride = gpu.device->GetDescriptorHandleIncrementSize(h.Type);
-    constants = gpu.Buffer(14 * 256, D3D12_HEAP_TYPE_UPLOAD);
+    constants = gpu.Buffer(15 * 256, D3D12_HEAP_TYPE_UPLOAD);
 }
 Processor::~Processor() {
+    stages.clear();
     // Share the same fence-backed retention used by the in-game NR implementation.
     gpu.lifetime.Retire([model = std::move(runtime), flow = std::move(opticalFlow), a = std::move(proxy), b = std::move(original),
         c = std::move(answer), d = std::move(output), e = std::move(depth), f = std::move(motion),
         full = std::move(fullProxy), flowSource = std::move(flowInput), filtered = std::move(filteredAnswer),
         srInput = std::move(resizeInput), upscaled = std::move(enlarged), bounded = std::move(boundedDlss), unit = std::move(exposure),
         encoded = std::move(sdrInput), composed = std::move(sdrOutput), held = std::move(heldInput), conversion = std::move(captureColour),
-        labels = std::move(labelled), filters = std::move(scaling), native = std::move(nativeAnswer), next = std::move(passInput), cb = std::move(constants), descriptors = std::move(heap), rs = std::move(root), pso = std::move(shader)] {});
+        labels = std::move(labelled), filters = std::move(scaling), native = std::move(nativeAnswer), next = std::move(passInput),
+        spatial = std::move(spatialShader), packed = std::move(packedProxy), packedResult = std::move(packedAnswer),
+        packedZ = std::move(packedDepth), packedMv = std::move(packedMotion), packedNext = std::move(packedPassInput),
+        grid = std::move(gridOutput), chain = std::move(chainInput),
+        cb = std::move(constants), descriptors = std::move(heap), rs = std::move(root), pso = std::move(shader)] {});
     gpu.lifetime.Collect();
 }
 D3D12_CPU_DESCRIPTOR_HANDLE Processor::Cpu(UINT i) const {
@@ -48,7 +53,7 @@ D3D12_CPU_DESCRIPTOR_HANDLE Processor::Cpu(UINT i) const {
 D3D12_GPU_DESCRIPTOR_HANDLE Processor::GpuHandle(UINT i) const {
     auto h = heap->GetGPUDescriptorHandleForHeapStart(); h.ptr += UINT64(i) * stride; return h;
 }
-void Processor::Resize(UINT w, UINT h, const Settings& s) {
+void Processor::ResizeLegacy(UINT w, UINT h, const Settings& s) {
     if (!w || !h || w > 7680 || h > 4320) throw std::runtime_error("Capture extent is outside the prototype's 8K limit.");
     if (s.passes < 1 || s.passes > Settings::MaxPasses) throw std::runtime_error("Choose 1-10 NR passes.");
     if (s.modelScale < 25 || s.modelScale > 200) throw std::runtime_error("Model resolution must be 25-200%.");
@@ -56,7 +61,15 @@ void Processor::Resize(UINT w, UINT h, const Settings& s) {
         throw std::runtime_error("Unknown upscaler or edit transfer.");
     const UINT mw = std::max(1u, (w * s.modelScale + 50) / 100);
     const UINT mh = std::max(1u, (h * s.modelScale + 50) / 100);
-    const bool resized = width != w || height != h || modelWidth != mw || modelHeight != mh;
+    auto nextSpatial = DlssNr::Spatial::Build(s.spatial, w, h, s.modelScale * .01f);
+    // Preserve the legacy integer rounding for ordinary resources. The shared
+    // float-scale builder can round half pixels differently for odd extents.
+    nextSpatial.ordinaryW = mw; nextSpatial.ordinaryH = mh;
+    if (nextSpatial.requested && !nextSpatial.active && nextSpatial.reason != "work is 100% on both axes")
+        throw std::runtime_error("Invalid foveation layout: " + nextSpatial.reason);
+    const bool spatialChanged = spatialLayout != nextSpatial;
+    const bool resized = width != w || height != h || modelWidth != mw || modelHeight != mh || spatialChanged ||
+        (!composeOnly && !proxy);
     const bool useDlss = s.upscaler == 1 && s.transfer != 2 && (mw < w || mh < h);
     if (s.modelScale > 100 && !scaling) scaling = std::make_shared<Scaling>(gpu);
     if (resized || (!s.estimateMotion && flowInput) || (s.estimateMotion && (mw != w || mh != h) && !flowInput)) {
@@ -74,44 +87,72 @@ void Processor::Resize(UINT w, UINT h, const Settings& s) {
     if (!resized && activeModels == s.Models() && activePasses == s.passes && privateDlss == useDlss) return;
     if (opticalFlow) opticalFlow->Reset();
     if (!gpu.Drain()) throw std::runtime_error("GPU timeout while rebuilding NR.");
+    spatialLayout = nextSpatial;
     runtime->ReleaseDlss(); privateDlss = false;
     resizeInput.Reset(); enlarged.Reset(); boundedDlss.Reset(); exposure.Reset();
     if (mw < w || mh < h) resizeInput = gpu.Texture(mw, mh, DXGI_FORMAT_R16G16B16A16_FLOAT);
     if (s.passes == 1) passInput.Reset();
     else if (!passInput || resized) passInput = gpu.Texture(mw, mh, DXGI_FORMAT_R16G16B16A16_FLOAT);
     if (resized) {
+        packedProxy.Reset(); packedAnswer.Reset(); packedDepth.Reset(); packedMotion.Reset(); packedPassInput.Reset();
+        gridOutput.Reset(); gridReadable = false;
         filteredAnswer.Reset();
         labelled.Reset(); labelsReadable = false;
         nativeAnswer.Reset();
         if (mw != w || mh != h) nativeAnswer = gpu.Texture(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT);
         if (width != w || height != h) { heldInput.Reset(); heldValid = false; }
         sdrInput.Reset(); sdrOutput.Reset();
-        proxy = gpu.Texture(mw, mh, DXGI_FORMAT_R16G16B16A16_FLOAT);
+        if (!composeOnly) proxy = gpu.Texture(mw, mh, DXGI_FORMAT_R16G16B16A16_FLOAT);
         fullProxy.Reset();
-        if (mw != w || mh != h) fullProxy = gpu.Texture(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT);
+        if (mw != w || mh != h || spatialLayout.active) fullProxy = gpu.Texture(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT);
         original = gpu.Texture(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT);
-        answer = gpu.Texture(mw, mh, DXGI_FORMAT_R16G16B16A16_FLOAT);
+        if (!composeOnly) answer = gpu.Texture(mw, mh, DXGI_FORMAT_R16G16B16A16_FLOAT);
         output = gpu.Texture(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT);
-        depth = gpu.Texture(mw, mh, DXGI_FORMAT_R32_FLOAT);
-        motion = gpu.Texture(mw, mh, DXGI_FORMAT_R16G16_FLOAT);
+        if (!composeOnly) {
+            depth = gpu.Texture(mw, mh, DXGI_FORMAT_R32_FLOAT);
+            motion = gpu.Texture(mw, mh, DXGI_FORMAT_R16G16_FLOAT);
+        }
         outputReadable = false; width = w; height = h;
         modelWidth = mw; modelHeight = mh;
-        gpu.Begin();
-        ID3D12DescriptorHeap* heaps[]{heap.Get()}; gpu.commands->SetDescriptorHeaps(1, heaps);
-        const float one[]{1, 1, 1, 1}, zero[]{0, 0, 0, 0};
-        gpu.device->CreateUnorderedAccessView(depth.Get(), nullptr, nullptr, Cpu(63));
-        gpu.device->CreateUnorderedAccessView(motion.Get(), nullptr, nullptr, Cpu(64));
-        gpu.commands->ClearUnorderedAccessViewFloat(GpuHandle(63), Cpu(63), depth.Get(), one, 0, nullptr);
-        gpu.commands->ClearUnorderedAccessViewFloat(GpuHandle(64), Cpu(64), motion.Get(), zero, 0, nullptr);
-        Barrier(gpu.commands.Get(), depth.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        Barrier(gpu.commands.Get(), motion.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        gpu.Submit(); if (!gpu.Drain()) throw std::runtime_error("Guide initialization timeout.");
+        if (!composeOnly) {
+            gpu.Begin();
+            ID3D12DescriptorHeap* heaps[]{heap.Get()}; gpu.commands->SetDescriptorHeaps(1, heaps);
+            const float one[]{1, 1, 1, 1}, zero[]{0, 0, 0, 0};
+            gpu.device->CreateUnorderedAccessView(depth.Get(), nullptr, nullptr, Cpu(63));
+            gpu.device->CreateUnorderedAccessView(motion.Get(), nullptr, nullptr, Cpu(64));
+            gpu.commands->ClearUnorderedAccessViewFloat(GpuHandle(63), Cpu(63), depth.Get(), one, 0, nullptr);
+            gpu.commands->ClearUnorderedAccessViewFloat(GpuHandle(64), Cpu(64), motion.Get(), zero, 0, nullptr);
+            Barrier(gpu.commands.Get(), depth.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            Barrier(gpu.commands.Get(), motion.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            gpu.Submit(); if (!gpu.Drain()) throw std::runtime_error("Guide initialization timeout.");
+        }
     }
-    gpu.Begin();
-    const auto created = runtime->Create(gpu.commands.Get(), mw, mh, s.model, s.passes, s.passOverrides);
-    // Even failed creation may record commands: finish its submission before releasing ownership.
-    gpu.Submit(); if (!gpu.Drain()) throw std::runtime_error("NR creation timeout.");
-    Runtime::CheckResult(created, "NR feature creation"); activeModels = s.Models(); activePasses = s.passes;
+    if (composeOnly) {
+        // The host only composes the children's answer against preparedProxy.
+        // Do not retain a second unused native NR input/output and guide set.
+        proxy.Reset(); answer.Reset(); depth.Reset(); motion.Reset(); sdrInput.Reset();
+    }
+    if (spatialLayout.active) {
+        if (!spatialShader) spatialShader = std::make_shared<Spatial>(gpu);
+        const auto sw = spatialLayout.modelW, sh = spatialLayout.modelH;
+        if (!packedProxy) {
+            packedProxy = gpu.Texture(sw, sh, DXGI_FORMAT_R16G16B16A16_FLOAT);
+            packedAnswer = gpu.Texture(sw, sh, DXGI_FORMAT_R16G16B16A16_FLOAT);
+            packedDepth = gpu.Texture(sw, sh, DXGI_FORMAT_R32_FLOAT);
+            packedMotion = gpu.Texture(sw, sh, DXGI_FORMAT_R32G32_FLOAT);
+        }
+        if (s.passes > 1 && !packedPassInput) packedPassInput = gpu.Texture(sw, sh, DXGI_FORMAT_R16G16B16A16_FLOAT);
+    }
+    if (composeOnly) runtime->Release();
+    else {
+        gpu.Begin();
+        const auto created = runtime->Create(gpu.commands.Get(), spatialLayout.active ? spatialLayout.modelW : mw,
+            spatialLayout.active ? spatialLayout.modelH : mh, s.model, s.passes, s.passOverrides);
+        // Even failed creation may record commands: finish its submission before releasing ownership.
+        gpu.Submit(); if (!gpu.Drain()) throw std::runtime_error("NR creation timeout.");
+        Runtime::CheckResult(created, "NR feature creation");
+    }
+    activeModels = s.Models(); activePasses = s.passes;
     if (useDlss) {
         enlarged = gpu.Texture(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT);
         boundedDlss = gpu.Texture(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT);
@@ -141,16 +182,17 @@ void Processor::Dispatch(UINT offset, const DlssNrConstants& s, ID3D12Resource* 
     memcpy(static_cast<char*>(data) + cbOffset, &s, sizeof(s)); constants->Unmap(0, nullptr);
     auto* c = gpu.commands.Get(); ID3D12DescriptorHeap* heaps[]{heap.Get()};
     c->SetDescriptorHeaps(1, heaps); c->SetComputeRootSignature(root.Get());
-    c->SetPipelineState(s.Mode >= 11 && s.Mode <= 18 ? captureColour.Get() : shader.Get());
+    c->SetPipelineState(s.Mode >= 11 && s.Mode <= 21 ? captureColour.Get() : shader.Get());
     c->SetComputeRootDescriptorTable(0, GpuHandle(offset));
     c->SetComputeRootConstantBufferView(1, constants->GetGPUVirtualAddress() + cbOffset);
     c->Dispatch((s.Width + 7) / 8, (s.Height + 7) / 8, 1);
 }
-ID3D12Resource* Processor::Run(ID3D12Resource* input, const Settings& s, bool hdr, bool resetHistory, float desktopWhitePoint, float frameTimeMs, int processedFps, int outputFps) {
+ID3D12Resource* Processor::RunLegacy(ID3D12Resource* input, const Settings& s, bool hdr, bool resetHistory, float desktopWhitePoint, float frameTimeMs, int processedFps, int outputFps) {
     // Colour and signed edits are different DLSS inputs; never reuse one history for the other.
     resetHistory |= privateDlss && lastTransfer != s.transfer;
     lastTransfer = s.transfer;
     fullResolutionMotion = nullptr;
+    usedMotionVectors = nullptr;
     if (!s.holdFrame) { resetHistory |= heldValid; heldValid = false; }
     else {
         if (!heldInput) heldInput = gpu.Texture(width, height, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_STATE_COMMON);
@@ -165,29 +207,37 @@ ID3D12Resource* Processor::Run(ID3D12Resource* input, const Settings& s, bool hd
         }
         input = heldInput.Get();
     }
-    const bool sdr = s.inputColour == 1 || (s.inputColour == 0 && !hdr);
-    if (sdr && !sdrInput) {
-        sdrInput = gpu.Texture(width, height, DXGI_FORMAT_R16G16B16A16_FLOAT);
-        sdrOutput = gpu.Texture(width, height, DXGI_FORMAT_R16G16B16A16_FLOAT);
-    }
+    const bool sdr = !modelStage && (s.inputColour == 1 || (s.inputColour == 0 && !hdr));
+    if (sdr && !preparedProxy && !sdrInput) sdrInput = gpu.Texture(width, height, DXGI_FORMAT_R16G16B16A16_FLOAT);
+    if (sdr && !sdrOutput) sdrOutput = gpu.Texture(width, height, DXGI_FORMAT_R16G16B16A16_FLOAT);
     const float whitePoint = s.referenceWhiteNits > 0 ? s.referenceWhiteNits / 80.0f :
         desktopWhitePoint > 0 ? desktopWhitePoint : hdr ? 203.0f / 80.0f : 1.0f;
     ID3D12Resource* vectors = motion.Get(); bool reset = true;
     gpu.Time(GpuStage::InputMotion);
-    if (s.estimateMotion && s.enabled && s.strength != 0 && s.compare != 1) {
-        Barrier(gpu.commands.Get(), input, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        if (flowInput) {
-            DlssNrConstants down{}; down.Mode = DlssNrMode_Downsample; down.Width = modelWidth; down.Height = modelHeight;
-            if (s.modelScale > 100) scaling->Run(2, input, flowInput.Get(), s.downscaler, true);
-            else Dispatch(28, down, input, nullptr, nullptr, flowInput.Get(), nullptr);
-            Barrier(gpu.commands.Get(), flowInput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    if (!composeOnly && s.estimateMotion && s.enabled && s.strength != 0 && s.compare != 1) {
+        if (sharedMotionVectors) {
+            // Stages with the same ordinary input geometry/filter estimate the
+            // same original capture. Reuse that result, while matching the zero
+            // vectors of a fresh local history when this pass needs a reset.
+            reset = resetHistory || lastTone != s.tone || lastHdr != hdr || lastSdr != sdr || lastWhitePoint != whitePoint;
+            vectors = reset ? motion.Get() : sharedMotionVectors;
+        } else {
+            auto* motionInput = chainMotionInput ? chainMotionInput : input;
+            Barrier(gpu.commands.Get(), motionInput, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            if (flowInput) {
+                DlssNrConstants down{}; down.Mode = DlssNrMode_Downsample; down.Width = modelWidth; down.Height = modelHeight;
+                if (s.modelScale > 100) scaling->Run(2, motionInput, flowInput.Get(), s.downscaler, true);
+                else Dispatch(28, down, motionInput, nullptr, nullptr, flowInput.Get(), nullptr);
+                Barrier(gpu.commands.Get(), flowInput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            }
+            // Estimate in model pixels so both passes receive correctly scaled vectors.
+            reset = opticalFlow->Estimate(flowInput ? flowInput.Get() : motionInput,
+                resetHistory || lastTone != s.tone || lastHdr != hdr || lastSdr != sdr || lastWhitePoint != whitePoint);
+            if (flowInput) Barrier(gpu.commands.Get(), flowInput.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            Barrier(gpu.commands.Get(), motionInput, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+            vectors = opticalFlow->Vectors();
         }
-        // Estimate in model pixels so both passes receive correctly scaled vectors.
-        reset = opticalFlow->Estimate(flowInput ? flowInput.Get() : input,
-            resetHistory || lastTone != s.tone || lastHdr != hdr || lastSdr != sdr || lastWhitePoint != whitePoint);
-        if (flowInput) Barrier(gpu.commands.Get(), flowInput.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        Barrier(gpu.commands.Get(), input, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
-        vectors = opticalFlow->Vectors();
+        usedMotionVectors = vectors;
         if (modelWidth == width && modelHeight == height) fullResolutionMotion = vectors;
     } else if (opticalFlow) opticalFlow->Reset();
     lastTone = s.tone; lastHdr = hdr; lastSdr = sdr; lastWhitePoint = whitePoint;
@@ -205,40 +255,74 @@ ID3D12Resource* Processor::Run(ID3D12Resource* input, const Settings& s, bool hd
         Barrier(c, input, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         DlssNrConstants p{}; p.Mode = DlssNrMode_Encode; p.Width = width; p.Height = height;
         p.WhitePoint = whitePoint;
-        p.ReversibleMode = s.HdrMode(); // Passthrough skips HDR encoding; replace/composed semantics still match OptiScaler.
-        if (sdr) {
+        p.ReversibleMode = modelStage ? 2u : s.HdrMode(); // Raw stage replace avoids applying final controls between passes.
+        if (sdr && !preparedProxy) {
             p.Mode = 11;
             Dispatch(49, p, input, nullptr, nullptr, sdrInput.Get(), nullptr);
             Barrier(c, sdrInput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
-        p.Mode = DlssNrMode_Encode; p.Passthrough = sdr ? 1u : 0u;
-        Dispatch(0, p, sdr ? sdrInput.Get() : input, nullptr, nullptr, fullProxy ? fullProxy.Get() : proxy.Get(), original.Get());
+        p.Mode = clampStageInput ? 19u : DlssNrMode_Encode; p.Passthrough = sdr || modelStage ? 1u : 0u;
+        if (!preparedProxy)
+            Dispatch(0, p, sdr ? sdrInput.Get() : input, nullptr, nullptr, fullProxy ? fullProxy.Get() : proxy.Get(), original.Get());
         p.Width = modelWidth; p.Height = modelHeight;
-        if (fullProxy) {
+        if (fullProxy && !spatialLayout.active) {
             Barrier(c, fullProxy.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             p.Mode = DlssNrMode_Downsample;
             if (s.modelScale > 100) scaling->Run(0, fullProxy.Get(), proxy.Get(), s.downscaler, true);
             else Dispatch(21, p, fullProxy.Get(), nullptr, nullptr, proxy.Get(), nullptr);
             Barrier(c, fullProxy.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
-        Barrier(c, proxy.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        if (!spatialLayout.active && !preparedProxy)
+            Barrier(c, proxy.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         Barrier(c, original.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         gpu.Time(GpuStage::Encode, true);
         gpu.Time(GpuStage::NR);
-        runtime->Evaluate(c, proxy.Get(), depth.Get(), vectors, answer.Get(), modelWidth, modelHeight, reset);
-        Barrier(c, answer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        for (unsigned pass = 1; pass < s.passes; ++pass) {
-            p.Mode = DlssNrMode_ClampProxy;
-            Dispatch(14, p, answer.Get(), nullptr, nullptr, passInput.Get(), nullptr);
-            Barrier(c, passInput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-            Barrier(c, answer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            runtime->Evaluate(c, passInput.Get(), depth.Get(), vectors, answer.Get(), modelWidth, modelHeight, reset, pass);
+        if (!externalAnswer && spatialLayout.active) {
+            DlssNr::GuideRegions regions{};
+            regions.depth = {0, 0, modelWidth, modelHeight};
+            regions.motion = {0, 0, modelWidth, modelHeight};
+            const auto make = [&](unsigned mode) {
+                return DlssNr::Spatial::MakeConstants(spatialLayout, mode, regions,
+                    float(width) / modelWidth, float(height) / modelHeight, width, height);
+            };
+            Barrier(c, fullProxy.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            spatialShader->Dispatch(0, make(100), fullProxy.Get(), nullptr, nullptr, packedProxy.Get());
+            spatialShader->Dispatch(1, make(101), fullProxy.Get(), depth.Get(), vectors, packedDepth.Get(), packedMotion.Get());
+            for (auto* r : {packedProxy.Get(), packedDepth.Get(), packedMotion.Get()})
+                Barrier(c, r, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            const UINT sw = spatialLayout.modelW, sh = spatialLayout.modelH;
+            runtime->Evaluate(c, packedProxy.Get(), packedDepth.Get(), packedMotion.Get(), packedAnswer.Get(), sw, sh, reset);
+            Barrier(c, packedAnswer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            for (unsigned pass = 1; pass < s.passes; ++pass) {
+                auto clamp = p; clamp.Mode = DlssNrMode_ClampProxy; clamp.Width = sw; clamp.Height = sh;
+                Dispatch(14, clamp, packedAnswer.Get(), nullptr, nullptr, packedPassInput.Get(), nullptr);
+                Barrier(c, packedPassInput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                Barrier(c, packedAnswer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                runtime->Evaluate(c, packedPassInput.Get(), packedDepth.Get(), packedMotion.Get(), packedAnswer.Get(), sw, sh, reset, pass);
+                Barrier(c, packedAnswer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                Barrier(c, packedPassInput.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            }
+            spatialShader->Dispatch(2, make(102), packedProxy.Get(), packedAnswer.Get(), nullptr, proxy.Get(), answer.Get());
+            for (auto* r : {packedProxy.Get(), packedDepth.Get(), packedMotion.Get(), packedAnswer.Get(), fullProxy.Get()})
+                Barrier(c, r, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            Barrier(c, proxy.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             Barrier(c, answer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-            Barrier(c, passInput.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        } else if (!externalAnswer) {
+            runtime->Evaluate(c, proxy.Get(), depth.Get(), vectors, answer.Get(), modelWidth, modelHeight, reset);
+            Barrier(c, answer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            for (unsigned pass = 1; pass < s.passes; ++pass) {
+                p.Mode = DlssNrMode_ClampProxy;
+                Dispatch(14, p, answer.Get(), nullptr, nullptr, passInput.Get(), nullptr);
+                Barrier(c, passInput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                Barrier(c, answer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                runtime->Evaluate(c, passInput.Get(), depth.Get(), vectors, answer.Get(), modelWidth, modelHeight, reset, pass);
+                Barrier(c, answer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                Barrier(c, passInput.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            }
         }
         gpu.Time(GpuStage::NR, true);
-        ID3D12Resource* modelAnswer = answer.Get();
-        ID3D12Resource* resolveProxy = proxy.Get();
+        ID3D12Resource* modelAnswer = externalAnswer ? externalAnswer : answer.Get();
+        ID3D12Resource* resolveProxy = preparedProxy ? preparedProxy : proxy.Get();
         const bool halo = s.haloSuppression > 0 || s.haloBrightSuppression > 0;
         if (halo) {
             if (!filteredAnswer) filteredAnswer = gpu.Texture(modelWidth, modelHeight, DXGI_FORMAT_R16G16B16A16_FLOAT);
@@ -246,18 +330,18 @@ ID3D12Resource* Processor::Run(ID3D12Resource* input, const Settings& s, bool hd
             filter.HaloSuppression = std::clamp(s.haloSuppression, 0.f, 1.f);
             filter.HaloBrightSuppression = std::clamp(s.haloBrightSuppression, 0.f, 1.f);
             filter.HaloRadius = std::clamp(s.haloRadius, 1.f, 4.f);
-            Dispatch(91, filter, proxy.Get(), answer.Get(), nullptr, filteredAnswer.Get(), nullptr);
+            Dispatch(91, filter, resolveProxy, modelAnswer, nullptr, filteredAnswer.Get(), nullptr);
             Barrier(c, filteredAnswer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             modelAnswer = filteredAnswer.Get();
         }
         const bool edgeAware = s.transfer == 2 && resizeInput;
-        if (nativeAnswer && !resizeInput) {
+        if (!externalAnswer && nativeAnswer && !resizeInput) {
             scaling->Run(1, modelAnswer, nativeAnswer.Get(), s.downscaler, false);
             Barrier(c, nativeAnswer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             Barrier(c, fullProxy.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             modelAnswer = nativeAnswer.Get(); resolveProxy = fullProxy.Get();
         }
-        if (resizeInput && !edgeAware) {
+        if (!externalAnswer && resizeInput && !edgeAware) {
             // Measure lighting against the input at the same resolution, before
             // enlargement. Reconstruct a native-size model image for the resolve.
             p.Mode = 16; p.Transfer = s.transfer;
@@ -293,14 +377,15 @@ ID3D12Resource* Processor::Run(ID3D12Resource* input, const Settings& s, bool hd
         p.MaxRatio = s.highlightGuard; p.Transfer = edgeAware ? 5 : nativeAnswer ? 0 : std::min(s.transfer, 1u);
         p.CompareMode = s.compare == 3 ? 1 : s.compare == 2 ? 2 : 0;
         p.CompareSplit = s.compareSplit; p.CompareZoom = s.compareZoom; p.CompareSwap = s.compareSwap;
-        if (s.debugView != 0) { modelAnswer = answer.Get(); resolveProxy = proxy.Get(); p.Transfer = 1; }
+        if (s.debugView != 0) { modelAnswer = externalAnswer ? externalAnswer : answer.Get(); resolveProxy = preparedProxy ? preparedProxy : proxy.Get(); p.Transfer = 1; }
+        if (modelStage && !edgeAware) p.Mode = 20;
         Dispatch(7, p, resolveProxy, modelAnswer, original.Get(), sdr ? sdrOutput.Get() : output.Get(), nullptr);
         if (sdr) {
             Barrier(c, sdrOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             p.Mode = 12;
-            Dispatch(56, p, sdrOutput.Get(), input, sdrInput.Get(), output.Get(), nullptr);
+            Dispatch(56, p, sdrOutput.Get(), input, preparedProxy ? preparedProxy : sdrInput.Get(), output.Get(), nullptr);
             Barrier(c, sdrOutput.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            Barrier(c, sdrInput.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            if (!preparedProxy) Barrier(c, sdrInput.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
         if (privateDlss) {
             Barrier(c, enlarged.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -310,8 +395,9 @@ ID3D12Resource* Processor::Run(ID3D12Resource* input, const Settings& s, bool hd
             Barrier(c, nativeAnswer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             Barrier(c, fullProxy.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
-        for (auto* r : {proxy.Get(), original.Get(), answer.Get()})
-            Barrier(c, r, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        if (!preparedProxy) Barrier(c, proxy.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        Barrier(c, original.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        if (!externalAnswer) Barrier(c, answer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         if (halo) Barrier(c, filteredAnswer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         Barrier(c, output.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
         gpu.Time(GpuStage::Resolve, true);

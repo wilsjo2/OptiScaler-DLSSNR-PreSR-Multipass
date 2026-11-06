@@ -103,6 +103,13 @@ Runtime::Runtime(ID3D12Device* d, const std::filesystem::path& modelPath, bool u
         FreeLibrary(module); module = nullptr; throw;
     }
 }
+Runtime::Runtime(std::shared_ptr<Runtime> parent) : owner(std::move(parent)) {
+    if (!owner) throw std::runtime_error("Missing NR runtime owner.");
+    device = owner->device; dlssPath = owner->dlssPath; modelPath = owner->modelPath;
+    compatibility = owner->compatibility;
+    create = owner->create; evaluate = owner->evaluate; release = owner->release;
+    destroy = owner->destroy; allocate = owner->allocate; capabilities = owner->capabilities;
+}
 Runtime::~Runtime() {
     ReleaseDlss();
     Release();
@@ -124,6 +131,7 @@ NVSDK_NGX_Result Runtime::Create(ID3D12GraphicsCommandList* commands, UINT w, UI
     const std::array<std::optional<DlssNr::ModelSettings>, Settings::MaxPasses - 1>& overrides) {
     if (passes < 1 || passes > features.size()) throw std::runtime_error("Choose 1-10 NR passes.");
     Release();
+    if (owner && owner->compatibility) compatibility = owner->compatibility;
     for (unsigned pass = 0; pass < passes; ++pass) {
         CheckResult(capabilities(&parameters[pass]), "NR pass parameters");
         auto* p = parameters[pass]; if (!p) throw std::runtime_error("NGX returned no parameter map.");
@@ -149,7 +157,10 @@ NVSDK_NGX_Result Runtime::Create(ID3D12GraphicsCommandList* commands, UINT w, UI
         if (!compatibility && NVSDK_NGX_FAILED(result) && !features[pass]) {
             Log(std::format("NR driver creation failed 0x{:08X}; trying the selected NR compatibility runtime: {}",
                 (unsigned)result, Narrow(modelPath.wstring())));
-            compatibility = DlssNr::CompatibilityRuntime::Open(modelPath, device.Get(), allocate, destroy, DataDirectory());
+            auto& sharedProvider = owner ? owner->compatibility : compatibility;
+            if (!sharedProvider)
+                sharedProvider = DlssNr::CompatibilityRuntime::Open(modelPath, device.Get(), allocate, destroy, DataDirectory());
+            compatibility = sharedProvider;
             if (compatibility) result = compatibility->Create(commands, p, &features[pass]);
         }
         compatibilityFeatures[pass] = compatibility != nullptr;

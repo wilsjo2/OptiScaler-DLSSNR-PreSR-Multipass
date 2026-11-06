@@ -24,6 +24,14 @@
 namespace DlssNr
 {
 
+ModelVk::Impl::Impl(DlssNr_Vk& shader) { state.pass = &shader; }
+
+ModelVk::Impl::~Impl()
+{
+    Shutdown();
+    ClearStatus(this);
+}
+
 void ModelVk::Impl::Fail(const char* why)
 {
     if (state.failed)
@@ -171,6 +179,7 @@ void ModelVk::Impl::Shutdown()
     if (state.device != VK_NULL_HANDLE)
         vkDeviceWaitIdle(state.device);
 
+    ReleaseIndependent();
     ReleaseModels();
     state.activePasses = 0;
     if (state.creationReady != VK_NULL_HANDLE)
@@ -229,9 +238,8 @@ void ModelVk::Impl::Shutdown()
 
 bool ModelVk::Impl::PrepareModels(VkCommandBuffer cmdBuffer, const DlssNrFrameInfo_Vk& frame, uint32_t width,
                                   uint32_t height, uint32_t workWidth, uint32_t workHeight, float workScale,
-                                  unsigned int passes, const Spatial::Layout& spatial)
+                                  unsigned int passes, const Spatial::Layout& spatial, const Config& cfg)
 {
-    auto& cfg = *Config::Instance();
     const auto instance = state.instance;
     const auto physicalDevice = state.physicalDevice;
     const auto device = state.device;

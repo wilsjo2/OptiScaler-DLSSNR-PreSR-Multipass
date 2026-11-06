@@ -2,6 +2,7 @@
 #include "DlssNr_MenuSections.h"
 #include "DlssNr_Placement.h"
 #include "DlssNr_Status.h"
+#include "PassProfiles.h"
 #include <shaders/dlssnr/DlssNr_Spatial.h>
 #include <Config.h>
 #include <menu/menu_common.h>
@@ -69,28 +70,41 @@ static void ConstrainSpatialControls(Spatial::Settings& value, float scale)
     value.shiftY = std::clamp(std::isfinite(value.shiftY) ? value.shiftY : 0.0f, y.first, y.second);
 }
 
-static void RenderSpatial(Config* config)
+static void RenderSpatial(Config* config, bool presentationControls = true)
 {
     Checkbox("Peripheral compression", config->DlssNrSpatialCompression);
     HelpMarker(
         "Keep more model detail in the centre and compress the edges. Model resolution still scales the whole image.");
-    bool preview = config->DlssNrDebugView.value_or_default() == 4;
-    if (ImGui::Checkbox("Preview", &preview))
-        config->DlssNrDebugView = preview ? 4u : 0u;
-    HelpMarker("Show the packed model input before spatial unpacking, scaled to fill the screen. "
-               "This is the same as the Compressed model input debug view. "
-               "Without active compression, shows the ordinary model input. Apply model must be enabled.");
+    if (presentationControls)
+    {
+        bool preview = config->DlssNrDebugView.value_or_default() == 4;
+        if (ImGui::Checkbox("Preview", &preview))
+            config->DlssNrDebugView = preview ? 4u : 0u;
+        HelpMarker("Show the packed model input before spatial unpacking, scaled to fill the screen. "
+                   "This is the same as the Compressed model input debug view. "
+                   "Without active compression, shows the ordinary model input. Apply model must be enabled.");
+    }
     if (!config->DlssNrSpatialCompression.value_or_default())
         return;
 
-    const auto feature = State::Instance().currentFeature;
-    const bool nativeVk = feature && feature->Api() == API::Vulkan && !feature->IsWithDx12();
-    const auto status = ReadStatus(nativeVk ? Backend::Vulkan : Backend::Dx12);
-    if (!status.spatialStatus.empty())
-        ImGui::TextWrapped("%s", status.spatialStatus.c_str());
+    if (presentationControls)
+    {
+        const auto feature = State::Instance().currentFeature;
+        const bool nativeVk = feature && feature->Api() == API::Vulkan && !feature->IsWithDx12();
+        const auto status = ReadStatus(nativeVk ? Backend::Vulkan : Backend::Dx12);
+        if (!status.spatialStatus.empty())
+            ImGui::TextWrapped("%s", status.spatialStatus.c_str());
+    }
 
-    static Spatial::Settings pending;
-    static bool editing = false;
+    struct SpatialEdit
+    {
+        Spatial::Settings pending;
+        bool editing = false;
+    };
+    static std::unordered_map<ImGuiID, SpatialEdit> edits;
+    auto& edit = edits[ImGui::GetID("Spatial layout")];
+    auto& pending = edit.pending;
+    auto& editing = edit.editing;
     if (!editing)
         pending = Spatial::ReadSettings(*config);
     const float scale = config->DlssNrWorkingScale.value_or_default();
@@ -129,37 +143,43 @@ static void RenderSpatial(Config* config)
         StoreSpatial(config, pending);
         editing = false;
     }
-    Checkbox("Show centre outline", config->DlssNrSpatialShowCenter);
-    Checkbox("Show working region outline", config->DlssNrSpatialShowWork);
+    if (presentationControls)
+    {
+        Checkbox("Show centre outline", config->DlssNrSpatialShowCenter);
+        Checkbox("Show working region outline", config->DlssNrSpatialShowWork);
+    }
     ImGui::TextWrapped("Centre detail follows Model resolution. Strong edge compression can soften detail or shimmer "
                        "during movement.");
 }
 
-void RenderInput(Config* config)
+static void RenderResolution(Config* config, bool presentationControls)
 {
     // Resolution changes rebuild model resources; commit only after releasing the slider.
-    static int pendingScale = -1;
+    static std::unordered_map<ImGuiID, int> pendingScales;
+    const ImGuiID scaleId = ImGui::GetID("Model resolution");
+    const auto pending = pendingScales.find(scaleId);
 
-    int scalePercent =
-        pendingScale >= 0 ? pendingScale : (int) lroundf(config->DlssNrWorkingScale.value_or_default() * 100.0f);
+    int scalePercent = pending != pendingScales.end()
+                           ? pending->second
+                           : (int) lroundf(Profiles::PassResolutionSettings(*config, 0).workingScale * 100.0f);
 
     if (ImGui::SliderInt("Model resolution", &scalePercent, 25, 200, "%d%%"))
-        pendingScale = scalePercent;
+        pendingScales[scaleId] = scalePercent;
 
-    if (ImGui::IsItemDeactivatedAfterEdit() && pendingScale >= 0)
+    if (ImGui::IsItemDeactivatedAfterEdit())
     {
-        config->DlssNrWorkingScale = std::clamp(pendingScale, 25, 200) / 100.0f;
+        config->DlssNrWorkingScale = std::clamp(scalePercent, 25, 200) / 100.0f;
         if (config->DlssNrSpatialCompression.value_or_default())
         {
             auto spatial = Spatial::ReadSettings(*config);
             ConstrainSpatialControls(spatial, config->DlssNrWorkingScale.value_or_default());
             StoreSpatial(config, spatial);
         }
-        pendingScale = -1;
+        pendingScales.erase(scaleId);
     }
 
     HelpMarker("50% halves width and height. 100% uses the full input size.");
-    RenderSpatial(config);
+    RenderSpatial(config, presentationControls);
 
     if (scalePercent > 100)
     {
@@ -180,21 +200,35 @@ void RenderInput(Config* config)
         ImGui::BeginDisabled(!reduced);
 
         static const char* enlargeNames[] = {
-            "Classic",           "Matched residual",         "Matched residual + DLSS",
-            "Lighting + colour", "Lighting + colour + DLSS", "Edge-aware"
+            "Classic",           "Matched residual",         "Matched residual + private upscaler",
+            "Lighting + colour", "Lighting + colour + private upscaler", "Edge-aware"
         };
         int enlarge = (int) std::min(config->DlssNrTransfer.value_or_default(), 5u);
 
         if (ImGui::Combo("Enlargement", &enlarge, enlargeNames, IM_ARRAYSIZE(enlargeNames)))
             config->DlssNrTransfer = (uint32_t) enlarge;
 
-        ImGui::EndDisabled();
-
         HelpMarker("Below 100%: Lighting + colour resizes lighting gain and colour changes separately, then applies "
                    "them at full resolution. This can reduce resize halos; fully black pixels remain black. "
                    "Edge-aware uses the original picture's brightness to keep edits on the correct side of edges. "
-                   "DLSS modes require post-upscale DX12 processing.");
+                   "Private upscaler modes require post-upscale DX12 processing.");
+
+        if (enlarge == 2 || enlarge == 4)
+        {
+            static const char* backends[] = { "DLSS SR", "FSR 2.2", "FidelityFX", "XeSS" };
+            int backend = Profiles::PassResolutionSettings(*config, 0).privateUpscaler;
+            if (ImGui::Combo("Private upscaler", &backend, backends, IM_ARRAYSIZE(backends)))
+                config->DlssNrPrivateUpscaler = backend;
+            HelpMarker("Upscaler used by this pass for temporal enlargement. Requires its installed runtime. "
+                       "Unavailable on native Vulkan: select a spatial enlargement mode there.");
+        }
+        ImGui::EndDisabled();
     }
+}
+
+void RenderInput(Config* config)
+{
+    RenderResolution(config, true);
     static const char* reversibleNames[] = { "Off (soft knee)", "Neutwo proxy + composed", "Neutwo proxy + replace",
                                              "Hybrid proxy + composed", "Hybrid proxy + replace" };
     int reversible = (int) config->DlssNrReversibleMode.value_or_default();
@@ -304,6 +338,51 @@ template <typename Option> static void NrModelCombo(Option* opt, bool allowInher
                "Changing the model rebuilds this pass and resets its history.");
 }
 
+static void RenderPassResolution(Config* config, unsigned int selectedPass)
+{
+    if (!ImGui::TreeNode("Resolution and upscaling"))
+        return;
+
+    if (selectedPass == 0)
+    {
+        ImGui::TextDisabled("Pass 1 also supplies defaults for later passes.");
+        RenderResolution(config, false);
+    }
+    else
+    {
+        auto& extra = config->DlssNrPassOverrides[selectedPass - 1];
+        bool independent = Profiles::HasPassResolutionOverride(extra);
+        if (ImGui::Checkbox("Independent resolution and upscaling", &independent))
+        {
+            if (independent)
+                Profiles::SetPassResolutionSettings(extra, Profiles::PassResolutionSettings(*config, selectedPass));
+            else
+                Profiles::ClearPassResolutionSettings(extra);
+        }
+        HelpMarker("Give this pass its own model resolution, enlargement, downsampling and peripheral compression. "
+                   "Each pass reconstructs the full input size before the next pass. "
+                   "Turning this off restores pass 1's sizing settings and keeps this pass's model tuning.");
+
+        if (independent)
+        {
+            const auto before = Profiles::PassResolutionSettings(*config, selectedPass);
+            Config values = *config;
+            Profiles::ApplyPassConfig(values, *config, selectedPass);
+            RenderResolution(&values, false);
+            const auto after = Profiles::PassResolutionSettings(values, 0);
+            if (!(before == after))
+                Profiles::SetPassResolutionSettings(extra, after);
+        }
+        else
+        {
+            const auto inherited = Profiles::PassResolutionSettings(*config, selectedPass);
+            ImGui::TextDisabled("Inherits pass 1: %.0f%% model resolution, peripheral compression %s.",
+                                inherited.workingScale * 100.0f, inherited.spatial.enabled ? "on" : "off");
+        }
+    }
+    ImGui::TreePop();
+}
+
 void RenderModel(Config* config)
 {
     bool unlockPasses = config->DlssNrUnlockPasses.value_or_default();
@@ -385,6 +464,7 @@ void RenderModel(Config* config)
             pass.style = style ? std::optional<uint32_t>(style - 1) : std::nullopt;
         tuning(pass.intensity, pass.structure, pass.tone, pass.skin, pass.autoMask);
     }
+    RenderPassResolution(config, selectedPass);
     ImGui::PopID();
 }
 

@@ -57,11 +57,13 @@ ID3D12Resource* DlssNr_Dx12::State::EnlargeMatchedResidual(ID3D12GraphicsCommand
     if (queue && (FAILED(queue->GetDevice(IID_PPV_ARGS(&queueDevice))) || queueDevice.Get() != device))
         return say("NR DLSS enlargement queue/device mismatch.");
     const bool structural = resolve.Transfer == 3;
+    const auto backend = DlssNr::GetPrivateUpscaler(RunConfig().DlssNrPrivateUpscaler.value_or_default());
     const auto desc = proxy->GetDesc();
     const unsigned w = unsigned(desc.Width), h = desc.Height;
     if (enlarger && (enlarger->w != w || enlarger->h != h || enlarger->outW != resolve.Width ||
                      enlarger->outH != resolve.Height || (queue && enlarger->queue.Get() != queue) ||
-                     enlarger->depthInverted != frame.DepthInverted || enlarger->structural != structural))
+                     enlarger->depthInverted != frame.DepthInverted || enlarger->structural != structural ||
+                     enlarger->backend != backend))
         ReleaseEnlarger();
     CollectEnlargers();
     if (!enlarger)
@@ -77,6 +79,7 @@ ID3D12Resource* DlssNr_Dx12::State::EnlargeMatchedResidual(ID3D12GraphicsCommand
         g.depthInverted = frame.DepthInverted;
         g.queue = queue;
         g.structural = structural;
+        g.backend = backend;
         g.input.Attach(CreateScratch(device, DXGI_FORMAT_R16G16B16A16_FLOAT, w, h));
         g.output.Attach(CreateScratch(device, DXGI_FORMAT_R16G16B16A16_FLOAT, g.outW, g.outH));
         g.depth.Attach(CreateScratch(device, DXGI_FORMAT_R32_FLOAT, w, h));
@@ -94,7 +97,7 @@ ID3D12Resource* DlssNr_Dx12::State::EnlargeMatchedResidual(ID3D12GraphicsCommand
             return say("DLSS enlargement exposure initialization failed; use Retry.");
         Barrier(cmd, g.exposure.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        g.dlss = std::make_unique<DlssNr::PrivateUpscalerDx12>(DlssNr::PrivateUpscaler::DLSS);
+        g.dlss = std::make_unique<DlssNr::PrivateUpscalerDx12>(backend);
         DlssNr::PrivateUpscalerCreateDx12 info;
         info.width = w;
         info.height = h;
@@ -104,8 +107,9 @@ ID3D12Resource* DlssNr_Dx12::State::EnlargeMatchedResidual(ID3D12GraphicsCommand
         info.depthInverted = frame.DepthInverted;
         info.rayReconstruction = false; // This carrier comes from an already reconstructed image.
         if (!g.dlss->Init(device, cmd, info))
-            return say("Private DLSS SR: " + g.dlss->Error());
-        LOG_INFO("NR enlargement: private DLSS SR created at {}x{} -> {}x{}", w, h, g.outW, g.outH);
+            return say(std::string("Private ") + DlssNr::PrivateUpscalerName(backend) + ": " + g.dlss->Error());
+        LOG_INFO("NR enlargement: private {} created at {}x{} -> {}x{}", DlssNr::PrivateUpscalerName(backend),
+                 w, h, g.outW, g.outH);
         ID3D12GraphicsCommandList* real = nullptr;
         g.creation = Util::CheckForRealObject(__FUNCTION__, cmd, (IUnknown**) &real) ? real : cmd;
         g.failed = false;
@@ -148,7 +152,7 @@ ID3D12Resource* DlssNr_Dx12::State::EnlargeMatchedResidual(ID3D12GraphicsCommand
     const auto referenceH = frame.MotionVectorsLowResolution ? frame.RenderSubrectHeight : frame.OutputHeight;
     guides.MvScaleX = frame.MvScaleX * float(w) / std::max(referenceW ? referenceW : regions.motion.width, 1u);
     guides.MvScaleY = frame.MvScaleY * float(h) / std::max(referenceH ? referenceH : regions.motion.height, 1u);
-    if (Config::Instance()->DlssNrHoldFrame.value_or_default())
+    if (RunConfig().DlssNrHoldFrame.value_or_default())
         guides.MvScaleX = guides.MvScaleY = 0;
     ok &= shader.DispatchPass(cmd, guides, depth, motion, nullptr, nullptr, nullptr, g.depth.Get(), g.motion.Get());
     if (!ok)

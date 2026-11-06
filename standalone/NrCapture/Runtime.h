@@ -7,6 +7,8 @@ namespace nr {
 class Runtime {
 public:
     Runtime(ID3D12Device* device, const std::filesystem::path& modelPath, bool unlockAdaMfg = false);
+    // Independent features sharing the owning runtime's initialized driver/provider.
+    explicit Runtime(std::shared_ptr<Runtime> owner);
     ~Runtime();
     Runtime(const Runtime&) = delete;
     NVSDK_NGX_Result Create(ID3D12GraphicsCommandList* commands, UINT width, UINT height,
@@ -21,6 +23,7 @@ public:
     void ReleaseDlss();
     static void CheckResult(NVSDK_NGX_Result result, const char* operation);
 private:
+    std::shared_ptr<Runtime> owner;
     HMODULE module = nullptr;
     ComPtr<ID3D12Device> device;
     std::array<NVSDK_NGX_Parameter*, Settings::MaxPasses> parameters{};

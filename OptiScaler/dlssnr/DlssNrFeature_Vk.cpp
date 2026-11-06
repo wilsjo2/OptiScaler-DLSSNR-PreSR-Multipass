@@ -28,14 +28,252 @@
 namespace DlssNr
 {
 
+void ModelVk::Impl::ReleaseIndependent()
+{
+    // Callers have retired GPU work before any stage or descriptor ring is freed.
+    for (auto& pass : independentPasses)
+        pass.output.Destroy(state.device);
+    independentPasses.clear();
+    independentWidth = independentHeight = 0;
+    independentStatus = {};
+}
+
+bool ModelVk::Impl::PrepareIndependent(uint32_t width, uint32_t height, unsigned int passes,
+                                        const DlssNrFrameInfo_Vk& frame, const Config& cfg)
+{
+    bool changed = independentPasses.size() != passes || independentWidth != width || independentHeight != height ||
+                   independentBeforeSr != frame.BeforeUpscale || independentRayReconstruction != frame.RayReconstruction;
+    for (unsigned int i = 0; i < passes; ++i)
+    {
+        const auto resolution = Profiles::PassResolutionSettings(cfg, i);
+        if (resolution.workingScale < 1.0f && DlssNrUsesDlssEnlargement(resolution.transfer))
+        {
+            independentStatus.failureReason =
+                std::format("Pass {}: DLSS enlargement requires the DX12 processing path.", i + 1);
+            for (auto& pass : independentPasses)
+                pass.model->state.reset = true;
+            state.reset = true;
+            return false;
+        }
+        if (!changed && (independentPasses[i].resolution != resolution ||
+                         independentPasses[i].settings != Profiles::PassSettings(cfg, i)))
+            changed = true;
+    }
+    if (!changed)
+        return true;
+
+    if (vkDeviceWaitIdle(state.device) != VK_SUCCESS)
+    {
+        independentStatus.failureReason = "The Vulkan device could not retire the previous pass chain.";
+        return false;
+    }
+    ReleaseIndependent();
+    ReleaseModels();
+    state.activePasses = 0;
+    state.creationPending = false;
+    // Native-size encoded colour between stages avoids compounding tone mapping or composition.
+    constexpr auto format = VK_FORMAT_R16G16B16A16_SFLOAT;
+    if (!state.proxy.Ensure(state.device, state.physicalDevice, width, height, format) ||
+        !state.keep.Ensure(state.device, state.physicalDevice, width, height, format) ||
+        !state.passClamp.Ensure(state.device, state.physicalDevice, width, height, format))
+    {
+        independentStatus.failureReason = "Could not allocate the independent pass composition images.";
+        return false;
+    }
+    independentPasses.reserve(passes);
+    for (unsigned int i = 0; i < passes; ++i)
+    {
+        auto& pass = independentPasses.emplace_back();
+        pass.shader = std::make_unique<DlssNr_Vk>(std::format("DLSS-NR VK pass {}", i + 1), state.device,
+                                                state.physicalDevice);
+        pass.model = std::make_unique<Impl>(*pass.shader);
+        pass.settings = Profiles::PassSettings(cfg, i);
+        pass.resolution = Profiles::PassResolutionSettings(cfg, i);
+        if (!pass.shader->IsInit() ||
+            !pass.output.Ensure(state.device, state.physicalDevice, width, height, format))
+        {
+            independentStatus.failureReason = std::format("Could not allocate Vulkan pass {}.", i + 1);
+            return false;
+        }
+    }
+    independentWidth = width;
+    independentHeight = height;
+    independentBeforeSr = frame.BeforeUpscale;
+    independentRayReconstruction = frame.RayReconstruction;
+    state.reset = true;
+    return true;
+}
+
+bool ModelVk::Impl::EvaluateIndependent(VkCommandBuffer cmdBuffer, const VkImageInfo& depth,
+                                         const VkImageInfo& motion, const VkImageInfo& target,
+                                         const DlssNrFrameInfo_Vk& frame, const Config& cfg,
+                                         const DlssNrConstants& encode, VkImageView exposure)
+{
+    Transition(cmdBuffer, state.proxy, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    Transition(cmdBuffer, state.keep, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    ImageVk* input = &state.proxy;
+    bool ready = true;
+    double gpuTime = 0;
+    bool haveTiming = true;
+    Config passConfig = cfg;
+    auto passFrame = frame;
+    passFrame.ColourIsLinearHdr = false; // input is the already encoded proxy
+    passFrame.WhitePointOverride = 1.0f;
+    passFrame.Reset = frame.Reset || state.reset;
+    struct ResetSkippedHistory
+    {
+        Impl& owner;
+        bool completed = false;
+        ~ResetSkippedHistory()
+        {
+            if (!completed)
+            {
+                owner.state.reset = true;
+                for (auto& pass : owner.independentPasses)
+                    pass.model->state.reset = true;
+            }
+        }
+    } history { *this };
+    for (unsigned int i = 0; i < independentPasses.size(); ++i)
+    {
+        auto& pass = independentPasses[i];
+        Profiles::ApplyPassConfig(passConfig, cfg, i);
+        // Return only a reconstructed encoded answer. The parent's resolve applies all
+        // user composition controls once against the original frame.
+        passConfig.DlssNrReversibleMode = 2u;
+        passConfig.DlssNrApplyModel = true;
+        passConfig.DlssNrCompare = 0u;
+        passConfig.DlssNrDebugView = 0u;
+        passConfig.DlssNrSkinProtection = false;
+        passConfig.DlssNrShowSkinMask = false;
+        passConfig.DlssNrReplaceDetailStrength = 0.0f;
+        passConfig.DlssNrHaloSuppression = 0.0f;
+        passConfig.DlssNrHaloBrightSuppression = 0.0f;
+        passConfig.DlssNrHoldFrame = false;
+        Transition(cmdBuffer, pass.output, VK_IMAGE_LAYOUT_GENERAL);
+        const bool ran = pass.model->Evaluate(cmdBuffer, input->info, depth, motion, pass.output.info, passFrame,
+                                              state.instance, state.physicalDevice, state.device,
+                                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, &passConfig);
+        auto*& feature = pass.model->state.models[0].feature;
+        // Some NGX versions cache identical create parameters; every stage must still
+        // have its own temporal state, including two stages with identical settings.
+        for (unsigned int earlier = 0; feature && earlier < i; ++earlier)
+        {
+            const auto* other = independentPasses[earlier].model->state.models[0].feature;
+            if (other && (feature == other || feature->Id == other->Id))
+            {
+                feature = nullptr; // another stage owns it
+                pass.model->Fail("the NVIDIA NGX driver reused a feature for independent NR passes");
+            }
+        }
+        if (!ran || pass.model->state.failed)
+        {
+            if (independentStatus.failureReason.empty())
+                independentStatus.failureReason = std::format("Pass {}: {}", i + 1,
+                    pass.model->state.failed ? pass.model->state.reason : "waiting for model creation");
+            ready = false;
+        }
+        else if (ready)
+        {
+            input = &pass.output;
+            Transition(cmdBuffer, *input, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            if (i + 1 < independentPasses.size())
+            {
+                // Match ordinary layered NR: only intermediate answers are clamped.
+                // This stage's encode proxy is no longer needed and has native dimensions.
+                auto& clamped = pass.model->state.proxy;
+                Transition(cmdBuffer, clamped, VK_IMAGE_LAYOUT_GENERAL);
+                DlssNrConstants clamp {};
+                clamp.Mode = DlssNrMode_ClampProxy;
+                clamp.Width = encode.Width;
+                clamp.Height = encode.Height;
+                if (!pass.shader->Dispatch(cmdBuffer, clamp, encode.Width, encode.Height, input->info.ImageView,
+                                             VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE,
+                                             clamped.info.ImageView, VK_NULL_HANDLE))
+                {
+                    independentStatus.failureReason = std::format("Pass {}: proxy clamp failed", i + 1);
+                    ready = false;
+                }
+                else
+                {
+                    input = &clamped;
+                    Transition(cmdBuffer, *input, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                }
+            }
+        }
+        haveTiming = haveTiming && pass.model->state.lastGpuTime.has_value();
+        gpuTime += pass.model->state.lastGpuTime.value_or(0);
+        independentStatus.spatialActive |= pass.model->state.spatialRan;
+        if (!pass.model->state.spatialStatus.empty())
+        {
+            if (!independentStatus.spatialStatus.empty())
+                independentStatus.spatialStatus += "; ";
+            independentStatus.spatialStatus += std::format("Pass {}: {}", i + 1, pass.model->state.spatialStatus);
+        }
+    }
+    // Warm every stage even when one is creating. Never expose a partial chain or keep
+    // history from a frame that did not reach the final output.
+    if (!ready)
+        return false;
+
+    auto resolve = encode;
+    resolve.Mode = DlssNrMode_Resolve;
+    resolve.Transfer = 0; // every stage has already reconstructed to native size
+    resolve.ModelWorkScale = 1.0f;
+    resolve.ReplaceDetailStrength = cfg.DlssNrReplaceDetailStrength.value_or_default();
+    if (DlssNr_Common::HaloEnabled(cfg) && resolve.DebugView != 2)
+    {
+        auto halo = resolve;
+        halo.Mode = DlssNrMode_SuppressHalo;
+        Transition(cmdBuffer, state.passClamp, VK_IMAGE_LAYOUT_GENERAL);
+        if (!state.pass->Dispatch(cmdBuffer, halo, encode.Width, encode.Height, state.proxy.info.ImageView,
+                                  input->info.ImageView, VK_NULL_HANDLE, VK_NULL_HANDLE,
+                                  state.passClamp.info.ImageView, VK_NULL_HANDLE))
+        {
+            independentStatus.failureReason = "The independent pass halo dispatch failed.";
+            return false;
+        }
+        input = &state.passClamp;
+        Transition(cmdBuffer, *input, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
+    // The packed-input diagnostic refers to the final model's own working image.
+    auto* resolveProxy = &state.proxy;
+    if (resolve.DebugView == 4)
+    {
+        auto& last = independentPasses.back().model->state;
+        resolveProxy = last.spatialRan ? &last.spatialProxy : last.proxySmall.Valid() ? &last.proxySmall : &last.proxy;
+        Transition(cmdBuffer, *resolveProxy, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        resolve.DebugView = 1;
+    }
+    if (!state.pass->Dispatch(cmdBuffer, resolve, encode.Width, encode.Height, resolveProxy->info.ImageView,
+                              input->info.ImageView, state.keep.info.ImageView, exposure, target.ImageView,
+                              VK_NULL_HANDLE))
+    {
+        independentStatus.failureReason = "The independent pass composition dispatch failed.";
+        return false;
+    }
+    history.completed = true;
+    state.reset = false;
+    state.frames++;
+    independentStatus.running = true;
+    independentStatus.frames = state.frames;
+    if (haveTiming)
+        independentStatus.gpuTime = gpuTime;
+    return true;
+}
+
 bool ModelVk::Impl::Evaluate(VkCommandBuffer cmdBuffer, const VkImageInfo& colourInfo, const VkImageInfo& depthInfo,
                              const VkImageInfo& motionInfo, const VkImageInfo& target, const DlssNrFrameInfo_Vk& frame,
                              VkInstance instance, VkPhysicalDevice physicalDevice, VkDevice device,
-                             VkImageLayout inputLayout)
+                             VkImageLayout inputLayout, const Config* passConfig)
 {
     const bool beforeSr = frame.BeforeUpscale;
     const bool rayReconstruction = frame.RayReconstruction;
-    auto& cfg = *Config::Instance();
+    const auto& cfg = passConfig ? *passConfig : *Config::Instance();
+    const unsigned int passes =
+        std::clamp(cfg.DlssNrPasses.value_or_default(), 1u,
+                   cfg.DlssNrUnlockPasses.value_or_default() ? DlssNr::MaxPassCount : DlssNr::DefaultMaxPassCount);
+    const bool independent = !passConfig && Profiles::HasPassResolutionOverrides(cfg, passes);
 
     if (ResolvePlacement(cfg.DlssNrRunBeforeSr.value_or_default(), cfg.DlssNrDeferredDlss.value_or_default(),
                          cfg.DlssNrResidualAcrossRr.value_or_default(), cfg.DlssNrFinishedPicture.value_or_default())
@@ -63,18 +301,33 @@ bool ModelVk::Impl::Evaluate(VkCommandBuffer cmdBuffer, const VkImageInfo& colou
 
     std::lock_guard<std::mutex> lock(mutex);
     state.spatialRan = false;
-    if (DlssNrUsesDlssEnlargement(cfg.DlssNrTransfer.value_or_default()) &&
+    if (!independent && DlssNrUsesDlssEnlargement(cfg.DlssNrTransfer.value_or_default()) &&
         cfg.DlssNrWorkingScale.value_or_default() < 1.0f)
     {
-        PublishStatus(this, Backend::Vulkan, { false, "DLSS enlargement requires the DX12 processing path." });
+        if (!passConfig)
+            PublishStatus(this, Backend::Vulkan, { false, "DLSS enlargement requires the DX12 processing path." });
         return false;
     }
 
     struct ReportStatus
     {
         Impl* owner;
+        bool enabled;
+        bool independent;
         ~ReportStatus()
         {
+            if (!enabled)
+                return;
+            if (independent)
+            {
+                if (owner->state.failed)
+                {
+                    owner->independentStatus.running = false;
+                    owner->independentStatus.failureReason = owner->state.reason;
+                }
+                PublishStatus(owner, Backend::Vulkan, owner->independentStatus);
+                return;
+            }
             const auto& state = owner->state;
             StatusSnapshot snapshot { state.models[0].feature != nullptr && !state.failed, state.reason,
                                       state.lastGpuTime, state.frames };
@@ -82,7 +335,9 @@ bool ModelVk::Impl::Evaluate(VkCommandBuffer cmdBuffer, const VkImageInfo& colou
             snapshot.spatialActive = state.spatialRan;
             PublishStatus(owner, Backend::Vulkan, snapshot);
         }
-    } report { this };
+    } report { this, !passConfig, independent };
+    if (independent)
+        independentStatus = {};
     const auto requests = ReadControlRequests();
     if (requests.retryGeneration != retryGeneration)
     {
@@ -185,9 +440,6 @@ bool ModelVk::Impl::Evaluate(VkCommandBuffer cmdBuffer, const VkImageInfo& colou
     const uint32_t workWidth = spatial.active ? spatial.modelW : spatial.ordinaryW;
     const uint32_t workHeight = spatial.active ? spatial.modelH : spatial.ordinaryH;
     const bool reduced = !spatial.active && (workWidth != width || workHeight != height);
-    const unsigned int passes =
-        std::clamp(cfg.DlssNrPasses.value_or_default(), 1u,
-                   cfg.DlssNrUnlockPasses.value_or_default() ? DlssNr::MaxPassCount : DlssNr::DefaultMaxPassCount);
 
     state.instance = instance;
     state.physicalDevice = physicalDevice;
@@ -200,10 +452,28 @@ bool ModelVk::Impl::Evaluate(VkCommandBuffer cmdBuffer, const VkImageInfo& colou
     }
     state.device = device;
 
-    if (!PrepareModels(cmdBuffer, frame, width, height, workWidth, workHeight, workScale, passes, spatial))
-        return false;
+    if (independent)
+    {
+        if (!PrepareIndependent(width, height, passes, frame, cfg))
+            return false;
+    }
+    else
+    {
+        if (!independentPasses.empty())
+        {
+            if (vkDeviceWaitIdle(device) != VK_SUCCESS)
+            {
+                Fail("the Vulkan device could not retire independently sized passes");
+                return false;
+            }
+            ReleaseIndependent();
+            state.reset = true;
+        }
+        if (!PrepareModels(cmdBuffer, frame, width, height, workWidth, workHeight, workScale, passes, spatial, cfg))
+            return false;
+    }
 
-    if (spatial.active && workScale > 1.0f)
+    if (!independent && spatial.active && workScale > 1.0f)
     {
         const Scaler wantScaler = cfg.DlssNrScalingDownscaler.value_or_default();
         if (state.nrScaler != wantScaler)
@@ -260,7 +530,7 @@ bool ModelVk::Impl::Evaluate(VkCommandBuffer cmdBuffer, const VkImageInfo& colou
     // it is written again, and doing it here rather than at the end keeps the two in one place.
     const uint32_t timingSlot = (uint32_t) (state.timedFrames % kTimingSlots);
 
-    if (state.queryPool != VK_NULL_HANDLE)
+    if (!independent && state.queryPool != VK_NULL_HANDLE)
     {
         vkCmdResetQueryPool(cmdBuffer, state.queryPool, timingSlot * 2, 2);
         vkCmdWriteTimestamp(cmdBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, state.queryPool, timingSlot * 2);
@@ -326,6 +596,9 @@ bool ModelVk::Impl::Evaluate(VkCommandBuffer cmdBuffer, const VkImageInfo& colou
         Fail("the encode dispatch failed");
         return false;
     }
+
+    if (independent)
+        return EvaluateIndependent(cmdBuffer, depthInfo, motionInfo, target, frame, cfg, encode, exposureView);
 
     // The model's input: the full proxy, or a downsampled copy of it when the working scale is below
     // the frame. Mirrors the D3D12 path -- the encode always writes a full proxy, and a separate
@@ -656,6 +929,10 @@ bool ModelVk::Impl::Evaluate(VkCommandBuffer cmdBuffer, const VkImageInfo& colou
         resolveProxy = modelInput;
         resolve.DebugView = 1;
     }
+    // The child outputs encoded proxy colour. Matched residual reconstruction needs the
+    // full-size proxy here, without the public codec's final composition controls.
+    if (passConfig && resolve.Transfer == 1 && workScale < 1.0f)
+        resolve.Mode = DlssNrMode_RawResidual;
     Transition(cmdBuffer, *resolveProxy, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     Transition(cmdBuffer, *resolveAnswer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     Transition(cmdBuffer, state.keep, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);

@@ -1,12 +1,220 @@
 #include "pch.h"
 #include "DlssNr_Dx12_State.h"
 
+void DlssNr_Dx12::State::ReleaseIndependentPasses()
+{
+    for (auto& pass : independentPasses)
+        DlssNr_Dx12::Retire(std::move(pass));
+    independentSizes.clear();
+    independentModels.clear();
+    independentStatus.clear();
+    independentSpatialStatus.clear();
+    independentActive = false;
+    nr.reset = true;
+}
+
+bool DlssNr_Dx12::State::RunIndependentPasses(EncodeContext& encoded, ID3D12Resource* depth,
+                                              ID3D12Resource* motion, unsigned int passes,
+                                              ID3D12CommandQueue* queue)
+{
+    const auto& cfg = RunConfig();
+    auto* cmd = encoded.cmdList;
+    std::vector<DlssNr::Profiles::ResolutionSettings> sizes;
+    std::vector<DlssNr::ModelSettings> models;
+    for (unsigned pass = 0; pass < passes; ++pass)
+    {
+        sizes.push_back(DlssNr::Profiles::PassResolutionSettings(cfg, pass));
+        models.push_back(PassSettings(cfg, pass));
+    }
+    const bool reset = nr.reset || sizes != independentSizes || models != independentModels;
+    independentSizes = std::move(sizes);
+    independentModels = std::move(models);
+    for (unsigned pass = passes; pass < independentPasses.size(); ++pass)
+        DlssNr_Dx12::Retire(std::move(independentPasses[pass]));
+
+    // Every child owns its NGX history, reconstruction surfaces and descriptor ring. Only the
+    // encoded proxy crosses a stage boundary; the immutable scene remains in this owner's hdrCopy.
+    auto frame = encoded.frame;
+    frame.ColourIsLinearHdr = false;
+    frame.ExposureTexture = nullptr;
+    frame.WhitePointOverride = 1.0f;
+    frame.Reset = reset;
+    if (nr.heldActive)
+        frame.MvScaleX = frame.MvScaleY = 0;
+    ID3D12Resource* source = nr.colorCopy;
+    ID3D12Resource* answer = nullptr;
+    bool ok = nr.passScratch && nr.passClamp;
+    bool clampReadable = false;
+    independentStatus.clear();
+    independentSpatialStatus.clear();
+    nr.spatialActive = false;
+    ngxTime->Start(cmd);
+    for (unsigned pass = 0; ok && pass < passes; ++pass)
+    {
+        if (!independentPasses[pass])
+            independentPasses[pass] = std::make_unique<DlssNr_Dx12>("DLSS-NR independent pass " +
+                                                                       std::to_string(pass + 1), encoded.device);
+        Config profile = cfg;
+        DlssNr::Profiles::ApplyPassConfig(profile, cfg, pass);
+        profile.DlssNrReversibleMode = 2u; // Encoded proxy in, reconstructed proxy out; no scene composition.
+        profile.DlssNrApplyModel = true;
+        profile.DlssNrCompare = 0u;
+        profile.DlssNrDebugView = 0u;
+        profile.DlssNrSkinProtection = false;
+        profile.DlssNrShowSkinMask = false;
+        profile.DlssNrHoldFrame = false;
+        profile.DlssNrReplaceDetailStrength = 0.0f;
+        profile.DlssNrHaloSuppression = 0.0f;
+        profile.DlssNrHaloBrightSuppression = 0.0f;
+        profile.DlssNrSpatialShowCenter = false;
+        profile.DlssNrSpatialShowWork = false;
+        auto* target = pass % 2 ? nr.passScratch : nr.output;
+        ok = independentPasses[pass]->DispatchConfigured(cmd, source, depth, motion, target, frame, queue, &profile);
+        if (clampReadable)
+        {
+            Barrier(cmd, nr.passClamp, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            clampReadable = false;
+        }
+        if (!ok)
+        {
+            const auto& child = *independentPasses[pass]->_state;
+            const std::string reason = child.nr.failed ? child.nr.reason
+                                       : !child.enlargementStatus.empty() ? child.enlargementStatus
+                                       : child.nr.spatialFallback ? child.nr.spatialFallbackReason
+                                                                  : "waiting for model initialization";
+            independentStatus = "Pass " + std::to_string(pass + 1) + ": " + reason;
+            break;
+        }
+        const auto& child = *independentPasses[pass]->_state;
+        if (!independentSpatialStatus.empty())
+            independentSpatialStatus += "; ";
+        independentSpatialStatus += "Pass " + std::to_string(pass + 1) + ": " +
+                                    std::to_string(child.nr.workWidth) + "x" + std::to_string(child.nr.workHeight);
+        if (child.nr.spatialLayout.requested)
+        {
+            if (child.nr.spatialFallback)
+                independentSpatialStatus += std::string(" (spatial fallback: ") + child.nr.spatialFallbackReason + ")";
+            else if (!child.nr.spatialLayout.active)
+                independentSpatialStatus += " (spatial unavailable: " + child.nr.spatialLayout.reason + ")";
+            else
+                independentSpatialStatus += " (peripheral compression)";
+        }
+        nr.spatialActive = nr.spatialActive || child.nr.spatialActive;
+        Barrier(cmd, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        answer = target;
+        if (pass + 1 < passes)
+        {
+            DlssNrConstants clamp {};
+            clamp.Mode = DlssNrMode_ClampProxy;
+            clamp.Width = nr.width;
+            clamp.Height = nr.height;
+            ok = shader.DispatchPass(cmd, clamp, answer, nullptr, nullptr, nullptr, nullptr, nr.passClamp, nullptr);
+            Barrier(cmd, answer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            answer = nullptr;
+            Barrier(cmd, nr.passClamp, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            clampReadable = true;
+            source = nr.passClamp;
+        }
+    }
+    ngxTime->End(cmd);
+
+    if (clampReadable)
+        Barrier(cmd, nr.passClamp, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    if (ok && answer && DlssNr_Common::HaloEnabled(cfg) && cfg.DlssNrDebugView.value_or_default() != 2)
+    {
+        DlssNrConstants halo {};
+        halo.Mode = DlssNrMode_SuppressHalo;
+        halo.Width = nr.width;
+        halo.Height = nr.height;
+        DlssNr_Common::SetQualityConstants(halo, cfg);
+        if (shader.DispatchPass(cmd, halo, nr.colorCopy, answer, nullptr, nullptr, nullptr, nr.passClamp, nullptr))
+        {
+            Barrier(cmd, answer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            answer = nr.passClamp;
+            Barrier(cmd, answer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        }
+    }
+
+    bool composed = false;
+    if (ok && answer)
+    {
+        auto resolve = MakeResolveConstants(encoded, passes);
+        resolve.Transfer = 0; // Each stage has already reconstructed its answer at native size.
+        resolve.ModelWorkScale = 1.0f;
+        ID3D12Resource* resolveProxy = nr.colorCopy;
+        bool childProxyReadable = false;
+        if (resolve.DebugView == 4)
+        {
+            // Inspect the last pass's actual model input, including its peripheral warp.
+            const auto& last = independentPasses[passes - 1]->_state->nr;
+            resolveProxy = last.spatialActive ? last.spatialColor
+                           : last.colorSmall ? last.colorSmall : last.colorCopy;
+            Barrier(cmd, resolveProxy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            childProxyReadable = true;
+            resolve.DebugView = 1;
+        }
+        if (encoded.targetSupportsUav)
+        {
+            Barrier(cmd, encoded.target, encoded.targetState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            encoded.targetState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        }
+        else
+            Barrier(cmd, nr.hdrCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        composed = shader.DispatchPass(cmd, resolve, resolveProxy, answer,
+                                        encoded.targetSupportsUav ? nr.hdrCopy : encoded.target, encoded.exposure,
+                                        nullptr, encoded.targetSupportsUav ? encoded.target : nr.hdrCopy, nullptr);
+        if (childProxyReadable)
+            Barrier(cmd, resolveProxy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        if (!encoded.targetSupportsUav)
+        {
+            if (composed)
+            {
+                Barrier(cmd, nr.hdrCopy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                Barrier(cmd, encoded.target, encoded.targetState, D3D12_RESOURCE_STATE_COPY_DEST);
+                cmd->CopyResource(encoded.target, nr.hdrCopy);
+                Barrier(cmd, encoded.target, D3D12_RESOURCE_STATE_COPY_DEST, encoded.targetState);
+                Barrier(cmd, nr.hdrCopy, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            }
+            else
+                Barrier(cmd, nr.hdrCopy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        }
+        if (composed && captureFrames.isActive())
+            captureFrames.record(cmd, encoded.device, nr.colorCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                 encoded.target, encoded.targetState);
+    }
+    if (answer)
+        Barrier(cmd, answer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    nr.reset = !composed;
+    modelRunning = composed;
+    if (!composed)
+    {
+        if (independentStatus.empty())
+            independentStatus = "Independent pass reconstruction could not complete";
+        for (auto& pass : independentPasses)
+            if (pass)
+                pass->_state->nr.reset = true;
+        ReportSkipOnce(independentStatus.c_str());
+    }
+    return composed;
+}
+
 auto DlssNr_Dx12::State::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour, ID3D12Resource* depth,
                              ID3D12Resource* motion, ID3D12Resource* output, const DlssNrFrameInfo& frame,
                              ID3D12CommandQueue* timingQueue) -> void
 {
     std::lock_guard<std::recursive_mutex> nrLock(mutex);
-    const Config& cfg = *Config::Instance();
+    const Config& cfg = RunConfig();
     nr.spatialActive = false;
 
     if (nr.failed || cmdList == nullptr || colour == nullptr || depth == nullptr || motion == nullptr ||
@@ -112,6 +320,10 @@ auto DlssNr_Dx12::State::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
     const unsigned int requestedPasses =
         std::clamp(cfg.DlssNrPasses.value_or_default(), 1u,
                    cfg.DlssNrUnlockPasses.value_or_default() ? DlssNr::MaxPassCount : DlssNr::DefaultMaxPassCount);
+    const bool independent = !passConfig && DlssNr::Profiles::HasPassResolutionOverrides(cfg, requestedPasses);
+    if (!independent && independentActive)
+        ReleaseIndependentPasses();
+    independentActive = independent;
     for (auto& model : nr.models)
         model.Collect();
     if ((!NVNGXProxy::IsDx12Inited() && !NVNGXProxy::InitDx12(device)) || !DlssNr::Proxy::Context::Available())
@@ -123,7 +335,7 @@ auto DlssNr_Dx12::State::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
     }
 
     // Only the model runs at working resolution; source and composition remain at native size.
-    float workScale = cfg.DlssNrWorkingScale.value_or_default();
+    float workScale = independent ? 1.0f : cfg.DlssNrWorkingScale.value_or_default();
     if (!std::isfinite(workScale))
         workScale = 1.0f;
     workScale = std::clamp(workScale, 0.25f, 2.0f);
@@ -131,7 +343,9 @@ auto DlssNr_Dx12::State::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
     const auto workHeight = (unsigned int) (height * workScale + 0.5f);
     const bool reduced = workWidth != width || workHeight != height;
 
-    const auto spatialSettings = DlssNr::Spatial::ReadSettings(cfg);
+    auto spatialSettings = DlssNr::Spatial::ReadSettings(cfg);
+    if (independent)
+        spatialSettings.enabled = false;
     const auto spatialLayout = DlssNr::Spatial::Build(spatialSettings, width, height, workScale);
     const bool spatialSignatureChanged =
         nr.spatialSignatureValid &&
@@ -170,7 +384,7 @@ auto DlssNr_Dx12::State::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
     const unsigned modelWidth = spatial ? spatialLayout.modelW : workWidth;
     const unsigned modelHeight = spatial ? spatialLayout.modelH : workHeight;
     if (!PrepareRunModels(cmdList, device, frame, desc, { width, height }, { modelWidth, modelHeight }, workScale,
-                          requestedPasses, spatial))
+                          requestedPasses, spatial, independent))
         return;
     // The parameter adapter already combined the HDR flag with the active color format.
     const bool isHdrBuffer = frame.ColourIsLinearHdr;
@@ -269,6 +483,22 @@ auto DlssNr_Dx12::State::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
         return;
     }
     auto* modelInput = encoded.modelInput;
+
+    if (independent)
+    {
+        const bool composed = encoded.encodeSucceeded &&
+                              RunIndependentPasses(encoded, depth, motion, requestedPasses, timingQueue);
+        targetState = encoded.targetState;
+        Barrier(cmdList, nr.hdrCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        Barrier(cmdList, nr.colorCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        FinishColor(composed);
+        if (composed)
+            ++nr.successfulDispatches;
+        EndGpuTiming(cmdList);
+        return;
+    }
 
     ID3D12Resource* depthIn = ReadableGuide(device, cmdList, depth, &nr.depthClone);
     ID3D12Resource* motionIn = ReadableGuide(device, cmdList, motion, &nr.motionClone);
@@ -712,6 +942,8 @@ auto DlssNr_Dx12::State::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
         }
 
         // Resolve pre-SR inputs without UAV support through an owned scratch and copy-back.
+        if (passConfig && resolveParams.Transfer == 1 && !superDownOk && workScale < 1.0f)
+            resolveParams.Mode = DlssNrMode_RawResidual;
         ID3D12Resource* resolveOriginal = targetSupportsUav ? nr.hdrCopy : target;
         ID3D12Resource* resolveTarget = targetSupportsUav ? target : nr.hdrCopy;
 

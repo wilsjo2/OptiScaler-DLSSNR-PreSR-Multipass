@@ -325,6 +325,14 @@ class Config
         CustomOptional<uint32_t, NoDefault> preset, style;
         CustomOptional<float, NoDefault> intensity, structure, tone, skin;
         CustomOptional<bool, NoDefault> autoMask;
+        // Optional resolution/reconstruction profile, independent of model tuning.
+        CustomOptional<float, NoDefault> workingScale;
+        CustomOptional<Scaler, NoDefault> scalingDownscaler;
+        CustomOptional<uint32_t, NoDefault> transfer;
+        CustomOptional<int, NoDefault> privateUpscaler;
+        CustomOptional<bool, NoDefault> spatialCompression;
+        CustomOptional<float, NoDefault> spatialCenterX, spatialCenterY, spatialWorkX, spatialWorkY;
+        CustomOptional<float, NoDefault> spatialOffsetX, spatialOffsetY, spatialShiftX, spatialShiftY;
     };
     NrPassOverrides DlssNrPassOverrides[29]; // Existing Pass2..Pass30 INI keys remain unchanged.
 

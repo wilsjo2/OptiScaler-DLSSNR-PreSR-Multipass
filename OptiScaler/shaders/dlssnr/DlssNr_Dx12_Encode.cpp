@@ -3,7 +3,7 @@
 
 void DlssNr_Dx12::State::EncodeInput(EncodeContext& context)
 {
-    const auto& cfg = *Config::Instance();
+    const auto& cfg = RunConfig();
     const auto& frame = context.frame;
     auto* cmdList = context.cmdList;
     auto* device = context.device;
@@ -249,7 +249,7 @@ void DlssNr_Dx12::State::EncodeInput(EncodeContext& context)
 
 DlssNrConstants DlssNr_Dx12::State::MakeResolveConstants(const EncodeContext& context, unsigned int effectivePasses)
 {
-    const auto& cfg = *Config::Instance();
+    const auto& cfg = RunConfig();
     const auto whitePoint = context.whitePoint;
     const auto width = nr.width, height = nr.height;
     const bool isHdrBuffer = context.frame.ColourIsLinearHdr;
