@@ -162,10 +162,21 @@ The native ViT experiment repeats blocks 31–38 and decodes `z + alpha * (ViT(z
 ./out-perf/Release/NrModelProbe.exe --vit-cost C:/NR/nvngx_dlssnr.dll C:/fixtures/model-input.rgba16f 384 216 C:/results/vit-cost -1
 ```
 
-`--overlap` measures pass 2 of frame N alongside pass 1 of frame N+1, with independent NR features and two COMPUTE queues. Modes are `single` (one queue), `serial` (two queues with an explicit dependency), and `parallel`. The probe alternates original/translated inputs, checks every output against DIRECT-queue references, records feature kernel censuses, and saves calibrated GPU intervals to CSV/JSON. It drains each paired wave before recording another; its measured pair time is not steady-state capture throughput. Upload/readback/parity checks are outside NR timing.
+`--overlap` measures pass 2 of frame N alongside pass 1 of frame N+1, with independent NR features and two COMPUTE queues. Modes are `single` (one queue), `serial` (two queues with an explicit dependency), and `parallel`. Append a second extent and `reset` or `sequence` to test different pass resolutions and retained histories. Mixed-resolution runs clamp and area-downsample A's output on B's queue, preserving the original frame's alpha. Reports include separate NR, handoff and complete-pair minimum, 10th percentile and mean timings; six warmup waves are excluded. Percentiles use linear interpolation at p*(N-1).
+
+Sequence references and concurrent playback start with separate fresh feature pairs, reset only frame zero, and compare every A/B output byte. A single input file produces a controlled moving pan with known backward motion vectors. A directory instead supplies real frames named `frame-0000.rgba16f` onward, with zero motion/depth explicitly labelled unavailable. Forty measured waves require 47 input frames. Every paired wave drains before recording another; this measures model/queue scheduling, not steady-state capture throughput, final reconstruction or application latency. Uploads, readbacks and parity checks are excluded from timing.
 
 ```powershell
 ./out-perf/Release/NrModelProbe.exe --overlap C:/NR/nvngx_dlssnr.dll C:/fixtures/model-input.rgba16f 960 540 C:/results/overlap parallel 40
+./out-perf/Release/NrModelProbe.exe --overlap C:/NR/nvngx_dlssnr.dll C:/fixtures/model-input.rgba16f 3840 2160 C:/results/mixed parallel 40 960 540 reset
+./out-perf/Release/NrModelProbe.exe --overlap C:/NR/nvngx_dlssnr.dll C:/fixtures/sequence/model 3840 2160 C:/results/moving parallel 40 960 540 sequence
+```
+
+`--capture-sequence` records an existing window's raw FP16 scRGB client frames and WGC timestamps, buffering in RAM before writing. It does not run NR, present an overlay or change focus. Start/end display HDR and SDR-white metadata are retained; display HDR status does not establish the game's render colour space. `nr_prepare_capture.py` converts these saved frames to model-space with the shared SDR or default soft-knee formulas, preserving the raw source; its default chooses soft knee on an HDR display. An explicit `--curve sdr` override is available for finished SDR.
+
+```powershell
+./out-perf/Release/NrModelProbe.exe --capture-sequence "World of Warcraft" C:/fixtures/sequence 48 24
+python ../../tests/nr_prepare_capture.py C:/fixtures/sequence
 ```
 
 `../../tests/nr_second_pass_ablation.py` ranks 49 shape-preserving block bypasses in pass 2 using the CPU reconstruction and actual native first-pass inputs. It also checks selected blocks and two explicit combinations on altered fixtures. Its quality estimates and timestamp-derived native cost proxies are separate from measured native bypass savings. See `VALIDATION.md` for results, artifact locations, and limitations.

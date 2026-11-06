@@ -2,6 +2,7 @@
 #include "Runtime.h"
 #include "ModelKernelTrace.h"
 #include "ModelOverlap.h"
+#include "ModelCapture.h"
 #include <d3d12sdklayers.h>
 #include <algorithm>
 #include <fstream>
@@ -159,6 +160,7 @@ int VitCost(int argc, wchar_t** argv) {
 }
 int wmain(int argc, wchar_t** argv) {
     try {
+        if (argc > 1 && std::wstring_view(argv[1]) == L"--capture-sequence") return RunModelCapture(argc, argv);
         if (argc > 1 && std::wstring_view(argv[1]) == L"--vit-cost") return VitCost(argc, argv);
         if (argc > 1 && std::wstring_view(argv[1]) == L"--overlap") {
             ModelKernelTrace::Install();

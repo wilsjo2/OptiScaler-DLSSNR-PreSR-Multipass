@@ -2,18 +2,30 @@
 #include "Gpu.h"
 #include "Runtime.h"
 #include "ModelKernelTrace.h"
+#include <ModelOverlapResize.h>
+#include <DirectXPackedVector.h>
 #include <d3d12sdklayers.h>
 #include <algorithm>
+#include <cstdlib>
+#include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <numeric>
+#include <memory>
 #include <vector>
 
 namespace {
 using namespace nr;
 using Pixels = std::vector<char>;
+
+[[noreturn]] void InFlightFailure() {
+    // This is a disposable research process. If completion is unknown, normal
+    // unwinding would free feature arenas and textures still in GPU use.
+    std::cerr << "Cannot establish GPU completion; terminating the overlap probe before releasing submitted resources.\n";
+    std::cerr.flush(); TerminateProcess(GetCurrentProcess(), 2); std::abort();
+}
 
 void Validate(ID3D12Device* device) {
     ComPtr<ID3D12InfoQueue> diagnostics;
@@ -32,8 +44,14 @@ void Validate(ID3D12Device* device) {
     if (failed) throw std::runtime_error("D3D12 validation failed in model overlap probe.");
 }
 void Complete(Gpu& gpu) {
-    gpu.Submit();
-    if (!gpu.Drain(60000)) throw std::runtime_error("Direct setup/readback timeout.");
+    try {
+        gpu.Submit();
+        if (!gpu.Drain(60000)) InFlightFailure();
+    } catch (...) {
+        try { if (!gpu.Drain(60000)) InFlightFailure(); }
+        catch (...) { InFlightFailure(); }
+        throw;
+    }
     Validate(gpu.device.Get());
 }
 std::string Hash(const Pixels& pixels) {
@@ -100,7 +118,8 @@ struct Transfer {
     }
 };
 
-struct Interval { double start = 0, end = 0; };
+struct Interval { double start = 0, end = 0; double Duration() const { return end - start; } };
+struct Times { Interval handoff, nr; };
 struct Compute {
     ComPtr<ID3D12CommandQueue> queue;
     ComPtr<ID3D12CommandAllocator> allocator;
@@ -119,9 +138,9 @@ struct Compute {
             IID_PPV_ARGS(&commands)), "Overlap compute list");
         Check(commands->Close(), "Close initial overlap list");
         Check(gpu.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)), "Overlap fence");
-        D3D12_QUERY_HEAP_DESC heap{}; heap.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP; heap.Count = 2;
+        D3D12_QUERY_HEAP_DESC heap{}; heap.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP; heap.Count = 4;
         Check(gpu.device->CreateQueryHeap(&heap, IID_PPV_ARGS(&queries)), "Overlap timestamps");
-        readback = gpu.Buffer(2 * sizeof(UINT64), D3D12_HEAP_TYPE_READBACK);
+        readback = gpu.Buffer(4 * sizeof(UINT64), D3D12_HEAP_TYPE_READBACK);
     }
     void Begin() {
         Wait();
@@ -140,103 +159,261 @@ struct Compute {
         Check(fence->SetEventOnCompletion(serial, event.value), "Overlap completion event");
         if (WaitForSingleObject(event.value, 60000) != WAIT_OBJECT_0) throw std::runtime_error("Overlap compute timeout.");
     }
-    Interval ReadTimes(ID3D12CommandQueue* actualQueue, UINT64 qpcOrigin, UINT64 qpcFrequency) {
+    Times ReadTimes(ID3D12CommandQueue* actualQueue, UINT64 qpcOrigin, UINT64 qpcFrequency) {
         UINT64 frequency = 0, calibratedGpu = 0, calibratedCpu = 0;
         Check(actualQueue->GetTimestampFrequency(&frequency), "Overlap timestamp frequency");
         // Calibration happens after execution. Subtract as double, never UINT64:
         // the recorded timestamps normally precede this calibration point.
         Check(actualQueue->GetClockCalibration(&calibratedGpu, &calibratedCpu), "Overlap clock calibration");
-        UINT64* mapped = nullptr; D3D12_RANGE range{0, 2 * sizeof(UINT64)};
+        UINT64* mapped = nullptr; D3D12_RANGE range{0, 4 * sizeof(UINT64)};
         Check(readback->Map(0, &range, reinterpret_cast<void**>(&mapped)), "Map overlap timestamps");
-        const UINT64 begin = mapped[0], end = mapped[1]; D3D12_RANGE none{}; readback->Unmap(0, &none);
-        if (!frequency || !begin || end < begin) throw std::runtime_error("Invalid overlap timestamps.");
+        std::array<UINT64, 4> ticks{}; std::copy_n(mapped, 4, ticks.begin());
+        D3D12_RANGE none{}; readback->Unmap(0, &none);
+        if (!frequency || !ticks[0] || !std::is_sorted(ticks.begin(), ticks.end())) throw std::runtime_error("Invalid overlap timestamps.");
         const auto convert = [&](UINT64 ticks) {
             return (double(calibratedCpu) - double(qpcOrigin)) * 1000.0 / double(qpcFrequency)
                 + (double(ticks) - double(calibratedGpu)) * 1000.0 / double(frequency);
         };
-        return {convert(begin), convert(end)};
+        return {{convert(ticks[0]), convert(ticks[1])}, {convert(ticks[2]), convert(ticks[3])}};
     }
 };
 struct DrainOnExit {
     Compute& a; Compute& b;
-    ~DrainOnExit() { try { a.Wait(); b.Wait(); } catch (...) {} }
+    ~DrainOnExit() { try { a.Wait(); b.Wait(); } catch (...) { InFlightFailure(); } }
 };
 struct Row {
     unsigned wave = 0, aFrame = 0, bFrame = 0;
     bool warmup = false;
-    Interval a, b;
-    double overlap = 0, makespan = 0, cpuRecord = 0, cpuEvaluateA = 0, cpuEvaluateB = 0, wall = 0;
+    Times a, b;
+    double overlap = 0, makespan = 0, nrMakespan = 0, cpuRecord = 0, cpuEvaluateA = 0, cpuEvaluateB = 0, wall = 0;
     std::string aHash, bHash;
+};
+
+// The B list owns this one dispatch and its descriptors. Its prior submission
+// always completes before the next recording changes descriptors/constants.
+struct PrepareB {
+    Gpu& gpu;
+    ComPtr<ID3D12RootSignature> root;
+    ComPtr<ID3D12PipelineState> pipeline;
+    ComPtr<ID3D12DescriptorHeap> heap;
+    explicit PrepareB(Gpu& gpu) : gpu(gpu) {
+        D3D12_DESCRIPTOR_RANGE ranges[]{{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0, 0, 0},
+            {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 2}};
+        D3D12_ROOT_PARAMETER parameters[2]{};
+        parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        parameters[0].DescriptorTable = {2, ranges};
+        parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        parameters[1].Constants = {0, 0, 4};
+        D3D12_ROOT_SIGNATURE_DESC signature{2, parameters}; ComPtr<ID3DBlob> blob, errors;
+        Check(D3D12SerializeRootSignature(&signature, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &errors), "Overlap handoff root signature");
+        Check(gpu.device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(&root)), "Overlap handoff root");
+        D3D12_COMPUTE_PIPELINE_STATE_DESC description{}; description.pRootSignature = root.Get();
+        description.CS = {ModelOverlapResize, sizeof ModelOverlapResize};
+        Check(gpu.device->CreateComputePipelineState(&description, IID_PPV_ARGS(&pipeline)), "Overlap handoff pipeline");
+        D3D12_DESCRIPTOR_HEAP_DESC descriptors{}; descriptors.NumDescriptors = 3;
+        descriptors.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; descriptors.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        Check(gpu.device->CreateDescriptorHeap(&descriptors, IID_PPV_ARGS(&heap)), "Overlap handoff descriptors");
+    }
+    void Run(ID3D12GraphicsCommandList* commands, ID3D12Resource* answer, ID3D12Resource* original, ID3D12Resource* target) {
+        auto handle = heap->GetCPUDescriptorHandleForHeapStart();
+        const auto stride = gpu.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        for (auto* source : {answer, original}) {
+            D3D12_SHADER_RESOURCE_VIEW_DESC view{}; view.Format = source->GetDesc().Format;
+            view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D; view.Texture2D.MipLevels = 1;
+            view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            gpu.device->CreateShaderResourceView(source, &view, handle); handle.ptr += stride;
+            Barrier(commands, source, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        }
+        gpu.device->CreateUnorderedAccessView(target, nullptr, nullptr, handle);
+        Barrier(commands, target, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        ID3D12DescriptorHeap* heaps[]{heap.Get()}; commands->SetDescriptorHeaps(1, heaps);
+        commands->SetComputeRootSignature(root.Get()); commands->SetPipelineState(pipeline.Get());
+        commands->SetComputeRootDescriptorTable(0, heap->GetGPUDescriptorHandleForHeapStart());
+        const UINT constants[]{UINT(answer->GetDesc().Width), answer->GetDesc().Height, UINT(target->GetDesc().Width), target->GetDesc().Height};
+        commands->SetComputeRoot32BitConstants(1, 4, constants, 0);
+        commands->Dispatch((constants[2] + 7) / 8, (constants[3] + 7) / 8, 1);
+        Barrier(commands, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+        for (auto* source : {answer, original})
+            Barrier(commands, source, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+    }
+};
+
+struct Stats {
+    double minimum = 0, p10 = 0, mean = 0, median = 0;
+    explicit Stats(std::vector<double> values) {
+        if (values.empty()) throw std::runtime_error("No measured overlap samples.");
+        mean = std::accumulate(values.begin(), values.end(), 0.0) / values.size();
+        std::sort(values.begin(), values.end()); minimum = values.front();
+        // Linear interpolation at p*(N-1), explicitly recorded in the report.
+        const double index = .1 * (values.size() - 1); const size_t lo = size_t(index), hi = std::min(lo + 1, values.size() - 1);
+        p10 = values[lo] + (values[hi] - values[lo]) * (index - lo);
+        median = (values[(values.size()-1)/2] + values[values.size()/2]) * .5;
+    }
+};
+
+Pixels Load(const std::filesystem::path& path, size_t bytes) {
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file || size_t(file.tellg()) != bytes) throw std::runtime_error("Expected tightly packed model-space RGBA16F: " + Narrow(path.wstring()));
+    Pixels pixels(bytes); file.seekg(0); file.read(pixels.data(), std::streamsize(bytes));
+    if (!file) throw std::runtime_error("Reading overlap input failed."); return pixels;
+}
+
+// Long 4K sequences use bounded RAM. Keep the cache after failure for diagnosis;
+// remove only this probe-created cache after every byte has been compared.
+struct References {
+    bool sequence;
+    size_t aBytes, bBytes;
+    std::filesystem::path path;
+    std::fstream cache;
+    std::array<std::array<Pixels, 2>, 2> resetFrames;
+    References(bool sequence, size_t aBytes, size_t bBytes, const std::filesystem::path& path)
+        : sequence(sequence), aBytes(aBytes), bBytes(bBytes), path(path) {
+        if (sequence) {
+            cache.open(path, std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc);
+            if (!cache) throw std::runtime_error("Cannot create chronological reference cache.");
+        }
+    }
+    void Store(unsigned frame, std::array<Pixels, 2> values) {
+        if (!sequence) { resetFrames.at(frame) = std::move(values); return; }
+        cache.seekp(std::streamoff(frame) * std::streamoff(aBytes + bBytes));
+        for (const auto& value : values) cache.write(value.data(), std::streamsize(value.size()));
+        if (!cache) throw std::runtime_error("Writing chronological reference cache failed.");
+    }
+    Pixels Get(unsigned frame, unsigned feature) {
+        if (!sequence) return resetFrames.at(frame % 2).at(feature);
+        const size_t bytes = feature ? bBytes : aBytes; Pixels result(bytes);
+        cache.seekg(std::streamoff(frame) * std::streamoff(aBytes + bBytes) + (feature ? std::streamoff(aBytes) : 0));
+        cache.read(result.data(), std::streamsize(bytes));
+        if (!cache) throw std::runtime_error("Reading chronological reference cache failed."); return result;
+    }
+    void Finish() { if (sequence) { cache.close(); std::filesystem::remove(path); } }
 };
 }
 
 int RunModelOverlap(int argc, wchar_t** argv) {
     try {
-        if (argc < 8 || argc > 9)
-            throw std::runtime_error("Usage: NrModelProbe --overlap <runtime> <input.rgba16f> <width> <height> <output-prefix> <single|serial|parallel> [samples=40]");
-        // argv is the complete process argument array, including --overlap.
+        if (argc != 8 && argc != 9 && argc != 11 && argc != 12)
+            throw std::runtime_error("Usage: NrModelProbe --overlap <runtime> <input.rgba16f|sequence-directory> <a-width> <a-height> <output-prefix> <single|serial|parallel> [samples=40] [b-width b-height] [reset|sequence=reset]");
         const UINT width = std::stoul(argv[4]), height = std::stoul(argv[5]);
-        const std::filesystem::path prefix = argv[6];
-        const std::wstring mode = argv[7];
+        const UINT bWidth = argc > 9 ? std::stoul(argv[9]) : width, bHeight = argc > 10 ? std::stoul(argv[10]) : height;
+        const std::filesystem::path prefix = argv[6], inputPath = argv[3];
+        const std::wstring mode = argv[7], history = argc > 11 ? argv[11] : L"reset";
         const unsigned samples = argc > 8 ? std::stoul(argv[8]) : 40;
-        if (!width || !height || width > 8192 || height > 8192 || !samples || samples > 10000)
-            throw std::runtime_error("Unsupported overlap extent/sample count.");
+        constexpr unsigned warmups = 6;
+        const unsigned waves = warmups + samples;
+        const bool sequence = history == L"sequence", mixed = bWidth != width || bHeight != height;
+        const bool directory = std::filesystem::is_directory(inputPath);
+        if (!width || !height || width > 8192 || height > 8192 || !bWidth || !bHeight || bWidth > width || bHeight > height ||
+            !samples || samples > 10000) throw std::runtime_error("Unsupported overlap extent/sample count; B must be no larger than A.");
         if (mode != L"single" && mode != L"serial" && mode != L"parallel") throw std::runtime_error("Unknown overlap mode.");
+        if (history != L"reset" && history != L"sequence") throw std::runtime_error("Unknown overlap history mode.");
+        if (directory && !sequence) throw std::runtime_error("A capture directory requires sequence mode.");
         if (!prefix.parent_path().empty()) std::filesystem::create_directories(prefix.parent_path());
         const auto path = [&](const wchar_t* suffix) { return std::filesystem::path(prefix.wstring() + suffix); };
-        const size_t pixelCount = size_t(width) * height, bytes = pixelCount * 8;
-        std::ifstream file(std::filesystem::path(argv[3]), std::ios::binary | std::ios::ate);
-        if (!file || size_t(file.tellg()) != bytes) throw std::runtime_error("Expected tightly packed RGBA16F overlap input.");
-        std::array<Pixels, 2> inputs{Pixels(bytes), Pixels(bytes)};
-        file.seekg(0); file.read(inputs[0].data(), std::streamsize(bytes));
-        if (!file) throw std::runtime_error("Overlap input read failed.");
-        for (UINT y = 0; y < height; ++y) for (UINT x = 0; x < width; ++x)
-            memcpy(inputs[1].data() + (size_t(y) * width + x) * 8,
-                inputs[0].data() + (size_t((y + height - (3 % height)) % height) * width + (x + width - (7 % width)) % width) * 8, 8);
-        if (inputs[0] == inputs[1]) throw std::runtime_error("Overlap fixture is unchanged by a (7,3) roll; use an image with spatial detail.");
+        const auto framePath = [&](unsigned frame) { return inputPath / std::format(L"frame-{:04}.rgba16f", frame); };
+        const size_t pixelCount = size_t(width) * height, bPixelCount = size_t(bWidth) * bHeight;
+        const size_t bytes = pixelCount * 8, bBytes = bPixelCount * 8;
+        // Fail missing/incomplete captures before initializing or exercising NR.
+        if (directory) for (unsigned frame = 0; frame <= waves; ++frame)
+            if (!std::filesystem::is_regular_file(framePath(frame)) || std::filesystem::file_size(framePath(frame)) != bytes)
+                throw std::runtime_error("Missing/incomplete sequence frame: " + Narrow(framePath(frame).wstring()));
+        const Pixels base = directory ? Pixels{} : Load(inputPath, bytes);
+        const auto pixelsFor = [&](unsigned frame) {
+            if (directory) return Load(framePath(frame), bytes);
+            const UINT dx = (sequence ? frame * 8 : (frame % 2) * 7) % width;
+            const UINT dy = (sequence ? frame * 4 : (frame % 2) * 3) % height;
+            Pixels result(bytes);
+            for (UINT y = 0; y < height; ++y) {
+                const char* source = base.data() + size_t((y + height - dy) % height) * width * 8;
+                char* target = result.data() + size_t(y) * width * 8;
+                memcpy(target, source + size_t(width-dx)*8, size_t(dx)*8);
+                memcpy(target + size_t(dx)*8, source, size_t(width-dx)*8);
+            }
+            return result;
+        };
+        const std::array<UINT, 2> widths{width, bWidth}, heights{height, bHeight};
+        std::array<Pixels, 2> zeroGuides{Pixels(pixelCount * 4), Pixels(bPixelCount * 4)}, movingGuides = zeroGuides;
+        // Known backward vectors for the synthetic wrapped pan. Capture playback
+        // has no geometric guides, so it explicitly uses zero depth and zero MV.
+        if (sequence && !directory) for (unsigned feature = 0; feature < 2; ++feature) {
+            const float dx = 8.0f * widths[feature] / width, dy = 4.0f * heights[feature] / height;
+            for (UINT y = 0; y < heights[feature]; ++y) for (UINT x = 0; x < widths[feature]; ++x) {
+                const uint16_t vector[]{DirectX::PackedVector::XMConvertFloatToHalf(x < dx ? widths[feature]-dx : -dx),
+                    DirectX::PackedVector::XMConvertFloatToHalf(y < dy ? heights[feature]-dy : -dy)};
+                memcpy(movingGuides[feature].data() + (size_t(y)*widths[feature]+x)*4, vector, 4);
+            }
+        }
+        const auto motionFor = [&](unsigned feature, unsigned frame) -> const Pixels& {
+            return sequence && frame && !directory ? movingGuides[feature] : zeroGuides[feature];
+        };
+        const auto resetFor = [&](unsigned frame) { return !sequence || !frame; };
+        const std::string guideMode = directory ? "zero-depth-zero-motion-unavailable" :
+            sequence ? "zero-depth-known-backward-wrapped-translation" : "zero-depth-zero-motion-reset";
+        std::cout << std::format("Overlap model-only {}: A {}x{}, B {}x{}, {}, {} frames; guides {}.\n",
+            Narrow(mode), width, height, bWidth, bHeight, Narrow(history), waves + 1, guideMode);
 
         Gpu gpu;
-        Runtime runtime(gpu.device.Get(), std::filesystem::absolute(argv[2]));
+        auto runtimeA = std::make_shared<Runtime>(gpu.device.Get(), std::filesystem::absolute(argv[2]));
+        Runtime runtimeB(runtimeA);
         DlssNr::ModelSettings settings; settings.preset = 1; settings.localTone = 1;
-        std::array<std::optional<DlssNr::ModelSettings>, Settings::MaxPasses - 1> overrides{};
-        overrides[0] = settings; // Later passes otherwise silently default to tone zero.
-        gpu.Begin();
-        Runtime::CheckResult(runtime.Create(gpu.commands.Get(), width, height, settings, 2, overrides), "Create independent overlap features");
-        Complete(gpu);
-
-        const auto texture = [&](DXGI_FORMAT format) { return gpu.Texture(width, height, format, D3D12_RESOURCE_STATE_COMMON); };
-        std::array<ComPtr<ID3D12Resource>, 2> colours{texture(DXGI_FORMAT_R16G16B16A16_FLOAT), texture(DXGI_FORMAT_R16G16B16A16_FLOAT)};
-        std::array<ComPtr<ID3D12Resource>, 2> intermediate{texture(DXGI_FORMAT_R16G16B16A16_FLOAT), texture(DXGI_FORMAT_R16G16B16A16_FLOAT)};
-        std::array<ComPtr<ID3D12Resource>, 2> depths{texture(DXGI_FORMAT_R32_FLOAT), texture(DXGI_FORMAT_R32_FLOAT)};
-        std::array<ComPtr<ID3D12Resource>, 2> motions{texture(DXGI_FORMAT_R16G16_FLOAT), texture(DXGI_FORMAT_R16G16_FLOAT)};
-        auto output = texture(DXGI_FORMAT_R16G16B16A16_FLOAT);
+        const auto createFeatures = [&] {
+            // Both are pass zero in independent feature owners, so tone one is
+            // explicit for both and the later-pass default cannot change B.
+            gpu.Begin();
+            Runtime::CheckResult(runtimeA->Create(gpu.commands.Get(), width, height, settings), "Create A feature");
+            Runtime::CheckResult(runtimeB.Create(gpu.commands.Get(), bWidth, bHeight, settings), "Create B feature");
+            Complete(gpu);
+        };
+        createFeatures();
+        const auto texture = [&](UINT w, UINT h, DXGI_FORMAT format) { return gpu.Texture(w, h, format, D3D12_RESOURCE_STATE_COMMON); };
+        std::array<ComPtr<ID3D12Resource>, 2> colours{texture(width, height, DXGI_FORMAT_R16G16B16A16_FLOAT), texture(width, height, DXGI_FORMAT_R16G16B16A16_FLOAT)};
+        std::array<ComPtr<ID3D12Resource>, 2> intermediate{texture(width, height, DXGI_FORMAT_R16G16B16A16_FLOAT), texture(width, height, DXGI_FORMAT_R16G16B16A16_FLOAT)};
+        std::array<ComPtr<ID3D12Resource>, 2> depths{texture(width, height, DXGI_FORMAT_R32_FLOAT), texture(bWidth, bHeight, DXGI_FORMAT_R32_FLOAT)};
+        std::array<ComPtr<ID3D12Resource>, 2> motions{texture(width, height, DXGI_FORMAT_R16G16_FLOAT), texture(bWidth, bHeight, DXGI_FORMAT_R16G16_FLOAT)};
+        auto output = texture(bWidth, bHeight, DXGI_FORMAT_R16G16B16A16_FLOAT);
+        auto bInput = mixed ? texture(bWidth, bHeight, DXGI_FORMAT_R16G16B16A16_FLOAT) : ComPtr<ID3D12Resource>{};
+        std::unique_ptr<PrepareB> prepare;
+        if (mixed) prepare = std::make_unique<PrepareB>(gpu);
         Transfer input0(gpu, colours[0].Get(), 8, true), input1(gpu, colours[1].Get(), 8, true);
         Transfer depth0(gpu, depths[0].Get(), 4, true), depth1(gpu, depths[1].Get(), 4, true);
         Transfer motion0(gpu, motions[0].Get(), 4, true), motion1(gpu, motions[1].Get(), 4, true);
         Transfer readA0(gpu, intermediate[0].Get(), 8, false), readA1(gpu, intermediate[1].Get(), 8, false), readB(gpu, output.Get(), 8, false);
-        std::array<Transfer*, 2> readA{&readA0, &readA1};
-        gpu.Begin(); input0.Upload(gpu.commands.Get(), inputs[0]); input1.Upload(gpu.commands.Get(), inputs[1]);
-        const Pixels zeros(pixelCount * 4);
-        for (auto* transfer : {&depth0, &depth1, &motion0, &motion1}) transfer->Upload(gpu.commands.Get(), zeros);
-        Complete(gpu);
+        std::array<Transfer*, 2> inputs{&input0, &input1}, readA{&readA0, &readA1};
+        std::array<Transfer*, 2> depthUploads{&depth0, &depth1}, motionUploads{&motion0, &motion1};
         Compute a(gpu), b(gpu);
         DrainOnExit drain{a, b};
         ID3D12CommandQueue* bQueue = mode == L"single" ? a.queue.Get() : b.queue.Get();
-        const auto evaluate = [&](ID3D12GraphicsCommandList* commands, unsigned feature, ID3D12Resource* input, ID3D12Resource* target,
-                                  Compute* timing = nullptr, ID3D12CommandQueue* traceQueue = nullptr) {
+        const auto waitDirect = [&] {
+            Check(gpu.queue->Wait(a.fence.Get(), a.serial), "Direct transfer waits for A");
+            Check(gpu.queue->Wait(b.fence.Get(), b.serial), "Direct transfer waits for B");
+        };
+        const auto uploadFrame = [&](unsigned aFrame, unsigned bFrame) {
+            // CPU uploads occur only after the previous wave drained; these
+            // three snapshots stay immutable until both feature fences finish.
+            const auto pixels = pixelsFor(aFrame);
+            waitDirect(); gpu.Begin(); inputs[aFrame % 2]->Upload(gpu.commands.Get(), pixels);
+            for (unsigned feature = 0; feature < 2; ++feature) {
+                depthUploads[feature]->Upload(gpu.commands.Get(), zeroGuides[feature]);
+                motionUploads[feature]->Upload(gpu.commands.Get(), motionFor(feature, feature ? bFrame : aFrame));
+            }
+            Complete(gpu); return Hash(pixels);
+        };
+        const auto evaluate = [&](ID3D12GraphicsCommandList* commands, unsigned feature, unsigned frame,
+                                  ID3D12Resource* input, ID3D12Resource* target, Compute* timing, ID3D12CommandQueue* traceQueue) {
             Barrier(commands, input, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             Barrier(commands, target, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             Barrier(commands, depths[feature].Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             Barrier(commands, motions[feature].Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            if (timing) commands->EndQuery(timing->queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
+            if (timing) commands->EndQuery(timing->queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 2);
             if (traceQueue) ModelKernelTrace::Begin(commands, traceQueue, false);
             const double start = ClockMs();
-            runtime.Evaluate(commands, input, depths[feature].Get(), motions[feature].Get(), target, width, height, true, feature);
+            (feature ? runtimeB : *runtimeA).Evaluate(commands, input, depths[feature].Get(), motions[feature].Get(),
+                target, widths[feature], heights[feature], resetFor(frame));
             const double elapsed = ClockMs() - start;
             if (traceQueue) ModelKernelTrace::End(commands);
             if (timing) {
-                commands->EndQuery(timing->queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
-                commands->ResolveQueryData(timing->queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, timing->readback.Get(), 0);
+                commands->EndQuery(timing->queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 3);
+                commands->ResolveQueryData(timing->queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 4, timing->readback.Get(), 0);
             }
             Barrier(commands, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
             Barrier(commands, input, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
@@ -244,135 +421,178 @@ int RunModelOverlap(int argc, wchar_t** argv) {
             Barrier(commands, motions[feature].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
             return elapsed;
         };
+        const auto record = [&](ID3D12GraphicsCommandList* commands, unsigned feature, unsigned frame,
+                                Compute* timing = nullptr, ID3D12CommandQueue* traceQueue = nullptr) {
+            const unsigned slot = frame % 2;
+            if (timing) commands->EndQuery(timing->queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
+            if (feature && mixed) prepare->Run(commands, intermediate[slot].Get(), colours[slot].Get(), bInput.Get());
+            if (timing) commands->EndQuery(timing->queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
+            return evaluate(commands, feature, frame,
+                feature ? (mixed ? bInput.Get() : intermediate[slot].Get()) : colours[slot].Get(),
+                feature ? output.Get() : intermediate[slot].Get(), timing, traceQueue);
+        };
         const auto readPair = [&](unsigned slot) {
-            Check(gpu.queue->Wait(a.fence.Get(), a.serial), "Direct readback waits for A");
-            Check(gpu.queue->Wait(b.fence.Get(), b.serial), "Direct readback waits for B");
-            gpu.Begin(); readA[slot]->Copy(gpu.commands.Get()); readB.Copy(gpu.commands.Get()); Complete(gpu);
+            waitDirect(); gpu.Begin(); readA[slot]->Copy(gpu.commands.Get()); readB.Copy(gpu.commands.Get()); Complete(gpu);
             return std::array<Pixels, 2>{readA[slot]->Read(), readB.Read()};
         };
-
-        // Serial DIRECT references test COMPUTE-list compatibility and distinguish
-        // the two frames. They are outside all reported performance measurements.
-        std::array<std::array<Pixels, 2>, 2> reference;
-        for (unsigned variant = 0; variant < 2; ++variant) {
-            gpu.Begin(); evaluate(gpu.commands.Get(), 0, colours[variant].Get(), intermediate[variant].Get()); Complete(gpu);
-            gpu.Begin(); evaluate(gpu.commands.Get(), 1, intermediate[variant].Get(), output.Get()); Complete(gpu);
-            reference[variant] = readPair(variant);
-            Save(path(variant ? L".direct.A1.rgba16f" : L".direct.A0.rgba16f"), reference[variant][0]);
-            Save(path(variant ? L".direct.B1.rgba16f" : L".direct.B0.rgba16f"), reference[variant][1]);
+        References references(sequence, bytes, bBytes, path(L".sequence-reference.tmp"));
+        std::ofstream referenceCsv(path(L".references.csv"));
+        referenceCsv << "frame,input_hash,a_motion_hash,b_motion_hash,a_hash,b_hash,reset\n";
+        const unsigned referenceCount = sequence ? waves + 1 : 2;
+        std::vector<std::string> inputHashes(referenceCount);
+        bool changedInput = false;
+        for (unsigned frame = 0; frame < referenceCount; ++frame) {
+            inputHashes[frame] = uploadFrame(frame, frame);
+            if (frame && inputHashes[frame] != inputHashes[0]) changedInput = true;
+            gpu.Begin(); record(gpu.commands.Get(), 0, frame); Complete(gpu);
+            gpu.Begin(); record(gpu.commands.Get(), 1, frame); Complete(gpu);
+            auto answers = readPair(frame % 2);
+            if (frame < 2) {
+                Save(path(frame ? L".direct.A1.rgba16f" : L".direct.A0.rgba16f"), answers[0]);
+                Save(path(frame ? L".direct.B1.rgba16f" : L".direct.B0.rgba16f"), answers[1]);
+            }
+            if (sequence && frame == waves) Save(path(L".direct.last.A.rgba16f"), answers[0]);
+            if (sequence && frame + 1 == waves) Save(path(L".direct.last.B.rgba16f"), answers[1]);
+            referenceCsv << frame << ',' << inputHashes[frame] << ',' << Hash(motionFor(0, frame)) << ',' << Hash(motionFor(1, frame))
+                << ',' << Hash(answers[0]) << ',' << Hash(answers[1]) << ',' << resetFor(frame) << '\n';
+            references.Store(frame, std::move(answers));
         }
-        if (reference[0][0] == reference[1][0] || reference[0][1] == reference[1][1])
-            throw std::runtime_error("Translated fixture produces indistinguishable NR outputs; frame-order validation is ineffective.");
+        referenceCsv.flush();
+        if (!referenceCsv) throw std::runtime_error("Writing reference manifest failed.");
+        if (!changedInput) throw std::runtime_error("All overlap inputs are identical; provide a moving/spatially detailed fixture.");
+        if (sequence) references.cache.flush();
 
-        // Trace one evaluation from each independent feature, collecting each
-        // only after its fence completes. The parameter captures expose distinct
-        // writable counter/tensor arenas without tracing the timed paired waves.
-        a.Begin(); evaluate(a.commands.Get(), 0, colours[0].Get(), intermediate[0].Get(), nullptr, a.queue.Get());
-        a.Close(); Check(a.queue->Wait(gpu.fence.Get(), gpu.serial), "Compute A waits for DIRECT controls");
+        // Sequential references must not seed the histories used by the paired
+        // run. Destroy both finished features, then create a completely fresh pair.
+        runtimeB.Release(); runtimeA->Release(); createFeatures();
+        uploadFrame(0, 0);
+        a.Begin(); record(a.commands.Get(), 0, 0, nullptr, a.queue.Get()); a.Close();
+        Check(a.queue->Wait(gpu.fence.Get(), gpu.serial), "Compute A waits for initial upload");
         a.Submit(a.queue.Get()); a.Wait(); Validate(gpu.device.Get());
         const auto traceA = ModelKernelTrace::Collect(path(L".A.trace"));
-        b.Begin(); evaluate(b.commands.Get(), 1, intermediate[0].Get(), output.Get(), nullptr, bQueue);
-        b.Close(); Check(bQueue->Wait(a.fence.Get(), a.serial), "Wait for priming A output");
-        b.Submit(bQueue); b.Wait(); Validate(gpu.device.Get());
-        const auto traceB = ModelKernelTrace::Collect(path(L".B.trace"));
-        auto priming = readPair(0);
-        Save(path(L".A0.rgba16f"), priming[0]); Save(path(L".B0.rgba16f"), priming[1]);
-        RequireEqual(priming[0], reference[0][0], "Initial COMPUTE A0");
-        RequireEqual(priming[1], reference[0][1], "Initial COMPUTE B0");
-
+        waitDirect(); gpu.Begin(); readA[0]->Copy(gpu.commands.Get()); Complete(gpu);
+        auto firstA = readA[0]->Read(); Save(path(L".A0.rgba16f"), firstA);
+        RequireEqual(firstA, references.Get(0, 0), "Initial COMPUTE A0");
+        ModelKernelTrace::Report traceB{};
+        if (!sequence) {
+            b.Begin(); record(b.commands.Get(), 1, 0, nullptr, bQueue); b.Close();
+            Check(bQueue->Wait(a.fence.Get(), a.serial), "Wait for priming A output");
+            Check(bQueue->Wait(gpu.fence.Get(), gpu.serial), "Priming B waits for readback");
+            b.Submit(bQueue); b.Wait(); Validate(gpu.device.Get());
+            traceB = ModelKernelTrace::Collect(path(L".B.trace"));
+            auto priming = readPair(0); Save(path(L".B0.rgba16f"), priming[1]);
+            RequireEqual(priming[1], references.Get(0, 1), "Initial COMPUTE B0");
+        }
+        // Sequence mode intentionally has no extra B0 priming: B must see each
+        // frame exactly once. B0 is traced in the first (excluded warmup) wave.
         LARGE_INTEGER qpcOrigin{}, qpcFrequency{}; QueryPerformanceCounter(&qpcOrigin); QueryPerformanceFrequency(&qpcFrequency);
         std::array<UINT64, 2> produced{a.serial, 0}, consumed{b.serial, 0};
-        constexpr unsigned warmups = 6;
-        std::vector<Row> rows; rows.reserve(warmups + samples);
+        std::vector<Row> rows; rows.reserve(waves);
         std::ofstream csv(path(L".csv"));
         if (!csv) throw std::runtime_error("Cannot create overlap CSV.");
         csv << std::setprecision(12)
-            << "wave,warmup,a_frame,b_frame,a_start_ms,a_end_ms,b_start_ms,b_end_ms,a_ms,b_ms,interval_overlap_ms,pair_makespan_ms,cpu_record_ms,cpu_evaluate_a_ms,cpu_evaluate_b_ms,record_submit_wait_ms,a_hash,b_hash,exact_direct_parity\n";
-        for (unsigned wave = 0; wave < warmups + samples; ++wave) {
+            << "wave,warmup,a_frame,b_frame,a_reset,b_reset,a_start_ms,a_end_ms,b_handoff_start_ms,b_handoff_end_ms,b_start_ms,b_end_ms,a_ms,b_ms,handoff_ms,interval_overlap_ms,nr_pair_makespan_ms,pair_makespan_ms,cpu_record_ms,cpu_evaluate_a_ms,cpu_evaluate_b_ms,record_submit_wait_ms,a_hash,b_hash,exact_direct_parity\n";
+        for (unsigned wave = 0; wave < waves; ++wave) {
             Row row; row.wave = wave; row.warmup = wave < warmups; row.aFrame = wave + 1; row.bFrame = wave;
             const unsigned next = row.aFrame % 2, previous = row.bFrame % 2;
-            const double wallStart = ClockMs();
-            a.Begin(); b.Begin();
+            const auto inputHash = uploadFrame(row.aFrame, row.bFrame);
+            if (inputHash != inputHashes[sequence ? row.aFrame : next])
+                throw std::runtime_error("Input changed between reference and COMPUTE replay.");
+            const double wallStart = ClockMs(); a.Begin(); b.Begin();
             const double recordStart = ClockMs();
-            row.cpuEvaluateA = evaluate(a.commands.Get(), 0, colours[next].Get(), intermediate[next].Get(), &a);
-            row.cpuEvaluateB = evaluate(b.commands.Get(), 1, intermediate[previous].Get(), output.Get(), &b);
-            // Finish all fallible command recording before queues can wait on a
-            // CPU gate. A recording exception therefore cannot strand a queue.
+            row.cpuEvaluateA = record(a.commands.Get(), 0, row.aFrame, &a);
+            row.cpuEvaluateB = record(b.commands.Get(), 1, row.bFrame, &b, sequence && !wave ? bQueue : nullptr);
             a.Close(); b.Close(); row.cpuRecord = ClockMs() - recordStart;
             ComPtr<ID3D12Fence> gate;
             Check(gpu.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate)), "Create paired-wave gate");
             try {
                 Check(a.queue->Wait(gate.Get(), 1), "Gate feature A queue");
-                Check(a.queue->Wait(gpu.fence.Get(), gpu.serial), "A waits for completed readbacks");
+                Check(a.queue->Wait(gpu.fence.Get(), gpu.serial), "A waits for frame snapshots");
                 if (consumed[next]) Check(a.queue->Wait(b.fence.Get(), consumed[next]), "Wait for reusable A slot");
                 const UINT64 aDone = a.Submit(a.queue.Get());
                 Check(bQueue->Wait(gate.Get(), 1), "Gate feature B queue");
-                Check(bQueue->Wait(gpu.fence.Get(), gpu.serial), "B waits for completed readbacks");
+                Check(bQueue->Wait(gpu.fence.Get(), gpu.serial), "B waits for frame snapshots");
                 Check(bQueue->Wait(a.fence.Get(), produced[previous]), "Wait for B frame producer");
                 if (mode == L"serial") Check(bQueue->Wait(a.fence.Get(), aDone), "Serialize current A before B");
                 const UINT64 bDone = b.Submit(bQueue);
-                // Both real ExecuteCommandLists calls have now reached queues.
                 Check(gate->Signal(1), "Release paired-wave gate");
-                a.Wait(); b.Wait();
-                produced[next] = aDone; consumed[previous] = bDone;
+                a.Wait(); b.Wait(); produced[next] = aDone; consumed[previous] = bDone;
             } catch (...) {
-                gate->Signal(1); // Also release a partially submitted pair.
-                try { a.Wait(); b.Wait(); } catch (...) {}
+                gate->Signal(1);
+                try { a.Wait(); b.Wait(); } catch (...) { InFlightFailure(); }
                 throw;
             }
-            row.wall = ClockMs() - wallStart;
-            Validate(gpu.device.Get());
+            row.wall = ClockMs() - wallStart; Validate(gpu.device.Get());
             row.a = a.ReadTimes(a.queue.Get(), UINT64(qpcOrigin.QuadPart), UINT64(qpcFrequency.QuadPart));
             row.b = b.ReadTimes(bQueue, UINT64(qpcOrigin.QuadPart), UINT64(qpcFrequency.QuadPart));
-            row.overlap = std::max(0.0, std::min(row.a.end, row.b.end) - std::max(row.a.start, row.b.start));
-            row.makespan = std::max(row.a.end, row.b.end) - std::min(row.a.start, row.b.start);
+            if (sequence && !wave) traceB = ModelKernelTrace::Collect(path(L".B.trace"));
+            row.overlap = std::max(0.0, std::min(row.a.nr.end, row.b.nr.end) - std::max(row.a.nr.start, row.b.nr.start));
+            row.nrMakespan = std::max(row.a.nr.end, row.b.nr.end) - std::min(row.a.nr.start, row.b.nr.start);
+            row.makespan = std::max(row.a.nr.end, row.b.nr.end) - std::min(row.a.nr.start, mixed ? row.b.handoff.start : row.b.nr.start);
             const auto actual = readPair(next);
             row.aHash = Hash(actual[0]); row.bHash = Hash(actual[1]);
-            // Save first/final answers before checking, so a failed experiment
-            // leaves concrete outputs for diagnosis rather than just a hash.
-            if (!wave) { Save(path(L".first.A.rgba16f"), actual[0]); Save(path(L".first.B.rgba16f"), actual[1]); }
-            if (wave + 1 == warmups + samples) { Save(path(L".last.A.rgba16f"), actual[0]); Save(path(L".last.B.rgba16f"), actual[1]); }
-            RequireEqual(actual[0], reference[next][0], "Paired COMPUTE A(next frame)");
-            RequireEqual(actual[1], reference[previous][1], "Paired COMPUTE B(previous frame)");
-            csv << row.wave << ',' << row.warmup << ',' << row.aFrame << ',' << row.bFrame << ','
-                << row.a.start << ',' << row.a.end << ',' << row.b.start << ',' << row.b.end << ','
-                << row.a.end - row.a.start << ',' << row.b.end - row.b.start << ',' << row.overlap << ',' << row.makespan << ','
-                << row.cpuRecord << ',' << row.cpuEvaluateA << ',' << row.cpuEvaluateB << ',' << row.wall << ','
-                << row.aHash << ',' << row.bHash << ",true\n";
+            if (!wave) {
+                Save(path(L".first.A.rgba16f"), actual[0]); Save(path(L".first.B.rgba16f"), actual[1]);
+                if (sequence) Save(path(L".B0.rgba16f"), actual[1]);
+            }
+            if (wave + 1 == waves) { Save(path(L".last.A.rgba16f"), actual[0]); Save(path(L".last.B.rgba16f"), actual[1]); }
+            const auto expectedA = references.Get(row.aFrame, 0), expectedB = references.Get(row.bFrame, 1);
+            const bool equal = actual[0] == expectedA && actual[1] == expectedB;
+            csv << row.wave << ',' << row.warmup << ',' << row.aFrame << ',' << row.bFrame << ',' << resetFor(row.aFrame) << ',' << resetFor(row.bFrame) << ','
+                << row.a.nr.start << ',' << row.a.nr.end << ',' << row.b.handoff.start << ',' << row.b.handoff.end << ',' << row.b.nr.start << ',' << row.b.nr.end << ','
+                << row.a.nr.Duration() << ',' << row.b.nr.Duration() << ',' << (mixed ? row.b.handoff.Duration() : 0) << ',' << row.overlap << ',' << row.nrMakespan << ',' << row.makespan << ','
+                << row.cpuRecord << ',' << row.cpuEvaluateA << ',' << row.cpuEvaluateB << ',' << row.wall << ',' << row.aHash << ',' << row.bHash << ',' << (equal ? "true" : "false") << '\n';
             csv.flush(); if (!csv) throw std::runtime_error("Writing overlap CSV failed.");
+            if (!equal) {
+                Save(path(L".failed.A.rgba16f"), actual[0]); Save(path(L".failed.B.rgba16f"), actual[1]);
+                RequireEqual(actual[0], expectedA, "Paired COMPUTE A(next frame)");
+                RequireEqual(actual[1], expectedB, "Paired COMPUTE B(previous frame)");
+            }
             rows.push_back(row);
         }
-        const auto mean = [&](auto value) {
-            double sum = 0; for (const auto& row : rows) if (!row.warmup) sum += value(row); return sum / samples;
+        const auto stats = [&](auto value) {
+            std::vector<double> values; for (const auto& row : rows) if (!row.warmup) values.push_back(value(row)); return Stats(std::move(values));
         };
-        std::vector<double> spans; for (const auto& row : rows) if (!row.warmup) spans.push_back(row.makespan);
-        std::sort(spans.begin(), spans.end());
-        const double median = (spans[(spans.size() - 1) / 2] + spans[spans.size() / 2]) * .5;
-        const double pairMean = mean([](const Row& r) { return r.makespan; });
-        const double overlapMean = mean([](const Row& r) { return r.overlap; });
-        std::ofstream json(path(L".json"));
-        json << std::setprecision(12) << "{\n\"schema\":1,\"experiment\":\"paired-wave\",\"mode\":\"" << Narrow(mode)
-            << "\",\"width\":" << width << ",\"height\":" << height << ",\"warmup_waves\":" << warmups << ",\"samples\":" << samples
-            << ",\"independent_features\":2,\"compute_queues_used\":" << (mode == L"single" ? 1 : 2)
-            << ",\"reset_each_evaluation\":true,\"tone_a\":1,\"tone_b\":1,\"translation\":[7,3],\"direct_parity\":\"bit-exact-all-frames\""
-            << ",\"a_mean_ms\":" << mean([](const Row& r) { return r.a.end - r.a.start; })
-            << ",\"b_mean_ms\":" << mean([](const Row& r) { return r.b.end - r.b.start; })
-            << ",\"interval_overlap_mean_ms\":" << overlapMean << ",\"pair_makespan_mean_ms\":" << pairMean
-            << ",\"pair_makespan_median_ms\":" << median
-            << ",\"cpu_record_mean_ms\":" << mean([](const Row& r) { return r.cpuRecord; })
-            << ",\"cpu_evaluate_a_mean_ms\":" << mean([](const Row& r) { return r.cpuEvaluateA; })
-            << ",\"cpu_evaluate_b_mean_ms\":" << mean([](const Row& r) { return r.cpuEvaluateB; })
-            << ",\"record_submit_wait_mean_ms\":" << mean([](const Row& r) { return r.wall; })
+        const auto aStats = stats([](const Row& r) { return r.a.nr.Duration(); });
+        const auto bStats = stats([](const Row& r) { return r.b.nr.Duration(); });
+        const auto handoffStats = stats([&](const Row& r) { return mixed ? r.b.handoff.Duration() : 0; });
+        const auto fullStats = stats([](const Row& r) { return r.makespan; });
+        const auto nrStats = stats([](const Row& r) { return r.nrMakespan; });
+        const auto overlapStats = stats([](const Row& r) { return r.overlap; });
+        const auto cpuStats = stats([](const Row& r) { return r.cpuRecord; });
+        const auto wallStats = stats([](const Row& r) { return r.wall; });
+        std::ofstream json(path(L".json")); json << std::setprecision(12);
+        json << "{\n\"schema\":2,\"experiment\":\"paired-wave\",\"mode\":\"" << Narrow(mode)
+            << "\",\"scope\":\"model-only NR plus interpass preparation; no native reconstruction, final composition or SR\""
+            << ",\"width\":" << width << ",\"height\":" << height << ",\"b_width\":" << bWidth << ",\"b_height\":" << bHeight
+            << ",\"history\":\"" << Narrow(history) << "\",\"source\":\"" << (directory ? "capture-directory" : sequence ? "synthetic-progressive-pan" : "alternating-pan") << "\""
+            << ",\"guide_mode\":\"" << guideMode << "\",\"warmup_waves\":" << warmups << ",\"samples\":" << samples
+            << ",\"independent_features\":2,\"fresh_features_after_reference\":true,\"compute_queues_used\":" << (mode == L"single" ? 1 : 2)
+            << ",\"reset_each_evaluation\":" << (sequence ? "false" : "true") << ",\"tone_a\":1,\"tone_b\":1,\"direct_parity\":\"bit-exact-all-frames\""
+            << ",\"interpass_filter\":\"" << (mixed ? "source-clamp-area-average-original-alpha" : "legacy-unmodified-model-output") << "\""
+            << ",\"pair_makespan_mean_ms\":" << fullStats.mean << ",\"pair_makespan_median_ms\":" << fullStats.median
+            << ",\"interval_overlap_mean_ms\":" << overlapStats.mean << ",\"a_mean_ms\":" << aStats.mean << ",\"b_mean_ms\":" << bStats.mean
+            << ",\"cpu_record_mean_ms\":" << cpuStats.mean << ",\"record_submit_wait_mean_ms\":" << wallStats.mean
+            << ",\"cpu_evaluate_a_mean_ms\":" << stats([](const Row& r) { return r.cpuEvaluateA; }).mean
+            << ",\"cpu_evaluate_b_mean_ms\":" << stats([](const Row& r) { return r.cpuEvaluateB; }).mean
             << ",\"initial_trace_a_kernels\":" << traceA.kernels << ",\"initial_trace_b_kernels\":" << traceB.kernels
             << ",\"last_a_frame\":" << rows.back().aFrame << ",\"last_b_frame\":" << rows.back().bFrame
-            << ",\"input_hashes\":[\"" << Hash(inputs[0]) << "\",\"" << Hash(inputs[1]) << "\"],\"direct_a_hashes\":[\""
-            << Hash(reference[0][0]) << "\",\"" << Hash(reference[1][0]) << "\"],\"direct_b_hashes\":[\""
-            << Hash(reference[0][1]) << "\",\"" << Hash(reference[1][1]) << "\"]"
-            << ",\"note\":\"B(frame N) and A(frame N+1); both lists submitted behind a fresh CPU-released gate. Every wave drains both queues before rerecording. Transfers and parity checks are outside NR timestamps and record/submit/wait duration. This is paired-wave latency, not steady-state throughput. Timestamp interval overlap does not prove physical kernel concurrency; compare pair makespan against serial controls.\"\n}\n";
+            << ",\"statistics\":{";
+        bool first = true;
+        const auto writeStats = [&](const char* name, const Stats& s) {
+            if (!first) json << ','; first = false;
+            json << '\"' << name << "\":{\"minimum_ms\":" << s.minimum << ",\"p10_ms\":" << s.p10 << ",\"mean_ms\":" << s.mean << ",\"median_ms\":" << s.median << '}';
+        };
+        writeStats("a_nr", aStats); writeStats("b_nr", bStats); writeStats("b_handoff", handoffStats);
+        writeStats("full_pair", fullStats); writeStats("nr_pair", nrStats); writeStats("nr_interval_overlap", overlapStats);
+        writeStats("cpu_record", cpuStats); writeStats("record_submit_wait", wallStats);
+        json << "},\"percentile_method\":\"linear interpolation at p*(N-1), measured waves only\""
+            << ",\"note\":\"B(frame N) and A(frame N+1), fresh gated submissions, both queues drained per wave. Handoff runs on B queue before its NR timestamp and is included in full_pair. Uploads, reference playback, readbacks and byte comparisons are excluded from paired-wave timings. This is latency, not steady throughput. Interval overlap does not prove physical kernel concurrency; compare full_pair against serial controls. Capture playback has no inferred geometry and explicitly uses zero guides.\"\n}\n";
         if (!json) throw std::runtime_error("Writing overlap JSON failed.");
-        std::cout << std::format("NR paired-wave {}: {:.4f} ms mean / {:.4f} ms median makespan, {:.4f} ms timestamp-interval overlap; {} measured waves after {} warmup.\n",
-            Narrow(mode), pairMean, median, overlapMean, samples, warmups);
-        std::cout << "All A/B outputs bit-exact against alternating-frame DIRECT references. Timestamp overlap alone does not prove concurrent kernels; compare serial makespan.\n";
-        runtime.Release(); return 0;
+        references.Finish();
+        std::cout << std::format("Full pair minimum {:.4f}, p10 {:.4f}, mean {:.4f} ms; NR A mean {:.4f}, B mean {:.4f}, handoff mean {:.4f} ms.\n",
+            fullStats.minimum, fullStats.p10, fullStats.mean, aStats.mean, bStats.mean, handoffStats.mean);
+        std::cout << "All chronological A/B outputs bit-exact against fresh DIRECT references; paired-wave measurements exclude transfers.\n";
+        runtimeB.Release(); runtimeA->Release(); return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
