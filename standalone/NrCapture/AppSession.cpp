@@ -18,8 +18,8 @@ void App::Run(CaptureSource source, Settings initial) {
         if (initial.frameGeneration > 1) session->fg = std::make_unique<FrameGeneration>(g, std::filesystem::path{}, initial.runtime);
         session->display = std::make_unique<Presentation>(g, source, window, session->fg.get(), initial.frameGeneration);
         session->capture = std::make_unique<Capture>(g, source, initial.captureBackend, initial.ProcessingFps());
-        Say(source.monitor ? L"Screen capture ready. Switch away from these controls to display the filter. Ctrl+Alt+End stops." :
-            L"Capture ready. Focus the selected window to display the filter. Ctrl+Alt+End stops.");
+        Say(source.monitor ? L"Screen capture ready. Ctrl+Alt+End stops." :
+            L"Capture ready. The filter shows while the selected window or these controls have focus. Ctrl+Alt+End stops.");
         double lastFrame = ClockMs(), reportAt = ClockMs(), latencySum = 0;
         unsigned frames = 0, resets = 0, fpsFrames = 0;
         unsigned timingFrame = 0;
@@ -84,8 +84,8 @@ void App::Run(CaptureSource source, Settings initial) {
             }
             if (!session->display->Active() || !current.enabled) {
                 pause(!current.enabled ? L"NR is disabled. The original picture is visible." :
-                    GetForegroundWindow() == window ? L"Paused while these controls have focus. Switch to the source to display the filter." :
-                    L"Paused: focus the selected source window to display the filter.");
+                    GetForegroundWindow() == window ? L"Paused: the selected source window is minimised or hidden." :
+                    L"Paused: focus the selected source window or these controls to display the filter.");
                 // Capture publishes only completed copies; Next queues no GPU work.
                 pendingCapture = false;
                 if (!acquired) WaitForSingleObject(stop.value, 20);
@@ -129,17 +129,19 @@ void App::Run(CaptureSource source, Settings initial) {
             const auto reflexStart = ClockMs();
             session->display->BeginFrame(current.maxFps); timings.reflex += ClockMs() - reflexStart;
             const auto nrStart = ClockMs();
+            g.lateSplit = true; // (Settings::editLate: the model's list goes to the GPU after the frame is presented)
             g.Begin();
             if (diagnostics && (timingFrame++ % 32) == 0) g.BeginTimings();
             auto* output = processor.Run(capture.Input(), current, hdr, reset, desktopWhite, frameTime, displayedFps, displayedOutputFps);
             timings.nr += ClockMs() - nrStart;
             const auto fgStart = ClockMs();
-            auto* sharedMotion = processor.FullResolutionMotion();
+            auto* sharedMotion = processor.SceneMotion();
             session->display->Copy(output, reset || (processed && current != applied) || (sharedMotion && processor.historyReset), sharedMotion);
             g.ResolveTimings(); g.Submit();
             timings.fgPrepare += ClockMs() - fgStart;
             const auto presentStart = ClockMs(); timings.record += presentStart - processingStarted;
             session->display->Present(); timings.present += ClockMs() - presentStart;
+            g.SubmitLate();
             pacer.Submitted(current.ProcessingFps(), processingStarted); pendingCapture = false;
             historyReset = false; previousCaptureTime = capture.timestamp; previousForeground = foreground;
             applied = current; processed = true;
@@ -150,13 +152,14 @@ void App::Run(CaptureSource source, Settings initial) {
                 DXGI_QUERY_VIDEO_MEMORY_INFO memory{}; g.adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &memory);
                 std::string passSizes;
                 for (unsigned pass = 0; pass < current.passes; ++pass) {
-                    const auto resolution = current.PassResolution(pass);
+                    const auto resolution = current.EffectiveResolution(pass);
                     const auto layout = DlssNr::Spatial::Build(resolution.spatial, capture.width, capture.height, resolution.modelScale * .01f);
                     const auto [modelWidth, modelHeight] = processor.PassModelSize(pass);
                     const char* reconstruction = resolution.modelScale > 100 ? "supersampled" :
                         resolution.modelScale == 100 ? "native" : resolution.transfer == 2 ? "edge-aware" :
                         resolution.upscaler == 1 ? "DLSS SR" : "bilinear";
                     if (!passSizes.empty()) passSizes += ", ";
+                    if (current.Shortcut(pass).reapply) { passSizes += std::format("P{} re-apply", pass + 1); continue; }
                     passSizes += std::format("P{} {}x{} {}{}", pass + 1, modelWidth, modelHeight,
                         reconstruction, layout.active ? "/foveated" : "");
                 }
@@ -175,6 +178,15 @@ void App::Run(CaptureSource source, Settings initial) {
                     reportedPresented = presented;
                 }
                 text += std::format(" | NR resets {}/{}", resets, frames);
+                if (processor.borrowEvaluations) {
+                    char borrow[256]{}; NrPassBorrow::Status(borrow, sizeof(borrow)); text += std::string(" | ") + borrow;
+                }
+                // The fused blocks and the rest of the network run 4-bit only in a "Model A - NVFP4" pass.
+                const bool nvfp4Model = current.Nvfp4Pass();
+                const bool passInOne = current.Nvfp4PassInOne(); // (such a model runs all of its own parts)
+                if (current.nvfp4FeedForward || passInOne) text += " | NVFP4 feed-forward " + Nvfp4Status();
+                if ((current.nvfp4Swin || passInOne) && nvfp4Model) text += " | NVFP4 fused blocks " + Nvfp4SwinStatus();
+                if ((current.nvfp4Split || current.nvfp4Vit || current.nvfp4PrePost || passInOne) && nvfp4Model) text += " | NVFP4 network " + Nvfp4NetStatus();
                 const auto acquiredFps = (capture.receivedFrames - reportedCaptures) * 1000.0 / (lastFrame - reportAt);
                 text += std::format(" | {} capture {:.1f} fps | GPU wait {:.1f} ms | Present {:.1f} ms",
                     initial.captureBackend ? "DXGI" : "WGC", acquiredFps, timings.gpuWait / frames, timings.present / frames);
@@ -220,6 +232,8 @@ void App::Run(CaptureSource source, Settings initial) {
                 Say(L"GPU completion timed out. Capture stopped; restart this application before retrying.");
             }
         } catch (...) { /* Device removal: releasing the dead device's resources is safe. */ }
+        // The NVFP4 kernels and buffers live outside the session; unreleased they would keep its device alive.
+        if (session) ReleaseNvfp4(session->gpu.device.Get());
     }
     session.reset(); PostMessageW(window, StatusMessage, 1, 0);
     winrt::uninit_apartment();

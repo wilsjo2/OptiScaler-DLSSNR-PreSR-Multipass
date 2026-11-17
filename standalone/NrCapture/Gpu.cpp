@@ -6,7 +6,7 @@ void Barrier(ID3D12GraphicsCommandList* c, ID3D12Resource* r, D3D12_RESOURCE_STA
     b.Transition = {r, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, before, after};
     c->ResourceBarrier(1, &b);
 }
-Gpu::Gpu() : event(CreateEventW(nullptr, FALSE, FALSE, nullptr)),
+Gpu::Gpu(bool warp) : event(CreateEventW(nullptr, FALSE, FALSE, nullptr)),
     frameEvent(CreateEventW(nullptr, TRUE, FALSE, nullptr)) {
     if (GetEnvironmentVariableW(L"NR_CAPTURE_DEBUG", nullptr, 0)) {
         ComPtr<ID3D12Debug> debug;
@@ -14,7 +14,11 @@ Gpu::Gpu() : event(CreateEventW(nullptr, FALSE, FALSE, nullptr)),
     }
     if (!event.value || !frameEvent.value) Check(HRESULT_FROM_WIN32(GetLastError()), "Fence event");
     Check(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)), "DXGI factory");
-    for (UINT index = 0; ; ++index) {
+    if (warp) {
+        Check(factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter)), "WARP adapter");
+        Check(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&device)), "WARP device");
+    }
+    for (UINT index = 0; !warp; ++index) {
         ComPtr<IDXGIAdapter4> candidate;
         if (factory->EnumAdapterByGpuPreference(index, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
             IID_PPV_ARGS(&candidate)) == DXGI_ERROR_NOT_FOUND) break;
@@ -50,7 +54,43 @@ void Gpu::WaitForCompletion(HANDLE stop) {
     if (MsgWaitForMultipleObjectsEx(2, waits, 20, QS_ALLINPUT, MWMO_INPUTAVAILABLE) == WAIT_FAILED)
         Check(HRESULT_FROM_WIN32(GetLastError()), "Wait for frame completion");
 }
+bool Gpu::BeginLate() {
+    if (!lateSplit) return false;
+    if (lateActive) throw std::runtime_error("Late GPU work is already being recorded.");
+    if (!lateCommands) {
+        Check(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&lateAllocator)), "Late allocator");
+        Check(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, lateAllocator.Get(), nullptr,
+            IID_PPV_ARGS(&lateCommands)), "Late command list");
+        Check(lateCommands->Close(), "Close initial late list");
+    }
+    if (!lateOpen) {
+        // Begin has seen every submission complete, the last late list among them.
+        Check(lateAllocator->Reset(), "Reset late allocator"); Check(lateCommands->Reset(lateAllocator.Get(), nullptr), "Reset late list");
+        lifetime.ResetRecording(lateCommands.Get()); lifetime.Record(lateCommands.Get());
+        lateOpen = true;
+    }
+    commands.Swap(lateCommands); lateActive = true;
+    return true;
+}
+void Gpu::EndLate() {
+    if (lateActive) { commands.Swap(lateCommands); lateActive = false; }
+}
+void Gpu::SubmitLate() {
+    if (!lateOpen) return;
+    if (!mainSubmitted) throw std::runtime_error("Cannot submit late work before its main list.");
+    EndLate();
+    Check(lateCommands->Close(), "Close late list"); ID3D12CommandList* lists[]{lateCommands.Get()};
+    queue->ExecuteCommandLists(1, lists); lifetime.Submitted(queue.Get(), 1, lists);
+    Check(queue->Signal(fence.Get(), ++serial), "Signal late submission");
+    lateOpen = false;
+}
 bool Gpu::Drain(DWORD timeout) {
+    // An exception may leave BOTH lists merely recorded. Never execute the late
+    // half without its encode, motion, field-read and resource-state transitions.
+    if (lateOpen && !mainSubmitted) {
+        EndLate(); lateCommands->Close(); lifetime.ResetRecording(lateCommands.Get());
+        lateOpen = false; recordingTimes = pendingTimes = false; timingActive.fill(false);
+    } else SubmitLate(); // a submitted main list may still need its late half
     // Covers an external capture-copy wait even if no processing list followed it.
     Check(queue->Signal(fence.Get(), ++serial), "Drain queue signal");
     if (!Complete()) {
@@ -62,12 +102,14 @@ bool Gpu::Drain(DWORD timeout) {
 }
 void Gpu::Begin() {
     if (!Complete()) throw std::runtime_error("Cannot reuse unfinished frame resources.");
+    if (lateOpen) throw std::runtime_error("Submit or drain pending late work before beginning another frame.");
+    EndLate(); mainSubmitted = false;
     Check(allocator->Reset(), "Reset allocator"); Check(commands->Reset(allocator.Get(), nullptr), "Reset list");
     lifetime.ResetRecording(commands.Get()); lifetime.Collect(); lifetime.Record(commands.Get());
 }
 void Gpu::Submit() {
     Check(commands->Close(), "Close list"); ID3D12CommandList* lists[]{commands.Get()};
-    queue->ExecuteCommandLists(1, lists); lifetime.Submitted(queue.Get(), 1, lists);
+    queue->ExecuteCommandLists(1, lists); mainSubmitted = true; lifetime.Submitted(queue.Get(), 1, lists);
     Check(queue->Signal(fence.Get(), ++serial), "Signal submission");
 }
 ComPtr<ID3D12Resource> Gpu::Texture(UINT w, UINT h, DXGI_FORMAT format, D3D12_RESOURCE_STATES state, bool shared) {

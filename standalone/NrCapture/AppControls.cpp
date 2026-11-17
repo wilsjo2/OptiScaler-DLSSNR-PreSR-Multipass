@@ -1,4 +1,5 @@
 #include "App.h"
+#include <bit>
 namespace nr {
 void App::ShowPage() {
     const int selected = TabCtrl_GetCurSel(Control(Tabs));
@@ -6,7 +7,7 @@ void App::ShowPage() {
 }
 void App::ShowPass() {
     Settings value; { std::lock_guard lock(mutex); value = settings; }
-    for (int id : {EditPass, ResolutionPass, FoveationPass})
+    for (int id : {EditPass, ResolutionPass, FoveationPass, ShortcutPass})
         SendMessageW(Control(id), CB_SETCURSEL, selectedPass, 0);
     const auto model = value.PassModel(selectedPass);
     const bool inherit = selectedPass && !value.passOverrides[selectedPass - 1];
@@ -17,7 +18,7 @@ void App::ShowPass() {
     SendMessageW(Control(SkinStructure), TBM_SETPOS, TRUE, (LPARAM)std::lround(model.skinStructure * 100));
     SetWindowTextW(Control(SkinStructure + 1000), std::format(L"Model skin structure: {:.2f}", model.skinStructure).c_str());
     SendMessageW(Control(Style), CB_SETCURSEL, model.style, 0);
-    SendMessageW(Control(Preset), CB_SETCURSEL, model.preset, 0);
+    SendMessageW(Control(Preset), CB_SETCURSEL, std::find(std::begin(ModelChoices), std::end(ModelChoices), model.preset) - std::begin(ModelChoices), 0);
     SendMessageW(Control(AutoMask), BM_SETCHECK, model.autoMask ? BST_CHECKED : BST_UNCHECKED, 0);
     for (int id : {Intensity, Structure, LocalTone, SkinStructure, Style, Preset, AutoMask}) EnableWindow(Control(id), !inherit);
     SetWindowTextW(Control(PassNote), selectedPass >= value.passes ? L"Inactive pass: edits are saved for when this pass is enabled." :
@@ -57,6 +58,28 @@ void App::ShowPass() {
     else if (spatial.workX == 100 && spatial.workY == 100)
         foveationNote += L" Both working extents are 100%, so this pass is not compressed.";
     SetWindowTextW(Control(FoveationNote), foveationNote.c_str());
+    const auto shortcut = selectedPass ? value.passShortcuts[selectedPass - 1] : PassShortcut{};
+    for (auto [id, on] : {std::pair{ReapplyPass, shortcut.reapply}, {BorrowTransformer, shortcut.borrowTransformer}, {BorrowBelow, shortcut.borrowBelow}})
+        SendMessageW(Control(id), BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(Control(BorrowLevel), CB_SETCURSEL, std::bit_width(shortcut.borrowLevel) - 2, 0);
+    // Pass 1 always runs the network; re-apply wins over both borrow options.
+    EnableWindow(Control(ReapplyPass), selectedPass != 0);
+    EnableWindow(Control(BorrowTransformer), selectedPass && !shortcut.reapply);
+    EnableWindow(Control(BorrowBelow), selectedPass && !shortcut.reapply);
+    EnableWindow(Control(BorrowLevel), selectedPass && !shortcut.reapply && shortcut.borrowBelow);
+    SetWindowTextW(Control(ShortcutNote), !selectedPass ? L"Pass 1 always runs the network. Select pass 2 or later." :
+        selectedPass >= value.passes ? L"Inactive pass: these choices are saved for when this pass is enabled." :
+        shortcut.reapply ? L"This pass runs no network: it repeats the change of the last pass that did, times the gain." :
+        shortcut.borrowBelow || shortcut.borrowTransformer ? L"This pass runs the network but reuses an earlier pass's blocks. Borrowing needs the same model, style and size as that pass; otherwise it runs normally." :
+        L"This pass runs the whole network.");
+    char borrow[256]{}; NrPassBorrow::Status(borrow, sizeof(borrow));
+    SetWindowTextW(Control(BorrowStatus), Wide(borrow).c_str());
+    SetWindowTextW(Control(Nvfp4Note), Wide(std::string(value.Nvfp4PassInOne() ? "In use: a pass has a 2xPass-in-one or 3xPass-in-one model, which runs all of its own parts (the boxes above are not followed)." :
+        value.Nvfp4Pass() ? "In use: a pass has the model \"Model A - NVFP4\"." :
+        "Not in use: no pass has the model \"Model A - NVFP4\" (Model passes tab). Model B follows the feed-forward box alone.") +
+        "\r\nTransformer feed-forward (4K and above): " + Nvfp4Status() +
+        ".\r\nFused blocks: " + Nvfp4SwinStatus() + ".\r\nRest of the network: " + Nvfp4NetStatus() +
+        ".\r\nKernel options: <family>.<group>=<number>, separated by spaces (families split, vit, prepost).").c_str());
 }
 void App::CreateControls() {
     auto label = [&](const wchar_t* text, int x, int y, int width = 410, int id = 0) { Add(L"STATIC", text, 0, x, y, width, 22, id); };
@@ -100,7 +123,7 @@ void App::CreateControls() {
     label(L"Target FPS (0 = uncapped)", 590, 148, 230);
     Add(L"EDIT", std::to_wstring(settings.maxFps).c_str(), WS_BORDER | ES_NUMBER | WS_TABSTOP, 835, 145, 110, 25, FpsLimit);
     Add(WC_TABCONTROLW, L"", WS_TABSTOP | WS_CLIPSIBLINGS, 16, 188, 934, 440, Tabs);
-    for (auto text : {L"Model passes", L"Input and resolution", L"Composition", L"HDR output", L"Inspect and compare", L"Halo suppression", L"Foveation"}) {
+    for (auto text : {L"Model passes", L"Input and resolution", L"Composition", L"HDR output", L"Inspect and compare", L"Halo suppression", L"Foveation", L"Faster passes", L"NVFP4"}) {
         TCITEMW item{}; item.mask = TCIF_TEXT; item.pszText = const_cast<wchar_t*>(text);
         TabCtrl_InsertItem(Control(Tabs), TabCtrl_GetItemCount(Control(Tabs)), &item);
     }
@@ -116,7 +139,12 @@ void App::CreateControls() {
     SendMessageW(Control(EditPass), CB_SETCURSEL, 0, 0);
     box(L"Inherit pass 1 settings (Local tone 0)", InheritPass, false, 36, 398);
     combo(L"Style", Style, {L"Standard", L"Natural", L"Cinematic"}, settings.model.style, 36, 438);
-    combo(L"Model", Preset, {L"Automatic", L"Original", L"Optimized (requires a supporting runtime)", L"Preset 3 (legacy)"}, settings.model.preset, 36, 508);
+    // In the order of ModelChoices. Saved values are the runtime preset (0 auto, 1 = Model A, 2 = Model B, 3) or
+    // Settings::ModelANvfp4 (4), so saved profiles keep their meaning.
+    combo(L"Model", Preset, {L"Automatic", L"Model A (Original)", L"Model A - NVFP4 (4-bit kernels, RTX 50 series)",
+        L"NVFP4 2xPass-in-one", L"NVFP4 3xPass-in-one",
+        L"Model B (Optimized, NR 310.9.16 or newer)", L"Preset 3 (legacy)"},
+        unsigned(std::find(std::begin(ModelChoices), std::end(ModelChoices), settings.model.preset) - std::begin(ModelChoices)), 36, 508);
     label(L"More passes increase GPU time and memory use.", 36, 582);
     edit(L"Model intensity (0-2)", Intensity, settings.model.intensity, 506, 235);
     edit(L"Local structure (0-2)", Structure, settings.model.localStructure, 506, 280);
@@ -144,7 +172,7 @@ void App::CreateControls() {
     SendMessageW(Control(ModelScale), TBM_SETRANGE, FALSE, MAKELPARAM(25, 200));
     SendMessageW(Control(ModelScale), TBM_SETPOS, TRUE, settings.modelScale);
     combo(L"Above 100%: downsampling filter", Downscaler, {L"FSR1", L"Bicubic", L"Catmull-Rom", L"Lanczos2", L"Lanczos3", L"Kaiser2", L"Kaiser3", L"MAGIC"}, settings.downscaler, 506, 388);
-    combo(L"Below 100%: edit transfer", Transfer, {L"Classic composition", L"Matched residuals", L"Edge-aware (spatial)"}, settings.transfer, 506, 452);
+    combo(L"Below 100%: edit transfer", Transfer, {L"Classic composition", L"Matched residuals", L"Edge-aware (spatial)", L"Difference"}, settings.transfer, 506, 452);
     combo(L"Below 100%: upscaling", Upscaler, {L"Bilinear", L"Private DLSS SR"}, settings.upscaler, 506, 516);
     EnableWindow(Control(Upscaler), settings.transfer != 2);
     Add(L"STATIC", L"", 0, 506, 578, 410, 38, ResolutionNote);
@@ -181,7 +209,7 @@ void App::CreateControls() {
     box(L"Apply model edit (uncheck to keep NR running hidden)", ApplyModel, true, 36, 278);
     combo(L"Comparison", Compare, {L"Processed", L"Original", L"Wipe", L"Side by side"}, 0, 36, 330);
     combo(L"Debug view", DebugView, {L"Off", L"Proxy (model input)", L"Raw model output", L"Difference (20x)"}, 0, 36, 415);
-    Add(L"STATIC", L"Hold and inspect settings are session-only.\r\nFocus the source to see the output.\r\nCtrl+Alt+End stops capture.", 0, 36, 519, 410, 75, 0);
+    Add(L"STATIC", L"Hold and inspect settings are session-only.\r\nThe output stays on behind these controls.\r\nCtrl+Alt+End stops capture.", 0, 36, 519, 410, 75, 0);
     slider(L"Wipe split", CompareSplit, settings.compareSplit, 0, 100, 506, 234);
     slider(L"Side-by-side zoom", CompareZoom, settings.compareZoom, 100, 200, 506, 312);
     box(L"Swap comparison sides", CompareSwap, settings.compareSwap, 506, 393);
@@ -207,8 +235,59 @@ void App::CreateControls() {
     edit(L"Work shift X (%)", FoveationShiftX, 0, 506, 325);
     edit(L"Work shift Y (%)", FoveationShiftY, 0, 506, 370);
     box(L"Show area (distorted wireframe grid)", ShowFoveation, false, 506, 423);
-    Add(L"STATIC", L"Working size reduces outer detail while keeping the focus at this pass's resolution.\r\nWork shift redistributes outer detail.\r\n\r\nShow area previews the selected pass. Focus the source to view it.", 0, 506, 464, 410, 108, 0);
+    Add(L"STATIC", L"Working size reduces outer detail while keeping the focus at this pass's resolution.\r\nWork shift redistributes outer detail.\r\n\r\nShow area previews the selected pass.", 0, 506, 464, 410, 108, 0);
     Add(L"STATIC", L"", 0, 36, 578, 880, 38, FoveationNote);
+    buildingPage = 7;
+    combo(L"Edit pass", ShortcutPass, {}, 0, 36, 232);
+    for (unsigned i = 1; i <= Settings::MaxPasses; ++i)
+        SendMessageW(Control(ShortcutPass), CB_ADDSTRING, 0, (LPARAM)std::format(L"Pass {}", i).c_str());
+    box(L"Re-apply previous change", ReapplyPass, false, 36, 292);
+    box(L"Borrow pass 1's transformer", BorrowTransformer, false, 36, 332);
+    box(L"Borrow everything at 1/x size and below", BorrowBelow, false, 36, 372);
+    combo(L"Borrow size (1/x)", BorrowLevel, {L"1/2", L"1/4", L"1/8", L"1/16", L"1/32"}, 4, 36, 407);
+    edit(L"Re-apply gain (0-2, all passes)", ReapplyGain, settings.reapplyGain, 36, 480);
+    // Settings::editInterval: a 100 % pass, or one below 100 % with the "Difference" transfer.
+    combo(L"The model runs on (100 % passes and Difference transfer)", EditInterval,
+          {L"every frame", L"every 2nd frame (the edit is re-applied between)", L"every 3rd frame", L"every 4th frame"},
+          std::clamp(settings.editInterval, 1u, 4u) - 1, 36, 540);
+    box(L"Picture first, model after it (edit one frame older)", EditLate, settings.editLate, 36, 600);
+    Add(L"STATIC", L"Re-apply runs no network for this pass: it adds the last network pass's change again, times the gain (0.81 fitted; 1 = same change). Consecutive re-apply passes cost one small dispatch.\r\n\r\nBorrowing runs the network but takes the transformer, or every block at 1/x size and below, from the earlier pass of this frame, saving GPU time. Smaller x borrows more and saves more.", 0, 506, 238, 410, 190, 0);
+    Add(L"STATIC", L"", 0, 506, 440, 410, 80, ShortcutNote);
+    Add(L"STATIC", L"", 0, 506, 530, 410, 80, BorrowStatus);
+    buildingPage = 8;
+    {
+        // The model's network as 4-bit (NVFP4) kernels of ours, a box per part; an unticked part runs NVIDIA's 8-bit kernel.
+        Add(L"STATIC", L"Run parts of the network as 4-bit (NVFP4) kernels. Experimental, RTX 50 series only; every part is switched on its own and applies to all passes. All parts but the transformer feed-forward are Model A's.", 0, 36, 232, 880, 36, 0);
+        struct Item { int id; const wchar_t* text; int width; bool checked; };
+        const auto row = [&](const wchar_t* title, int y, std::initializer_list<Item> items) {
+            Add(L"STATIC", title, 0, 36, y + 3, 200, 22, 0);
+            int x = 240;
+            for (const auto& item : items) {
+                Add(L"BUTTON", item.text, BS_AUTOCHECKBOX | WS_TABSTOP, x, y, item.width, 25, item.id);
+                SendMessageW(Control(item.id), BM_SETCHECK, item.checked ? BST_CHECKED : BST_UNCHECKED, 0);
+                x += item.width + 6;
+            }
+        };
+        const auto bit = [](unsigned mask, unsigned n) { return ((mask >> n) & 1) != 0; };
+        row(L"Input and output", 280, {{Nvfp4Pre, L"input block", 110, bit(settings.nvfp4PrePost, 0)}, {Nvfp4Post, L"output block", 110, bit(settings.nvfp4PrePost, 1)}});
+        row(L"Fused blocks, width", 314, {{Nvfp4Swin32, L"32", 58, bit(settings.nvfp4Swin, 0)}, {Nvfp4Swin64, L"64", 58, bit(settings.nvfp4Swin, 1)},
+            {Nvfp4Swin128, L"128", 58, bit(settings.nvfp4Swin, 2)}, {Nvfp4Swin256, L"256", 58, bit(settings.nvfp4Swin, 3)}});
+        row(L"Split blocks, width 512", 348, {{Nvfp4SplitQkv, L"attention", 90, bit(settings.nvfp4Split, 2)}, {Nvfp4SplitProj, L"its projection", 110, bit(settings.nvfp4Split, 3)},
+            {Nvfp4SplitFfwd, L"feed-forward", 105, bit(settings.nvfp4Split, 0)}, {Nvfp4SplitFfwdProj, L"its projection", 110, bit(settings.nvfp4Split, 1)},
+            {Nvfp4SplitHead, L"bottleneck head", 125, bit(settings.nvfp4Split, 4)}, {Nvfp4SplitDec, L"decoder input", 110, bit(settings.nvfp4Split, 5)}});
+        row(L"Transformer", 382, {{Nvfp4VitQkv, L"QKV", 60, bit(settings.nvfp4Vit, 0)}, {Nvfp4VitAttention, L"attention", 90, bit(settings.nvfp4Vit, 1)},
+            {Nvfp4VitProjection, L"projection", 95, bit(settings.nvfp4Vit, 2)}, {Nvfp4Box, L"feed-forward (also Model B)", 200, settings.nvfp4FeedForward}});
+        // Option words of the kernels (NrNet4::Parse items such as "prepost.pre=0 vit.attention=0 split.qkv=1"); the
+        // boxes above decide which groups run, so group lists typed here are overridden by them.
+        // The second set of 4-bit weights, per family; unticked, or without the file, the first 4-bit set.
+        row(L"Trained 4-bit weights", 416, {{Nvfp4SwinTrained, L"fused blocks", 110, settings.nvfp4SwinTrained},
+            {Nvfp4SplitTrained, L"split blocks", 105, settings.nvfp4SplitTrained}, {Nvfp4VitTrained, L"transformer", 105, settings.nvfp4VitTrained},
+            {Nvfp4FfnTrained, L"feed-forward", 110, settings.nvfp4FfnTrained}});
+        Add(L"STATIC", L"(off: the first 4-bit set)", 0, 706, 419, 210, 22, 0);
+        Add(L"STATIC", L"Kernel options", 0, 36, 453, 200, 22, 0);
+        Add(L"EDIT", Wide(settings.nvfp4Net).c_str(), WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 240, 450, 676, 25, Nvfp4Options);
+        Add(L"STATIC", L"", 0, 36, 484, 880, 132, Nvfp4Note);
+    }
     buildingPage = -1;
     Add(L"STATIC", status.c_str(), 0, 16, 647, 935, 83, Status);
     ShowPass(); ShowPage(); ListSources();

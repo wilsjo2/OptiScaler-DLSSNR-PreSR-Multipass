@@ -107,5 +107,48 @@ int main()
     pass2.workingScale = 9.0f;
     assert(PassResolutionSettings(config, 1).workingScale == 2.0f);
 
-    std::puts("NR pass profiles: inheritance, independent sizing/spatial settings, isolated snapshots and bounds passed.");
+    // Re-apply and borrow options: pass 1 never has them, re-apply wins over borrowing and over a resolution
+    // profile, runs of re-applying passes are counted, and child snapshots never inherit them.
+    Config reuse;
+    reuse.DlssNrPasses = 5u;
+    assert(reuse.DlssNrReapplyGain.value_or_default() == 0.81f && ReapplyGain(reuse) == 0.81f);
+    reuse.DlssNrReapplyGain = 3.0f;
+    assert(ReapplyGain(reuse) == 2.0f);
+    reuse.DlssNrReapplyGain = -1.0f;
+    assert(ReapplyGain(reuse) == 0.0f);
+    reuse.DlssNrReapplyGain = std::numeric_limits<float>::quiet_NaN();
+    assert(ReapplyGain(reuse) == 0.81f);
+    for (unsigned pass = 0; pass < 31; ++pass)
+        assert(!PassReapplies(reuse, pass) && !PassBorrow(reuse, pass).transformer && !PassBorrow(reuse, pass).below);
+    assert(PassBorrow(reuse, 1).level == 32);
+    auto& second = reuse.DlssNrPassOverrides[0];
+    auto& third = reuse.DlssNrPassOverrides[1];
+    auto& fourth = reuse.DlssNrPassOverrides[2];
+    second.borrowTransformer = true;
+    third.borrowBelow = true;
+    third.borrowLevel = 8u;
+    assert(PassBorrow(reuse, 1).transformer && !PassBorrow(reuse, 1).below);
+    assert(PassBorrow(reuse, 2).below && PassBorrow(reuse, 2).level == 8);
+    second.reapply = true;
+    third.reapply = true;
+    fourth.reapply = false;
+    reuse.DlssNrPassOverrides[3].reapply = true;
+    assert(!PassReapplies(reuse, 0) && PassReapplies(reuse, 1) && PassReapplies(reuse, 2));
+    assert(!PassReapplies(reuse, 3) && PassReapplies(reuse, 4) && !PassReapplies(reuse, 30));
+    assert(!PassBorrow(reuse, 1).transformer && !PassBorrow(reuse, 2).below); // re-apply wins
+    assert(ReapplyRun(reuse, 1, 5) == 2 && ReapplyRun(reuse, 2, 5) == 1 && ReapplyRun(reuse, 3, 5) == 0);
+    assert(ReapplyRun(reuse, 4, 5) == 1 && ReapplyRun(reuse, 1, 2) == 1 && ReapplyRun(reuse, 4, 4) == 0);
+    // A re-applying pass runs no network, so its resolution profile does not select the independent chain.
+    second.workingScale = 0.5f;
+    assert(!HasPassResolutionOverrides(reuse, 5));
+    second.reapply = false;
+    assert(HasPassResolutionOverrides(reuse, 5));
+    second.workingScale.reset();
+    Config reuseChild;
+    ApplyPassConfig(reuseChild, reuse, 3);
+    for (unsigned pass = 0; pass < 31; ++pass)
+        assert(!PassReapplies(reuseChild, pass) && !PassBorrow(reuseChild, pass).below);
+
+    std::puts("NR pass profiles: inheritance, independent sizing/spatial settings, isolated snapshots, bounds and "
+              "re-apply/borrow options passed.");
 }

@@ -22,9 +22,71 @@ void RuntimePathCheck() {
     expect(L"runtime/nvngx_dlssnr.dll", bundled);
     expect(custom, custom);
     expect(app / L"runtime", bundled); // A directory is not a DLL.
+    // Another package's bundled runtime (the older package this one replaces) must not shadow ours.
+    const auto old = root / L"old package";
+    std::filesystem::create_directories(old / L"runtime");
+    std::ofstream(old / L"display_filter.exe").put('x'); std::ofstream(old / L"runtime" / L"nvngx_dlssnr.dll").put('x');
+    expect(old / L"runtime" / L"nvngx_dlssnr.dll", bundled);
+    expect(old / L"Runtime" / L"nvngx_dlssnr.dll", bundled);
+    // ...unless the user picked exactly that DLL here; a different choice (an older package rewrote Runtime) does not count.
+    const auto chosen = [&](const std::filesystem::path& saved, const std::filesystem::path& pick, const std::filesystem::path& wanted) {
+        if (ResolveRuntimePath(saved, app, pick) != wanted) throw std::runtime_error("Chosen NR runtime path lookup failed.");
+    };
+    chosen(old / L"runtime" / L"nvngx_dlssnr.dll", old / L"runtime" / L"nvngx_dlssnr.dll", old / L"runtime" / L"nvngx_dlssnr.dll");
+    chosen(old / L"runtime" / L"nvngx_dlssnr.dll", old / L"Runtime" / L"NVNGX_DLSSNR.dll", old / L"runtime" / L"nvngx_dlssnr.dll");
+    chosen(old / L"runtime" / L"nvngx_dlssnr.dll", custom, bundled);
+    chosen(old / L"runtime" / L"nvngx_dlssnr.dll", root / L"missing" / L"nvngx_dlssnr.dll", bundled);
+    // A user-chosen DLL in a runtime folder without a package executable still wins.
+    const auto tools = root / L"tools" / L"runtime" / L"nvngx_dlssnr.dll";
+    std::filesystem::create_directories(tools.parent_path()); std::ofstream(tools).put('x');
+    expect(tools, tools);
+    expect(bundled, bundled); // This package's own bundled runtime, saved earlier.
     std::filesystem::remove(bundled); expect({}, adjacent);
+    expect(old / L"runtime" / L"nvngx_dlssnr.dll", adjacent);
     std::filesystem::remove(adjacent); expect({}, bundled);
-    std::cout << "PASS runtime lookup: moved package, missing saved path, executable-relative path, custom DLL, adjacent DLL and Unicode folders\n";
+    // With no runtime in this package, the other package's DLL is still better than none.
+    expect(old / L"runtime" / L"nvngx_dlssnr.dll", old / L"runtime" / L"nvngx_dlssnr.dll");
+    std::cout << "PASS runtime lookup: moved package, missing saved path, executable-relative path, custom DLL, adjacent DLL, other package's bundled runtime (unless chosen) and Unicode folders\n";
+}
+void SettingsCheck(const Settings& settings) {
+    Settings saved = settings;
+    if (saved.runtime.empty()) saved.runtime = ResolveRuntimePath({}, ExecutableDirectory()); // What loading resolves it to.
+    saved.unlockPasses = true; saved.passes = 10; saved.modelScale = 175; saved.downscaler = 6;
+    saved.model.style = 2; saved.model.preset = Settings::ModelANvfp4; saved.model.autoMask = false; // The selector's own value, above the runtime's presets.
+    saved.highlightGuard = 3; saved.compareSplit = .25f; saved.compareZoom = 1.5f;
+    saved.compareSwap = true; saved.compareLabels = false; saved.labelScale = 2;
+    saved.peakBrightnessNits = 1000; saved.blackLevelNits = -.05f;
+    saved.haloSuppression = .75f; saved.haloBrightSuppression = .25f; saved.haloRadius = 3;
+    saved.upscaler = 1; saved.transfer = 0; // DLSS must not silently force matched transfer on load.
+    saved.passOverrides[8] = saved.PassModel(9); saved.passOverrides[8]->localTone = .5f; saved.passOverrides[8]->preset = 1;
+    saved.reapplyGain = 1.25f;
+    saved.runtimeChosen = L"C:/chosen/runtime/nvngx_dlssnr.dll"; // Stored as picked, never resolved.
+    saved.passShortcuts[0] = {true, true, false, 8}; // Saved as ticked even though re-apply wins.
+    saved.passShortcuts[3] = {false, true, true, 2};
+    saved.passShortcuts[8] = {false, false, true, 16}; // Pass 10, without a model override.
+    const auto file = std::filesystem::temp_directory_path() / std::format(L"nr-feature-settings-{}-{}.ini", GetCurrentProcessId(), GetTickCount64());
+    SaveSettings(saved, file);
+    const auto restored = LoadSettings(file);
+    if (restored != saved) { std::filesystem::remove(file); throw std::runtime_error("Feature settings failed to round trip."); }
+    // Out-of-range saved values are clamped: gain to 0..2, borrow levels to the nearest of 2/4/8/16/32.
+    WritePrivateProfileStringW(L"NR", L"ReapplyGain", L"7", file.c_str());
+    WritePrivateProfileStringW(L"NR", L"Pass2.BorrowLevel", L"5", file.c_str());
+    WritePrivateProfileStringW(L"NR", L"Pass3.BorrowLevel", L"1000", file.c_str());
+    WritePrivateProfileStringW(L"NR", L"Pass4.BorrowLevel", L"x", file.c_str());
+    WritePrivateProfileStringW(L"NR", L"Pass5.Reapply", L"3", file.c_str());
+    const auto clamped = LoadSettings(file); std::filesystem::remove(file);
+    if (clamped.reapplyGain != 2 || clamped.passShortcuts[0].borrowLevel != 4 || clamped.passShortcuts[1].borrowLevel != 32 ||
+        clamped.passShortcuts[2].borrowLevel != 32 || !clamped.passShortcuts[3].reapply)
+        throw std::runtime_error("Saved re-apply/borrow values were not validated.");
+    const auto missing = LoadSettings(std::filesystem::temp_directory_path() / L"nr-feature-settings-missing.ini");
+    if (missing.reapplyGain != .81f || missing.passShortcuts != decltype(missing.passShortcuts){})
+        throw std::runtime_error("Re-apply/borrow defaults changed.");
+    // A resolution override left on a re-apply pass is dead: it must not select the independent chain.
+    Settings dead; dead.passes = 2; dead.passResolutionOverrides[0] = dead.PassResolution(1);
+    if (!dead.HasPassResolutionOverrides()) throw std::runtime_error("Pass resolution override not seen.");
+    dead.passShortcuts[0].reapply = true;
+    if (dead.HasPassResolutionOverrides()) throw std::runtime_error("A re-apply pass's resolution override selected the chain.");
+    std::cout << "PASS per-pass, re-apply/borrow, supersampling, comparison and composition settings round trip and validation (isolated INI)\n";
 }
 void FeatureChecks(Processor& processor, const Settings& settings, std::vector<uint16_t>& pixels,
     const std::function<void()>& upload,
@@ -32,20 +94,7 @@ void FeatureChecks(Processor& processor, const Settings& settings, std::vector<u
     using DirectX::PackedVector::XMConvertHalfToFloat;
     using DirectX::PackedVector::XMConvertFloatToHalf;
     const auto original = pixels;
-    Settings saved = settings;
-    saved.unlockPasses = true; saved.passes = 10; saved.modelScale = 175; saved.downscaler = 6;
-    saved.model.style = 2; saved.model.preset = 1; saved.model.autoMask = false;
-    saved.highlightGuard = 3; saved.compareSplit = .25f; saved.compareZoom = 1.5f;
-    saved.compareSwap = true; saved.compareLabels = false; saved.labelScale = 2;
-    saved.peakBrightnessNits = 1000; saved.blackLevelNits = -.05f;
-    saved.haloSuppression = .75f; saved.haloBrightSuppression = .25f; saved.haloRadius = 3;
-    saved.upscaler = 1; saved.transfer = 0; // DLSS must not silently force matched transfer on load.
-    saved.passOverrides[8] = saved.PassModel(9); saved.passOverrides[8]->localTone = .5f;
-    const auto file = std::filesystem::temp_directory_path() / std::format(L"nr-feature-settings-{}-{}.ini", GetCurrentProcessId(), GetTickCount64());
-    SaveSettings(saved, file);
-    const auto restored = LoadSettings(file); std::filesystem::remove(file);
-    if (restored != saved) throw std::runtime_error("Feature settings failed to round trip.");
-    std::cout << "PASS per-pass, supersampling, comparison and composition settings round trip (isolated INI)\n";
+    SettingsCheck(settings);
     auto mode = settings; mode.estimateMotion = false; mode.upscaler = 0; mode.modelScale = 100; mode.compareLabels = false;
     mode.passes = 1;
     const auto one = read(mode, false, 1, true);
@@ -63,6 +112,30 @@ void FeatureChecks(Processor& processor, const Settings& settings, std::vector<u
     mode.model.style = 1; mode.model.autoMask = false;
     if (read(mode, false, 1, true) == one) throw std::runtime_error("Style/mask tuning did not change output.");
     std::cout << "PASS independent 1/10-pass switching, pass-10 override, inactive profile isolation and style/mask tuning\n";
+    for (const bool chain : {false, true}) {
+        // Re-apply: no network for pass 2+; r consecutive re-apply passes equal one pass with r times the gain.
+        auto shortcut = settings; shortcut.estimateMotion = false; shortcut.upscaler = 0; shortcut.modelScale = 100;
+        shortcut.compareLabels = false; shortcut.unlockPasses = true; shortcut.debugView = 2; // Raw model answer.
+        if (chain) for (unsigned pass = 1; pass < 3; ++pass) shortcut.passResolutionOverrides[pass - 1] = shortcut.PassResolution(pass);
+        const char* path = chain ? "independent-pass chain" : "shared-feature";
+        shortcut.passes = 1; const auto single = read(shortcut, false, 1, true);
+        shortcut.passes = 2; const auto twice = read(shortcut, false, 1, true);
+        shortcut.passShortcuts[0].reapply = true; shortcut.reapplyGain = .81f;
+        const auto reapplied = read(shortcut, false, 1, true);
+        if (reapplied == single || reapplied == twice) throw std::runtime_error(std::format("{}: re-apply matched one or two network passes.", path));
+        if (read(shortcut, false, 1, true) != reapplied) throw std::runtime_error(std::format("{}: re-apply was not deterministic.", path));
+        shortcut.reapplyGain = 1;
+        if (read(shortcut, false, 1, true) == reapplied) throw std::runtime_error(std::format("{}: re-apply gain had no effect.", path));
+        shortcut.reapplyGain = 2 * .81f; const auto doubled = read(shortcut, false, 1, true);
+        shortcut.reapplyGain = .81f; shortcut.passes = 3; shortcut.passShortcuts[1].reapply = true;
+        if (read(shortcut, false, 1, true) != doubled) throw std::runtime_error(std::format("{}: two re-apply passes differ from one with twice the gain.", path));
+        shortcut.passShortcuts[1].reapply = false; // Real, re-apply, real: the third pass sees the clamped re-apply result.
+        const auto between = read(shortcut, false, 1, true);
+        if (between == reapplied || between == twice) throw std::runtime_error(std::format("{}: a network pass after re-apply had no effect.", path));
+        shortcut.passes = 1;
+        if (read(shortcut, false, 1, true) != single) throw std::runtime_error(std::format("{}: inactive re-apply passes changed active output.", path));
+        std::cout << std::format("PASS {} re-apply: no evaluation, gain, run of two = one dispatch at twice the gain, later network pass, inactive isolation\n", path);
+    }
     mode = settings; mode.estimateMotion = false; mode.passes = 1; mode.upscaler = 0; mode.modelScale = 100; mode.compareLabels = false;
     mode.holdFrame = true;
     const auto held = read(mode, false, 1, true);
@@ -218,9 +291,11 @@ void FeatureChecks(Processor& processor, const Settings& settings, std::vector<u
     mode.modelScale = 50; mode.transfer = 2; mode.inputColour = 2;
     mode.haloSuppression = mode.haloBrightSuppression = 1;
     for (unsigned tone = 0; tone < 5; ++tone) { mode.tone = tone; read(mode, true, 1, true); }
-    saved.transfer = 2; SaveSettings(saved, file);
-    if (LoadSettings(file) != saved) throw std::runtime_error("Edge-aware settings failed to round trip.");
-    std::filesystem::remove(file); pixels = original; upload();
+    auto saved = settings; saved.transfer = 2;
+    const auto file = std::filesystem::temp_directory_path() / std::format(L"nr-edge-settings-{}-{}.ini", GetCurrentProcessId(), GetTickCount64());
+    SaveSettings(saved, file); const bool restored = LoadSettings(file) == saved; std::filesystem::remove(file);
+    if (!restored) throw std::runtime_error("Edge-aware settings failed to round trip.");
+    pixels = original; upload();
     std::cout << "PASS edge-aware and both halo controls: actual pixel changes, 50/100/125%, two passes, SDR/five HDR mappings, exact disable/hidden-edit output and saved settings\n";
     HdrOutputCheck(processor, settings, pixels, upload, read);
 }

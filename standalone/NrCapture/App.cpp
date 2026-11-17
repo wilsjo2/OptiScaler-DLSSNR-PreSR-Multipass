@@ -29,7 +29,9 @@ void App::ListSources() {
 void App::ReadControls() {
     Settings next;
     { std::lock_guard lock(mutex); next = settings; }
-    wchar_t path[32768]{}; GetWindowTextW(Control(RuntimePath), path, 32768); next.runtime = path;
+    wchar_t path[32768]{}; GetWindowTextW(Control(RuntimePath), path, 32768);
+    if (next.runtime != path) next.runtimeChosen = path; // Browse or typing: an explicit choice survives restarts.
+    next.runtime = path;
     auto number = [&](int id, float low, float high) {
         wchar_t text[64]{}; GetWindowTextW(Control(id), text, 64); wchar_t* end = nullptr;
         float value = wcstof(text, &end);
@@ -122,15 +124,28 @@ void App::ReadControls() {
     }
     EnableWindow(Control(PreviewSkin), next.separateSkin);
     model.localStructure = number(Structure, 0, 2); model.localTone = number(LocalTone, 0, 2);
-    model.style = choice(Style); model.preset = choice(Preset); model.autoMask = checked(AutoMask);
+    model.style = choice(Style); model.autoMask = checked(AutoMask);
+    if (const unsigned c = choice(Preset); c < std::size(ModelChoices)) model.preset = ModelChoices[c]; // none: a saved removed model stays (and is refused: Runtime::Create)
     if (!selectedPass) next.model = model;
     else if (checked(InheritPass)) next.passOverrides[selectedPass - 1].reset();
     else next.passOverrides[selectedPass - 1] = model;
+    if (selectedPass) {
+        // Disabled borrow boxes keep their saved state; re-apply takes precedence when processing.
+        auto& shortcut = next.passShortcuts[selectedPass - 1];
+        shortcut.reapply = checked(ReapplyPass);
+        shortcut.borrowTransformer = checked(BorrowTransformer); shortcut.borrowBelow = checked(BorrowBelow);
+        shortcut.borrowLevel = 2u << std::min(choice(BorrowLevel), 4u);
+    }
+    next.reapplyGain = number(ReapplyGain, 0, 2);
+    next.editInterval = std::min(choice(EditInterval), 3u) + 1;
+    next.editLate = checked(EditLate);
     next.unlockPasses = checked(UnlockPasses);
     next.highlightGuard = number(HighlightGuard, 1, 8);
     next.haloSuppression = number(HaloSuppression, 0, 1);
     next.haloBrightSuppression = number(HaloBrightSuppression, 0, 1);
     next.haloRadius = number(HaloRadius, 1, 4);
+    EnableWindow(Control(ModelScale), !inheritResolution);
+    EnableWindow(Control(Transfer), !inheritResolution);
     EnableWindow(Control(Upscaler), !inheritResolution && resolution.transfer != 2);
     next.holdFrame = checked(HoldFrame); next.applyModel = checked(ApplyModel);
     next.debugView = choice(DebugView);
@@ -142,6 +157,22 @@ void App::ReadControls() {
     next.maxFps = (unsigned)std::lround(number(FpsLimit, 0, 360));
     next.enabled = SendMessageW(Control(Enabled), BM_GETCHECK, 0, 0) == BST_CHECKED;
     next.estimateMotion = SendMessageW(Control(MotionMode), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    next.nvfp4FeedForward = checked(Nvfp4Box);
+    next.nvfp4Swin = (checked(Nvfp4Swin256) ? 8u : 0u) | (checked(Nvfp4Swin128) ? 4u : 0u) | (checked(Nvfp4Swin64) ? 2u : 0u) | (checked(Nvfp4Swin32) ? 1u : 0u);
+    next.nvfp4SwinTrained = checked(Nvfp4SwinTrained);
+    next.nvfp4SplitTrained = checked(Nvfp4SplitTrained); next.nvfp4VitTrained = checked(Nvfp4VitTrained); next.nvfp4FfnTrained = checked(Nvfp4FfnTrained);
+    const auto mask = [&](int first, unsigned count) { unsigned bits = 0; for (unsigned i = 0; i < count; ++i) if (checked(first + int(i))) bits |= 1u << i; return bits; };
+    next.nvfp4Split = mask(Nvfp4SplitFfwd, 6); next.nvfp4Vit = mask(Nvfp4VitQkv, 3); next.nvfp4PrePost = mask(Nvfp4Pre, 2);
+    { wchar_t text[512]{}; GetWindowTextW(Control(Nvfp4Options), text, 512); next.nvfp4Net = Narrow(text); } // 511 characters, as the settings file reads
+    next.passes = std::clamp(1 + (unsigned)SendMessageW(Control(Passes), CB_GETCURSEL, 0, 0), 1u, next.unlockPasses ? Settings::MaxPasses : 2u);
+    if (next.Nvfp4Pass() && !next.Nvfp4Parts()) {
+        // "Model A - NVFP4" with no part ticked would be Model A under another name: tick the fastest set at 4K (fused
+        // blocks of widths 256 and 128, the split blocks, the transformer and its feed-forward).
+        next.nvfp4Swin = 12; next.nvfp4Split = 63; next.nvfp4Vit = 7; next.nvfp4FeedForward = true;
+        for (int id : {Nvfp4Swin256, Nvfp4Swin128, Nvfp4Box, Nvfp4SplitFfwd, Nvfp4SplitFfwdProj, Nvfp4SplitQkv, Nvfp4SplitProj, Nvfp4SplitHead,
+             Nvfp4SplitDec, Nvfp4VitQkv, Nvfp4VitAttention, Nvfp4VitProjection})
+            SendMessageW(Control(id), BM_SETCHECK, BST_CHECKED, 0);
+    }
     next.tone = (unsigned)SendMessageW(Control(Codec), CB_GETCURSEL, 0, 0);
     next.passes = 1 + (unsigned)SendMessageW(Control(Passes), CB_GETCURSEL, 0, 0);
     next.compare = (unsigned)SendMessageW(Control(Compare), CB_GETCURSEL, 0, 0);
@@ -171,6 +202,8 @@ LRESULT App::Message(UINT m, WPARAM w, LPARAM l) {
         if (m == StatusMessage) {
             std::lock_guard lock(mutex); SetWindowTextW(Control(Status), status.c_str());
             if (w) for (int id : {Sources, Refresh, RuntimePath, Browse, Start, Backend, FgMode}) EnableWindow(Control(id), TRUE);
+            char borrow[256]{}; NrPassBorrow::Status(borrow, sizeof(borrow));
+            SetWindowTextW(Control(BorrowStatus), Wide(borrow).c_str());
             return 0;
         }
         if (m == WM_HOTKEY || (m == WM_COMMAND && LOWORD(w) == Stop)) { SetEvent(stop.value); return 0; }
@@ -197,18 +230,20 @@ LRESULT App::Message(UINT m, WPARAM w, LPARAM l) {
             const int id = LOWORD(w), event = HIWORD(w);
             if (id == Refresh) ListSources();
             else if (id == Start) StartCapture();
-            else if ((id == EditPass || id == ResolutionPass || id == FoveationPass) && event == CBN_SELCHANGE) {
+            else if ((id == EditPass || id == ResolutionPass || id == FoveationPass || id == ShortcutPass) && event == CBN_SELCHANGE) {
                 const auto nextPass = (unsigned)SendMessageW(Control(id), CB_GETCURSEL, 0, 0);
                 try { ReadControls(); }
                 catch (...) {
-                    for (int selector : {EditPass, ResolutionPass, FoveationPass})
+                    for (int selector : {EditPass, ResolutionPass, FoveationPass, ShortcutPass})
                         SendMessageW(Control(selector), CB_SETCURSEL, selectedPass, 0);
                     throw;
                 }
                 selectedPass = std::min(nextPass, Settings::MaxPasses - 1);
                 { std::lock_guard lock(mutex); if (settings.showFoveation) settings.foveationPreviewPass = selectedPass; }
                 ShowPass();
-            } else if (id == InheritPass && event == BN_CLICKED) { ReadControls(); ShowPass(); }
+            } else if ((id == InheritPass || id == ReapplyPass || id == BorrowTransformer || id == BorrowBelow || id == EditLate) && event == BN_CLICKED) {
+                ReadControls(); ShowPass();
+            }
             else if ((id == InheritResolution || id == InheritFoveation) && event == BN_CLICKED) {
                 const auto state = SendMessageW(Control(id), BM_GETCHECK, 0, 0);
                 SendMessageW(Control(id == InheritResolution ? InheritFoveation : InheritResolution), BM_SETCHECK, state, 0);
@@ -228,14 +263,15 @@ LRESULT App::Message(UINT m, WPARAM w, LPARAM l) {
                 if (GetOpenFileNameW(&picker)) SetWindowTextW(Control(RuntimePath), file);
             } else if ((((id >= Strength && id <= LocalTone) || id == ReferenceWhite || id == FpsLimit || id == HighlightGuard ||
                          id == PeakBrightness || id == BlackLevel || id == HaloSuppression ||
-                         id == HaloBrightSuppression || id == HaloRadius ||
-                         (id >= FoveationCenterWidth && id <= FoveationShiftY)) && event == EN_KILLFOCUS) ||
+                         id == HaloBrightSuppression || id == HaloRadius || id == ReapplyGain ||
+                         id == Nvfp4Options || (id >= FoveationCenterWidth && id <= FoveationShiftY)) && event == EN_KILLFOCUS) ||
                        ((id == Codec || id == Compare || id == Passes || id == Transfer || id == Upscaler || id == InputColour ||
-                         id == Downscaler || id == Style || id == Preset || id == DebugView || id == Backend || id == FgMode) && event == CBN_SELCHANGE) ||
+                         id == Downscaler || id == Style || id == Preset || id == DebugView || id == Backend || id == FgMode ||
+                         id == BorrowLevel || id == EditInterval) && event == CBN_SELCHANGE) ||
                        ((id == Enabled || id == MotionMode || id == SeparateSkin || id == PreviewSkin || id == AutoMask ||
                          id == HoldFrame || id == ApplyModel || id == CompareSwap || id == CompareLabels ||
-                         id == FoveationEnabled || id == ShowFoveation) && event == BN_CLICKED)) {
-                ReadControls(); if (id == Passes || id == FoveationEnabled) ShowPass();
+                         id == FoveationEnabled || id == ShowFoveation || id == Nvfp4Box || (id >= Nvfp4Swin256 && id <= Nvfp4Post)) && event == BN_CLICKED)) {
+                ReadControls(); if (id == Passes || id == FoveationEnabled || id == Preset) ShowPass(); // Preset: the NVFP4 tab says whether it is in use.
             }
             return 0;
         }
@@ -261,6 +297,7 @@ int App::Main(HINSTANCE instance) {
     WNDCLASSW wc{}; wc.lpfnWndProc = Procedure; wc.hInstance = instance; wc.lpszClassName = L"OptiScalerNR.Control";
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW); wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
     if (!RegisterClassW(&wc)) Check(HRESULT_FROM_WIN32(GetLastError()), "Control window class");
+    InstallPassBorrow(); // Before any NR runtime resolves NvAPI; failure only disables borrowing (see its status).
     window = CreateWindowW(wc.lpszClassName, L"Display Filter - screen and window overlay", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         CW_USEDEFAULT, CW_USEDEFAULT, 986, 785, nullptr, nullptr, instance, this);
     if (!window) Check(HRESULT_FROM_WIN32(GetLastError()), "Control window");

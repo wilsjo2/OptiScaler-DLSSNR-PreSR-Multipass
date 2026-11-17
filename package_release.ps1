@@ -4,10 +4,12 @@ param(
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]*$')]
     [string]$Version = 'nr-dev',
     [switch]$SkipBuild,
-    [switch]$EnableRtx40Mfg
+    [switch]$EnableRtx40Mfg,
+    [string]$Nvfp4Assets = "$PSScriptRoot/standalone/NrCapture/out-model-map/nvfp4-20261113/v2/assets/ship-public"
 )
 
 $ErrorActionPreference = 'Stop'
+$Nvfp4Assets = [IO.Path]::GetFullPath($Nvfp4Assets)
 $root = Split-Path -Parent $PSCommandPath
 $stage = Join-Path $root "release/$Version"
 $zip = Join-Path $root "release/OptiScaler-NR-$Version.zip"
@@ -38,18 +40,7 @@ if ($hasUnlock -ne $EnableRtx40Mfg.IsPresent) { throw 'DLL RTX 40 MFG feature do
 # Streamline/MFG, removed NR helpers or discarded experiment files entering this package.
 $files = @{}
 $files['OptiScaler.dll'] = Join-Path $buildRoot 'OptiScaler.dll'
-$files['docs/RELEASE-v0.8.91.md'] = Join-Path $root 'docs/RELEASE-v0.8.91.md'
-$files['docs/RELEASE-v0.8.9.md'] = Join-Path $root 'docs/RELEASE-v0.8.9.md'
-$files['docs/RELEASE-v0.8.8.md'] = Join-Path $root 'docs/RELEASE-v0.8.8.md'
-$files['docs/RELEASE-v0.8.7.md'] = Join-Path $root 'docs/RELEASE-v0.8.7.md'
-$files['docs/RELEASE-v0.8.6.md'] = Join-Path $root 'docs/RELEASE-v0.8.6.md'
-$files['docs/RELEASE-v0.8.5.md'] = Join-Path $root 'docs/RELEASE-v0.8.5.md'
-$files['docs/PR-REWRITE-REVIEW-v0.8.5.md'] = Join-Path $root 'docs/PR-REWRITE-REVIEW-v0.8.5.md'
-foreach ($name in @('OptiScaler.ini', 'setup_windows.bat', 'setup_linux.sh', 'README.md', 'INSTALL-DLSSNR.md', 'LICENSE',
-                    'Features.md', 'Config.md', 'Spoofing.md', 'images/gh-sponsor-red.png', 'images/bmac.png',
-                    'CONTRIBUTING.md', 'OptiScaler/dlssnr/README.md', 'tests/nr_private_upscaler_smoke.md',
-                    'OptiScaler/dlssnr/design/frame-hold.md',
-                    'OptiScaler/dlssnr/design/pre-sr-multipass.md')) {
+foreach ($name in @('OptiScaler.ini', 'setup_windows.bat', 'setup_linux.sh')) {
     $files[$name] = Join-Path $root $name
 }
 foreach ($name in @('libxess.dll', 'libxess_dx11.dll', 'libxell.dll', 'libxess_fg.dll')) {
@@ -60,23 +51,12 @@ foreach ($name in @('amd_fidelityfx_loader_dx12.dll', 'amd_fidelityfx_upscaler_d
     $files["OptiScaler/$name"] = Join-Path $root "external/FidelityFX-SDK-v2/Kits/FidelityFX/signedbin/$name"
 }
 $files['OptiScaler/D3D12_OptiScaler/D3D12Core.dll'] = Join-Path $root 'external/directx_agility_sdk/lib/D3D12Core.dll'
-$files['Licenses/XeSS_LICENSE.txt'] = Join-Path $root 'external/xess/LICENSE.txt'
-$files['Licenses/FidelityFX_v1_LICENSE.md'] = Join-Path $root 'external/FidelityFX-SDK/docs/license.md'
-$files['Licenses/FidelityFX_v2_LICENSE.md'] = Join-Path $root 'external/FidelityFX-SDK-v2/docs/license.md'
-$files['Licenses/DirectX_LICENSE.txt'] = Join-Path $root 'external/directx_agility_sdk/LICENSE.txt'
-$files['Licenses/RenoDX_ATTRIBUTION.txt'] = Join-Path $root 'Licenses/RenoDX_ATTRIBUTION.txt'
-$files['Licenses/PeripheralWarp_LICENSE.txt'] = Join-Path $root 'external/peripheral_warp/LICENSE'
-$files['docs/NR-SPATIAL-COMPRESSION.md'] = Join-Path $root 'docs/NR-SPATIAL-COMPRESSION.md'
-if ($EnableRtx40Mfg) {
-    $files['Licenses/MFGUnlock_LICENSE.txt'] = Join-Path $root 'Licenses/MFGUnlock_LICENSE.txt'
+# The 4-bit (NVFP4) kernels and the two pass-in-one weight sets (Original - NVFP4, NVFP4 2xPass-in-one, NVFP4 3xPass-in-one).
+foreach ($item in Get-ChildItem -LiteralPath $Nvfp4Assets -Recurse -File | Where-Object { $_.Name -notlike '*.md' }) {
+    $files['OptiScaler/nvfp4/' + $item.FullName.Substring($Nvfp4Assets.Length).TrimStart('\', '/').Replace('\', '/')] = $item.FullName
 }
-foreach ($name in @('CREDITS.md', 'NR-COMPATIBILITY.md', 'NR-MOTION-METADATA.md', 'NR-PIPELINE-UI.md', 'NR-FINISHED-BRIDGES.md', 'PADDED-PRESR.md',
-                    'DEFERRED-NR-DLSS.md', 'RESIDUAL-ACROSS-RR.md', 'COMPATIBILITY-CHANGES.md',
-                    'NR-DLSS-ENLARGEMENT.md', 'NR-GPU-RETIREMENT.md', 'NR-NATIVE-STREAMLINE-PRESENT.md',
-                    'NR-PRIVATE-RR.md', 'NR-VULKAN.md', 'NR-PHOTO-DIAGNOSTIC.md',
-                    'NR-UPSTREAM-REVIEW.md', 'NR-UPSTREAM-DIFF-INVENTORY.md', 'RTX40-MFG.md', 'NR-INITIALIZATION-DIAGNOSTICS.md', 'NR-DIRECT-RUNTIME.md', 'NR-RESTRICTION-AUDIT.md')) {
-    $files["docs/$name"] = Join-Path $root "docs/$name"
-}
+# No documents or licence/attribution files in the package.
+foreach ($key in @($files.Keys)) { if ($key -match '(?i)\.md$|licen[cs]e|attribution') { throw "Document in the release manifest: $key" } }
 foreach ($entry in $files.GetEnumerator()) {
     if (-not (Test-Path -LiteralPath $entry.Value -PathType Leaf)) {
         throw "Required release file is missing: $($entry.Value)"

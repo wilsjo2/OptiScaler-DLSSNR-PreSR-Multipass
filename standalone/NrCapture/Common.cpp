@@ -71,18 +71,27 @@ std::filesystem::path ExecutableDirectory() {
     if (length >= std::size(executable)) throw std::runtime_error("Application path is too long.");
     return std::filesystem::path(executable).parent_path();
 }
-std::filesystem::path ResolveRuntimePath(const std::filesystem::path& saved, const std::filesystem::path& directory) {
+std::filesystem::path ResolveRuntimePath(const std::filesystem::path& saved, const std::filesystem::path& directory,
+                                         const std::filesystem::path& chosen) {
     const auto exists = [](const std::filesystem::path& path) {
         std::error_code error;
         return std::filesystem::is_regular_file(path, error);
     };
     const auto selected = (saved.is_absolute() ? saved : directory / saved).lexically_normal();
-    if (!saved.empty() && exists(selected)) return selected;
+    const auto bundled = directory / L"runtime" / L"nvngx_dlssnr.dll";
+    const auto adjacent = directory / L"nvngx_dlssnr.dll";
+    // Another package's bundled runtime (<package>/runtime/nvngx_dlssnr.dll beside its own display_filter.exe)
+    // was saved by that package, not chosen: it must not shadow this package's newer bundled runtime. Unless the
+    // user picked exactly that DLL here (an older package that rewrites Runtime leaves RuntimeChosen different).
+    const auto package = selected.parent_path().parent_path();
+    std::error_code same, picked;
+    const bool foreignBundle = !_wcsicmp(selected.parent_path().filename().c_str(), L"runtime") && exists(package / L"display_filter.exe") &&
+        !std::filesystem::equivalent(package, directory, same) && package != directory.lexically_normal() &&
+        (chosen.empty() || !std::filesystem::equivalent(selected, chosen.is_absolute() ? chosen : directory / chosen, picked));
+    if (!saved.empty() && exists(selected) && !(foreignBundle && (exists(bundled) || exists(adjacent)))) return selected;
     // A moved package must not remain tied to an obsolete saved path or the
     // launcher's working directory. Prefer runtime/, then a DLL beside the EXE.
-    const auto bundled = directory / L"runtime" / L"nvngx_dlssnr.dll";
     if (exists(bundled)) return bundled;
-    const auto adjacent = directory / L"nvngx_dlssnr.dll";
     if (exists(adjacent)) return adjacent;
     return saved.empty() ? bundled : selected;
 }
@@ -90,8 +99,10 @@ Settings LoadSettings(const std::filesystem::path& settingsFile) {
     Settings s;
     const auto file = settingsFile.empty() ? DataDirectory() / L"settings.ini" : settingsFile;
     wchar_t path[32768]{};
+    GetPrivateProfileStringW(L"NR", L"RuntimeChosen", L"", path, (DWORD)std::size(path), file.c_str());
+    s.runtimeChosen = path;
     GetPrivateProfileStringW(L"NR", L"Runtime", L"", path, (DWORD)std::size(path), file.c_str());
-    s.runtime = ResolveRuntimePath(path, ExecutableDirectory());
+    s.runtime = ResolveRuntimePath(path, ExecutableDirectory(), s.runtimeChosen);
     auto number = [&](const wchar_t* key, float fallback, float low, float high) {
         wchar_t text[64]{}; GetPrivateProfileStringW(L"NR", key, L"", text, 64, file.c_str());
         wchar_t* end = nullptr; float v = wcstof(text, &end);
@@ -122,9 +133,9 @@ Settings LoadSettings(const std::filesystem::path& settingsFile) {
     s.compareLabels = number(L"CompareLabels", 1, 0, 1) != 0;
     s.labelScale = number(L"LabelScale", 1, .5f, 5);
     s.model.style = (unsigned)number(L"Style", 0, 0, 2);
-    s.model.preset = (unsigned)number(L"Preset", 0, 0, 3);
+    s.model.preset = (unsigned)number(L"Preset", 0, 0, Settings::ModelLast);
     s.model.autoMask = number(L"AutoMask", 1, 0, 1) != 0;
-    s.transfer = (unsigned)number(L"Transfer", 1, 0, 2);
+    s.transfer = (unsigned)number(L"Transfer", 1, 0, 3);
     s.upscaler = (unsigned)number(L"Upscaler", 0, 0, 1);
     s.model.intensity = number(L"Intensity", 1, 0, 2);
     s.model.localStructure = number(L"Structure", 1, 0, 2);
@@ -135,6 +146,28 @@ Settings LoadSettings(const std::filesystem::path& settingsFile) {
     s.captureBackend = (unsigned)number(L"CaptureBackend", 0, 0, 1);
     s.frameGeneration = (unsigned)number(L"FrameGeneration", 1, 1, 4);
     s.estimateMotion = number(L"EstimateMotion", 0, 0, 1) != 0;
+    s.nvfp4FeedForward = number(L"Nvfp4FeedForward", 0, 0, 1) != 0;
+    s.nvfp4Swin = (unsigned)number(L"Nvfp4Swin", 0, 0, 15);
+    s.nvfp4SwinTwo = (unsigned)number(L"Nvfp4SwinTwo", 7, 0, 15);
+    s.nvfp4SwinTrained = number(L"Nvfp4SwinTrained", 1, 0, 1) != 0;
+    {
+        wchar_t text[64]{}; GetPrivateProfileStringW(L"NR", L"Nvfp4SwinLayers", L"", text, 64, file.c_str());
+        wchar_t* end = nullptr; const unsigned long long mask = wcstoull(text, &end, 16);
+        s.nvfp4SwinLayers = end == text || *end ? ~0ull : mask;
+    }
+    s.nvfp4Split = (unsigned)number(L"Nvfp4Split", 0, 0, 63);
+    s.nvfp4Vit = (unsigned)number(L"Nvfp4Vit", 0, 0, 7);
+    s.nvfp4PrePost = (unsigned)number(L"Nvfp4PrePost", 0, 0, 3);
+    s.nvfp4SplitTrained = number(L"Nvfp4SplitTrained", 1, 0, 1) != 0;
+    s.nvfp4VitTrained = number(L"Nvfp4VitTrained", 1, 0, 1) != 0;
+    s.nvfp4FfnTrained = number(L"Nvfp4FfnTrained", 1, 0, 1) != 0;
+    {
+        wchar_t text[512]{}; GetPrivateProfileStringW(L"NR", L"Nvfp4Net", L"", text, 512, file.c_str());
+        s.nvfp4Net = Narrow(text);
+    }
+    s.reapplyGain = number(L"ReapplyGain", .81f, 0, 2);
+    s.editInterval = (unsigned)number(L"EditInterval", 1, 1, 4);
+    s.editLate = number(L"EditLate", 0, 0, 1) != 0;
     const auto readSpatial = [&](const std::wstring& prefix, DlssNr::Spatial::Settings spatial) {
         const auto value = [&](const wchar_t* key, float fallback, float low, float high) {
             return number((prefix + key).c_str(), fallback, low, high);
@@ -157,11 +190,17 @@ Settings LoadSettings(const std::filesystem::path& settingsFile) {
             auto resolution = s.PassResolution(pass);
             resolution.modelScale = (unsigned)number(key(L"ModelScale").c_str(), float(resolution.modelScale), 25, 200);
             resolution.downscaler = (unsigned)number(key(L"Downscaler").c_str(), float(resolution.downscaler), 0, 7);
-            resolution.transfer = (unsigned)number(key(L"Transfer").c_str(), float(resolution.transfer), 0, 2);
+            resolution.transfer = (unsigned)number(key(L"Transfer").c_str(), float(resolution.transfer), 0, 3);
             resolution.upscaler = (unsigned)number(key(L"Upscaler").c_str(), float(resolution.upscaler), 0, 1);
             resolution.spatial = readSpatial(std::format(L"Pass{}.", pass + 1), resolution.spatial);
             s.passResolutionOverrides[pass - 1] = resolution;
         }
+        auto& shortcut = s.passShortcuts[pass - 1];
+        shortcut.reapply = number(key(L"Reapply").c_str(), 0, 0, 1) != 0;
+        shortcut.borrowTransformer = number(key(L"BorrowTransformer").c_str(), 0, 0, 1) != 0;
+        shortcut.borrowBelow = number(key(L"BorrowBelow").c_str(), 0, 0, 1) != 0;
+        // Levels are 1/2..1/32 of the frame size; other saved values snap to the nearest power of two.
+        shortcut.borrowLevel = 1u << std::clamp((int)std::lround(std::log2(number(key(L"BorrowLevel").c_str(), 32, 2, 32))), 1, 5);
         if (number(key(L"Override").c_str(), 0, 0, 1) == 0) continue;
         auto model = s.PassModel(pass);
         model.intensity = number(key(L"Intensity").c_str(), model.intensity, 0, 2);
@@ -169,7 +208,7 @@ Settings LoadSettings(const std::filesystem::path& settingsFile) {
         model.localTone = number(key(L"LocalTone").c_str(), 0, 0, 2);
         model.skinStructure = number(key(L"SkinStructure").c_str(), model.skinStructure, -1, 2);
         model.style = (unsigned)number(key(L"Style").c_str(), (float)model.style, 0, 2);
-        model.preset = (unsigned)number(key(L"Preset").c_str(), (float)model.preset, 0, 3);
+        model.preset = (unsigned)number(key(L"Preset").c_str(), (float)model.preset, 0, Settings::ModelLast);
         model.autoMask = number(key(L"AutoMask").c_str(), model.autoMask ? 1.f : 0.f, 0, 1) != 0;
         s.passOverrides[pass - 1] = model;
     }
@@ -181,7 +220,8 @@ void SaveSettings(const Settings& s, const std::filesystem::path& settingsFile) 
         if (!WritePrivateProfileStringW(L"NR", key, value.c_str(), file.c_str()))
             Check(HRESULT_FROM_WIN32(GetLastError()), "Save settings");
     };
-    write(L"Runtime", s.runtime.wstring()); write(L"Strength", std::to_wstring(s.strength));
+    write(L"Runtime", s.runtime.wstring()); write(L"RuntimeChosen", s.runtimeChosen.wstring());
+    write(L"Strength", std::to_wstring(s.strength));
     write(L"ColourStrength", std::to_wstring(s.colourStrength));
     write(L"SkinStructure", std::to_wstring(s.model.skinStructure));
     write(L"SkinDetail", std::to_wstring(s.skinDetail));
@@ -200,6 +240,18 @@ void SaveSettings(const Settings& s, const std::filesystem::path& settingsFile) 
     write(L"Structure", std::to_wstring(s.model.localStructure));
     write(L"LocalTone", std::to_wstring(s.model.localTone)); write(L"Codec", std::to_wstring(s.tone));
     write(L"EstimateMotion", s.estimateMotion ? L"1" : L"0");
+    write(L"Nvfp4FeedForward", s.nvfp4FeedForward ? L"1" : L"0");
+    write(L"Nvfp4Swin", std::to_wstring(s.nvfp4Swin));
+    write(L"Nvfp4SwinTwo", std::to_wstring(s.nvfp4SwinTwo));
+    write(L"Nvfp4SwinTrained", s.nvfp4SwinTrained ? L"1" : L"0");
+    write(L"Nvfp4SwinLayers", std::format(L"{:x}", s.nvfp4SwinLayers));
+    write(L"Nvfp4Split", std::to_wstring(s.nvfp4Split));
+    write(L"Nvfp4Vit", std::to_wstring(s.nvfp4Vit));
+    write(L"Nvfp4PrePost", std::to_wstring(s.nvfp4PrePost));
+    write(L"Nvfp4SplitTrained", s.nvfp4SplitTrained ? L"1" : L"0");
+    write(L"Nvfp4VitTrained", s.nvfp4VitTrained ? L"1" : L"0");
+    write(L"Nvfp4FfnTrained", s.nvfp4FfnTrained ? L"1" : L"0");
+    write(L"Nvfp4Net", Wide(s.nvfp4Net));
     write(L"InputColour", std::to_wstring(s.inputColour));
     write(L"MaxFps", std::to_wstring(s.maxFps));
     write(L"CaptureBackend", std::to_wstring(s.captureBackend));
@@ -218,6 +270,9 @@ void SaveSettings(const Settings& s, const std::filesystem::path& settingsFile) 
     write(L"Style", std::to_wstring(s.model.style));
     write(L"Preset", std::to_wstring(s.model.preset));
     write(L"AutoMask", s.model.autoMask ? L"1" : L"0");
+    write(L"ReapplyGain", std::to_wstring(s.reapplyGain));
+    write(L"EditInterval", std::to_wstring(s.editInterval));
+    write(L"EditLate", s.editLate ? L"1" : L"0");
     const auto writeSpatial = [&](const std::wstring& prefix, const DlssNr::Spatial::Settings& spatial) {
         write((prefix + L"SpatialCompression").c_str(), spatial.enabled ? L"1" : L"0");
         write((prefix + L"SpatialCenterX").c_str(), std::to_wstring(spatial.centerX));
@@ -241,6 +296,11 @@ void SaveSettings(const Settings& s, const std::filesystem::path& settingsFile) 
             write(key(L"Upscaler").c_str(), std::to_wstring(resolution.upscaler));
             writeSpatial(std::format(L"Pass{}.", pass + 1), resolution.spatial);
         }
+        const auto& shortcut = s.passShortcuts[pass - 1];
+        write(key(L"Reapply").c_str(), shortcut.reapply ? L"1" : L"0");
+        write(key(L"BorrowTransformer").c_str(), shortcut.borrowTransformer ? L"1" : L"0");
+        write(key(L"BorrowBelow").c_str(), shortcut.borrowBelow ? L"1" : L"0");
+        write(key(L"BorrowLevel").c_str(), std::to_wstring(shortcut.borrowLevel));
         write(key(L"Override").c_str(), s.passOverrides[pass - 1] ? L"1" : L"0");
         if (!s.passOverrides[pass - 1]) continue;
         const auto model = s.PassModel(pass);

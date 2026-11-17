@@ -25,18 +25,20 @@ void Gpu::Time(GpuStage stage, bool end) {
 }
 void Gpu::ResolveTimings() {
     if (!recordingTimes) return;
+    // (late work holds timestamps too: they are read at the end of its list)
+    auto* list = lateOpen && !lateActive ? lateCommands.Get() : commands.Get();
     for (unsigned i = 0; i < timed.size(); ++i) {
         if (timingActive[i]) throw std::runtime_error("GPU stage timing ended with an open interval.");
         if (timed[i]) {
             const auto query = i * MaxTimingIntervals * 2;
-            commands->ResolveQueryData(timeQueries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query, timed[i] * 2,
+            list->ResolveQueryData(timeQueries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query, timed[i] * 2,
                 timeReadback.Get(), query * sizeof(UINT64));
         }
     }
     recordingTimes = false; pendingTimes = true;
 }
 bool Gpu::TakeTimings(std::array<double, unsigned(GpuStage::Count)>& milliseconds) {
-    if (!pendingTimes || !Complete()) return false;
+    if (!pendingTimes || lateOpen || !Complete()) return false;
     void* mapped = nullptr; D3D12_RANGE range{0, timed.size() * MaxTimingIntervals * 2 * sizeof(UINT64)};
     Check(timeReadback->Map(0, &range, &mapped), "GPU stage timing readback");
     const auto* stamps = static_cast<const UINT64*>(mapped);

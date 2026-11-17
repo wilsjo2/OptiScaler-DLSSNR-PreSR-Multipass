@@ -51,8 +51,9 @@ class DlssNr_Vk : public Shader_Vk
     // Worst finished-picture frame: one clean copy before the seam, two captured guides,
     // two colour conversions, then a copy and nine model/composition dispatches (including
     // exposure and spatial packing), plus optional halo correction. Clamp layers reuse their
-    // two immutable slots: 16 total.
-    static constexpr uint32_t kSlotsPerFrame = 16;
+    // two immutable slots: 16 total. Each run of re-applied passes takes one more (at most 15 in
+    // a 30-pass chain, plus an independent chain's clamp after each run): 48 leaves headroom.
+    static constexpr uint32_t kSlotsPerFrame = 48;
     static constexpr uint32_t kFramesInFlight = 4;
     static constexpr uint32_t kSlots = kSlotsPerFrame * kFramesInFlight;
 
@@ -62,6 +63,7 @@ class DlssNr_Vk : public Shader_Vk
     VkPipeline _spatialPipeline = VK_NULL_HANDLE;
     VkPipeline _spatialGuidesPipeline = VK_NULL_HANDLE;
     VkPipeline _rawResidualPipeline = VK_NULL_HANDLE;
+    VkPipeline _reapplyPipeline = VK_NULL_HANDLE;
     VkImageLayout _intermediateLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
     VkDeviceSize _slotStride = 0; // sizeof(DlssNrConstants), rounded up to the device's alignment

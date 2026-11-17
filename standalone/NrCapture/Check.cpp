@@ -27,6 +27,9 @@ void MotionCheck();
 void WindowCheck(Settings settings, const std::wstring& title, unsigned frames);
 void PerformanceCheck(Gpu& gpu, Processor& processor, ID3D12Resource* input, Settings settings, unsigned frames, unsigned modeMask, bool moving);
 void QualityCheck(Gpu& gpu, Processor& processor, ID3D12Resource* input, Settings settings);
+void ReapplyCheck();
+void BorrowCheck(const std::filesystem::path& fixture, UINT width, UINT height, const std::filesystem::path& report,
+    unsigned preset, const std::filesystem::path& runtime, unsigned frames, bool sameTuning, unsigned style = 0, bool nvfp4 = false, unsigned swin = 0, const std::string& net = {});
 }
 namespace {
 using namespace nr;
@@ -95,6 +98,7 @@ void SavePng(const std::filesystem::path& file, const std::vector<HALF>& values,
     Check(frame->Commit(), "PNG frame commit"); Check(encoder->Commit(), "PNG commit");
 }
 void ModelCheck(const Settings& settings, UINT w, UINT h, unsigned count, const std::filesystem::path& image, bool appearanceCheck, bool alignmentCheck, bool historyCheck, bool qualityCheck, bool featureCheck, bool performanceCheck, bool depthCheck, const std::filesystem::path& depthOutput, bool passResolutionCheck, const std::filesystem::path& passResolutionOutput, unsigned performanceModes, bool performanceMoving) {
+    InstallPassBorrow(); // As in the app: before the runtime resolves NvAPI, transparent unless a pass borrows.
     Gpu gpu; Processor processor(gpu, settings.runtime); processor.Resize(w, h, settings);
     ComPtr<ID3D12InfoQueue> diagnostics; gpu.device.As(&diagnostics);
     Log("Check: NR creation submitted and completed.");
@@ -430,10 +434,14 @@ void PacingCheck() {
         for (unsigned frame = 0; frame < 12; ++frame) {
             while (!pacer.Due(fps, ClockMs())) pacer.Wait(stop.value, capture.value);
             const auto now = ClockMs(); if (!frame) first = now;
-            if (frame && now - previous < 1000.0 / fps - 0.05) throw std::runtime_error("FPS cap submitted too early.");
+            // Frame k may not start before its slot on the grid the first frame set; a late frame is not made up beyond the slack.
+            if (frame && now - first < frame * 1000.0 / fps - 0.05) throw std::runtime_error("FPS cap submitted too early.");
+            if (frame && now - previous < 1000.0 / fps - std::min(2.0, 250.0 / fps) - 0.05) throw std::runtime_error("FPS cap caught up in a burst.");
             pacer.Submitted(fps, now); previous = now;
         }
-        std::cout << std::format("PASS timer cap {} fps: {:.1f} fps measured (no capture/presentation)\n", fps, 11000.0 / (previous - first));
+        const double measured = 11000.0 / (previous - first);
+        if (measured < fps * 0.99) throw std::runtime_error(std::format("FPS cap {} only reached {:.1f} fps.", fps, measured));
+        std::cout << std::format("PASS timer cap {} fps: {:.1f} fps measured (no capture/presentation)\n", fps, measured);
     }
     pacer.Submitted(1, ClockMs());
     if (!pacer.Due(0, ClockMs())) throw std::runtime_error("Uncapped mode waited for a deadline.");
@@ -445,6 +453,10 @@ void PacingCheck() {
 }
 }
 void GpuWaitCheck();
+#ifdef NR_LAB_COMMANDS
+namespace nr { bool LabCommand(int argc, wchar_t** argv); }
+#endif
+
 int wmain(int argc, wchar_t** argv) {
     SetUnhandledExceptionFilter(CheckCrash);
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -454,6 +466,28 @@ int wmain(int argc, wchar_t** argv) {
         bool depthCheck = false, passResolutionCheck = false, performanceMoving = false;
         unsigned performanceModes = 15;
         bool capture = false, monitor = false, lifecycle = false, motion = false, displayInfo = false, appearance = false, alignment = false, history = false, pacing = false, quality = false, features = false, performance = false, captureQueue = false, residual = false, logging = false, resizeCheck = false;
+        bool reapplyCheck = false, settingsCheck = false;
+#ifdef NR_LAB_COMMANDS
+        if (nr::LabCommand(argc, argv)) return 0;      // further commands of a local build
+#endif
+        if (argc >= 6 && std::wstring(argv[1]) == L"--borrow-check") {
+            // GPU/NR harness for manual runs: --borrow-check <fixture.rgba16f> <width> <height> <out.json> [--preset N] [--runtime dll] [--frames N] [--same-tuning 1] [--style 0|1|2]
+            unsigned preset = 0, count = 8, style = 0, swin = 0; bool sameTuning = false, nvfp4 = false; std::filesystem::path runtime; std::string net;
+            for (int i = 6; i < argc; i += 2) {
+                const std::wstring key = argv[i]; if (i + 1 >= argc) throw std::runtime_error("Missing argument value.");
+                if (key == L"--preset") preset = std::stoul(argv[i + 1]);
+                else if (key == L"--runtime") runtime = argv[i + 1];
+                else if (key == L"--frames") count = std::stoul(argv[i + 1]);
+                else if (key == L"--same-tuning") sameTuning = std::stoul(argv[i + 1]) != 0;
+                else if (key == L"--style") style = std::stoul(argv[i + 1]);
+                else if (key == L"--nvfp4") nvfp4 = std::stoul(argv[i + 1]) != 0;
+                else if (key == L"--nvfp4swin") swin = std::stoul(argv[i + 1]) & 15u;
+                else if (key == L"--nvfp4net") net = nr::Narrow(argv[i + 1]);
+                else throw std::runtime_error("Unknown borrow-check argument.");
+            }
+            nr::BorrowCheck(argv[2], std::stoul(argv[3]), std::stoul(argv[4]), argv[5], preset, runtime, count, sameTuning, style, nvfp4, swin, net);
+            return 0;
+        }
         for (int i = 1; i < argc; ++i) {
             std::wstring key = argv[i]; if (i + 1 >= argc) throw std::runtime_error("Missing argument value.");
             if (key == L"--runtime-path-check") { nr::RuntimePathCheck(); return 0; }
@@ -487,6 +521,8 @@ int wmain(int argc, wchar_t** argv) {
             else if (key == L"--residual-check") residual = std::stoul(argv[++i]) != 0;
             else if (key == L"--resize-check") resizeCheck = std::stoul(argv[++i]) != 0;
             else if (key == L"--logging-check") logging = std::stoul(argv[++i]) != 0;
+            else if (key == L"--reapply-check") reapplyCheck = std::stoul(argv[++i]) != 0;
+            else if (key == L"--settings-check") settingsCheck = std::stoul(argv[++i]) != 0;
             else if (key == L"--feature-check") features = std::stoul(argv[++i]) != 0;
             else if (key == L"--pacing-check") pacing = std::stoul(argv[++i]) != 0;
             else if (key == L"--input-colour") settings.inputColour = std::stoul(argv[++i]);
@@ -499,6 +535,8 @@ int wmain(int argc, wchar_t** argv) {
             else throw std::runtime_error("Unknown argument.");
         }
         if (logging) { nr::LoggingCheck(); return 0; }
+        if (settingsCheck) { nr::SettingsCheck(); return 0; }
+        if (reapplyCheck) { nr::ReapplyCheck(); return 0; }
         if (resizeCheck) { nr::ResizeCheck(); return 0; }
         if (displayInfo) {
             const auto white = nr::DesktopWhitePoint(MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY));

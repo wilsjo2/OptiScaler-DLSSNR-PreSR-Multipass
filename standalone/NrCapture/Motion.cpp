@@ -33,7 +33,7 @@ D3D12_GPU_DESCRIPTOR_HANDLE Motion::GpuHandle(UINT i) const { auto h=heap->GetGP
 void Motion::Resize(UINT w, UINT h) {
     if (width==w && height==h) return;
     if (!gpu.Drain()) throw std::runtime_error("GPU timeout resizing optical flow.");
-    width=w; height=h; history=false; frame=0;
+    width=w; height=h; history=false; pendingCut=false; frame=0;
     UINT lw=(w+3)/4, lh=(h+3)/4;
     for (UINT i=0; i<Levels; ++i) {
         for (auto& pyramid:luma) pyramid[i]=gpu.Texture(lw,lh,DXGI_FORMAT_R16G16B16A16_FLOAT,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -60,6 +60,13 @@ void Motion::Dispatch(UINT slot, UINT shader, const Constants& constants, ID3D12
     Barrier(c,output,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 }
 bool Motion::Estimate(ID3D12Resource* input, bool reset) {
+    if (pendingCut) {
+        // The previous frame's list has completed: the host opens a new list only after that.
+        void* data=nullptr; D3D12_RANGE range{0,sizeof(UINT)}; Check(readback->Map(0,&range,&data),"Read scene-cut flag");
+        lastCutCount = *static_cast<UINT*>(data); lastCutLimit = pendingCutLimit;
+        reset = reset || lastCutCount>pendingCutLimit; D3D12_RANGE written{0,0}; readback->Unmap(0,&written);
+        pendingCut=false;
+    }
     reset = reset || !history;
     auto& current=luma[frame]; auto& previous=luma[1-frame];
     auto coarseSize=flow.back()->GetDesc(); const UINT cutLimit=UINT(coarseSize.Width)*coarseSize.Height/2;
@@ -75,9 +82,8 @@ bool Motion::Estimate(ID3D12Resource* input, bool reset) {
     }
     if (reset) {
         // The cut decision is already known. Seed the next frame's luma history
-        // and record zero vectors, without running searches or stalling the CPU
-        // to read back a cut counter that cannot change the answer. Flow levels
-        // are all recomputed before they are consumed on the next normal frame.
+        // and record zero vectors, without running searches. Flow levels are all
+        // recomputed before they are consumed on the next normal frame.
         Constants p{width,height,0,0,1,0,0,cutLimit};
         Dispatch(Levels*2,2,p,current[0].Get(),previous[0].Get(),flow[0].Get(),vectors.Get());
         history=true; frame=1-frame;
@@ -97,9 +103,8 @@ bool Motion::Estimate(ID3D12Resource* input, bool reset) {
     dst.PlacedFootprint.Footprint={DXGI_FORMAT_R32_UINT,1,1,1,256};
     gpu.commands->CopyTextureRegion(&dst,0,0,0,&src,nullptr);
     Barrier(gpu.commands.Get(),cuts.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    gpu.Submit(); if (!gpu.Drain()) throw std::runtime_error("Optical flow completion timed out.");
-    void* data=nullptr; D3D12_RANGE range{0,sizeof(UINT)}; Check(readback->Map(0,&range,&data),"Read scene-cut flag");
-    const bool cut=*static_cast<UINT*>(data)>cutLimit; D3D12_RANGE written{0,0}; readback->Unmap(0,&written);
-    history=true; frame=1-frame; gpu.Begin(); return reset || cut;
+    // No submit-and-wait: the count is collected at the start of the next estimate.
+    pendingCut=true; pendingCutLimit=cutLimit;
+    history=true; frame=1-frame; return false;
 }
 }

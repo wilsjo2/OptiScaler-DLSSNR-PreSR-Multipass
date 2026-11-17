@@ -15,6 +15,9 @@ struct Report {
 // Install before constructing Runtime, so model function creation is observed.
 // Detours and the NvAPI module are retained until this short-lived probe exits.
 void Install();
+// Optional probe-only layer between the tracer and the driver, such as the recovered NVFP4 hybrid. Set before
+// Install(). It is given each NvAPI interface id with the driver's entry point and returns what callers should use.
+void SetDriverLayer(void* (*wrap)(unsigned id, void* original));
 // Probe-only JIT control: replace the two bookend kernels with an unchanged
 // PTX module generated from the audited DLL. Configure after Runtime::Create.
 void LoadBookendControl(ID3D12Device* device, const std::filesystem::path& fatbin);

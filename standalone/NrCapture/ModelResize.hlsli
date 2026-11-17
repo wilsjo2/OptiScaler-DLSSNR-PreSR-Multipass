@@ -3,6 +3,7 @@
 // uniform darkening leaves F + U((gain-1)*L) brighter than gain*F at a sharp edge.
 // Carry relative colour/edit instead. Both upscalers operate
 // on that relative field; final strength, HDR and skin controls still run once.
+Texture2D<uint> gEditCuts : register(t4);   // mode 17 with a kept edit: the motion estimator's cut counter
 float3 EncodeResizeField(float3 field)
 {
     return 0.5 + 0.5 * field / (1 + abs(field));
@@ -40,6 +41,14 @@ float4 PrepareModelResize(uint2 pixel)
 {
     float3 source = gSource.Load(int3(pixel,0)).rgb;
     float3 model = gModel.Load(int3(pixel,0)).rgb;
+    // Transfer 3 ("difference"): the edit as the plain difference of the values the model was given and answered
+    // with. For a model made for a reduced-size pass: its picture's difference, enlarged, is the full-size edit
+    // to within 44 to 52 dB on clean frames
+    // (measured; the relative field below cannot come nearer than 30 to 42 dB on saturated game frames).
+    if (gTransfer == 3) return float4(EncodeResizeField(SanitizeFinite3(model - source, 0)), 1);
+    // Transfer 4: the same difference for a 100 % pass that keeps its edit over frames (Settings::editInterval),
+    // stored as it is: nothing enlarges it, so it needs no bounded carrier and loses nothing to one.
+    if (gTransfer == 4) return float4(SanitizeFinite3(model - source, 0), 1);
     if (gPassthrough == 0) { source = SrgbToLinear(source); model = SrgbToLinear(model); }
     float sourceY = dot(source, kLuma), modelY = dot(model, kLuma);
     if (sourceY < 1.0 / 1024.0) {
@@ -77,8 +86,23 @@ float4 RestoreModelResize(uint2 pixel)
     float4 encodedBase = gModel.Load(int3(pixel,0));
     float3 base = gPassthrough != 0 ? encodedBase.rgb : SrgbToLinear(encodedBase.rgb);
     uint w, h; gSource.GetDimensions(w,h);
-    float3 field = w == gWidth && h == gHeight ? DecodeResizeField(gSource.Load(int3(pixel,0)).rgb)
-                                               : SampleResizeField(gSource, uv);
+    // The kept edit of an earlier frame (Settings::editInterval) follows the picture: gOriginal then holds this
+    // frame's motion (current to previous, in that texture's pixels) and gDebugView the frames since the edit was made.
+    const bool moved = gTransfer >= 3 && gDebugView != 0;
+    if (moved) {
+        // A new scene keeps nothing of the old one's edit: the motion estimator's count of coarse cells without a
+        // match in the frame before, against the count the host allows (gCompareMode; 0: not looked at).
+        if (gCompareMode != 0 && gEditCuts.Load(int3(0,0,0)) > gCompareMode) return encodedBase;
+        uint mw, mh; gOriginal.GetDimensions(mw, mh);
+        uv += gOriginal.SampleLevel(gLinear, uv, 0).xy * float(gDebugView) / float2(mw, mh);
+    }
+    if (gTransfer == 4) {
+        float3 plain = moved || w != gWidth || h != gHeight ? gSource.SampleLevel(gLinear, uv, 0).rgb : gSource.Load(int3(pixel,0)).rgb;
+        return float4(saturate(encodedBase.rgb + plain), encodedBase.a);
+    }
+    float3 field = w == gWidth && h == gHeight && !moved ? DecodeResizeField(gSource.Load(int3(pixel,0)).rgb)
+                                                         : SampleResizeField(gSource, uv);
+    if (gTransfer == 3) return float4(saturate(encodedBase.rgb + field), encodedBase.a);
     if (gTransfer == 1 && all(field == 0)) return encodedBase;
     float3 result = RestoreResizeField(base, field);
     if (gPassthrough == 0 && (gReversibleMode == 2 || gReversibleMode == 4)) {

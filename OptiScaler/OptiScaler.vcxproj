@@ -325,6 +325,30 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="dlssnr\DlssNr_CompatibilityRuntimePaths.cpp" />
     <ClInclude Include="dlssnr\DlssNr_CompatibilityRuntime.h" />
     <ClInclude Include="dlssnr\DlssNr_RuntimeImports.h" />
+    <ClCompile Include="dlssnr\NrPassBorrow.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClInclude Include="dlssnr\NrPassBorrow.h" />
+    <ClInclude Include="dlssnr\NrPassBorrowCopy.h" />
+    <ClInclude Include="dlssnr\NrPassBorrowTables.h" />
+    <ClInclude Include="dlssnr\NrPassBorrowTest.h" />
+    <ClCompile Include="dlssnr\NrNvfp4.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ClInclude Include="dlssnr\NrNvfp4.h" />
+    <ClCompile Include="..\standalone\NrCapture\nvfp4\NrFfnV2.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ClCompile Include="..\standalone\NrCapture\nvfp4\NrSwin4.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ClCompile Include="..\standalone\NrCapture\nvfp4\NrNet4.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="framegen\nvngx\Nvngx_Combo.h" />

@@ -8,6 +8,7 @@
 #include "precompile/dlssnr_spatial_Shader_Vk.h"
 #include "precompile/dlssnr_spatial_guides_Shader_Vk.h"
 #include "precompile/dlssnr_raw_residual_Shader_Vk.h"
+#include "precompile/dlssnr_reapply_Shader_Vk.h"
 #include <dlssnr/DlssNrFinished_Vk.h>
 
 #include <algorithm>
@@ -132,6 +133,8 @@ DlssNr_Vk::~DlssNr_Vk()
         vkDestroyPipeline(_device, _spatialGuidesPipeline, nullptr);
     if (_rawResidualPipeline)
         vkDestroyPipeline(_device, _rawResidualPipeline, nullptr);
+    if (_reapplyPipeline)
+        vkDestroyPipeline(_device, _reapplyPipeline, nullptr);
     _dummy.Destroy(_device);
 }
 
@@ -220,6 +223,16 @@ bool DlssNr_Vk::Dispatch(VkCommandBuffer InCmdList, const DlssNrConstants& InCon
                 return false;
         }
         pipeline = _rawResidualPipeline;
+    }
+    else if (InConstants.Mode == DlssNrMode_Reapply)
+    {
+        if (!_reapplyPipeline)
+        {
+            std::vector<char> code(dlssnr_reapply_spv, dlssnr_reapply_spv + sizeof(dlssnr_reapply_spv));
+            if (!CreateComputePipeline(_device, _pipelineLayout, &_reapplyPipeline, code))
+                return false;
+        }
+        pipeline = _reapplyPipeline;
     }
 
     if (InTarget == VK_NULL_HANDLE)

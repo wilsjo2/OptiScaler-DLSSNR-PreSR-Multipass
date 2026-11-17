@@ -24,12 +24,13 @@ struct CaptureSource {
         }
         return bounds.right > bounds.left && bounds.bottom > bounds.top;
     }
-    bool Active() const {
+    // On the desktop, focused or not: its picture can be captured and overlaid.
+    bool Shown() const {
         if (monitor) return Exists();
         DWORD cloaked = 0; DwmGetWindowAttribute(window, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
-        return IsWindow(window) && IsWindowVisible(window) && !IsIconic(window) && !cloaked &&
-            GetForegroundWindow() == window;
+        return IsWindow(window) && IsWindowVisible(window) && !IsIconic(window) && !cloaked;
     }
+    bool Active() const { return Shown() && (monitor || GetForegroundWindow() == window); }
     HMONITOR Monitor() const { return monitor ? monitor : MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST); }
 };
 }

@@ -99,6 +99,51 @@ void FrameGenerationCheck(const std::filesystem::path& plugins, const std::files
         if (hdr) for (unsigned shift : {0u,10u,20u})
             if (std::abs(double((pixel>>shift)&1023)/1023-expected)>2.0/1023) throw std::runtime_error("HDR10/PQ brightness mismatch.");
     }
+    {
+        // NR motion at half the output size: the encode pass resamples it and rescales its pixel units.
+        constexpr UINT mw = w / 2, mh = h / 2;
+        auto guide = gpu.Texture(mw,mh,DXGI_FORMAT_R16G16_FLOAT,D3D12_RESOURCE_STATE_COPY_DEST);
+        const auto guideDesc = guide->GetDesc(); D3D12_PLACED_SUBRESOURCE_FOOTPRINT guideLayout{};
+        gpu.device->GetCopyableFootprints(&guideDesc,0,1,0,&guideLayout,nullptr,nullptr,&size);
+        auto guideUpload = gpu.Buffer(size,D3D12_HEAP_TYPE_UPLOAD);
+        Check(guideUpload->Map(0,nullptr,&mapped),"FG guide upload");
+        for (UINT y=0;y<mh;++y) {
+            auto* row = reinterpret_cast<HALF*>(static_cast<BYTE*>(mapped)+guideLayout.Offset+size_t(y)*guideLayout.Footprint.RowPitch);
+            for (UINT x=0;x<mw;++x) { row[x*2]=XMConvertFloatToHalf(3); row[x*2+1]=XMConvertFloatToHalf(-2); }
+        }
+        guideUpload->Unmap(0,nullptr);
+        gpu.Begin();
+        src={}; src.pResource=guideUpload.Get(); src.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; src.PlacedFootprint=guideLayout;
+        dst={}; dst.pResource=guide.Get(); dst.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        gpu.commands->CopyTextureRegion(&dst,0,0,0,&src,nullptr);
+        Barrier(gpu.commands.Get(),guide.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        if (output.Run(input.Get(),false,guide.Get()) || output.Vectors()==guide.Get())
+            throw std::runtime_error("FG did not resample a smaller motion guide.");
+        const auto vectorDesc=output.Vectors()->GetDesc(); D3D12_PLACED_SUBRESOURCE_FOOTPRINT vectorLayout{};
+        gpu.device->GetCopyableFootprints(&vectorDesc,0,1,0,&vectorLayout,nullptr,nullptr,&size);
+        auto readback=gpu.Buffer(size,D3D12_HEAP_TYPE_READBACK);
+        Barrier(gpu.commands.Get(),output.Vectors(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_SOURCE);
+        src={}; src.pResource=output.Vectors(); src.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dst={}; dst.pResource=readback.Get(); dst.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; dst.PlacedFootprint=vectorLayout;
+        gpu.commands->CopyTextureRegion(&dst,0,0,0,&src,nullptr);
+        Barrier(gpu.commands.Get(),output.Vectors(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        gpu.Submit(); if (!gpu.Drain()) throw std::runtime_error("FG resampled motion timeout.");
+        Check(readback->Map(0,nullptr,&mapped),"FG motion readback");
+        for (UINT y : {0u,h/2,h-1}) for (UINT x : {0u,w/2,w-1}) {
+            const auto* v=reinterpret_cast<const HALF*>(static_cast<const BYTE*>(mapped)+vectorLayout.Offset+size_t(y)*vectorLayout.Footprint.RowPitch)+x*2;
+            if (std::abs(XMConvertHalfToFloat(v[0])-6)>0.01f || std::abs(XMConvertHalfToFloat(v[1])+4)>0.01f) {
+                readback->Unmap(0,nullptr);
+                throw std::runtime_error(std::format("Resampled FG motion is ({}, {}) at {},{}; expected (6, -4).",
+                    XMConvertHalfToFloat(v[0]),XMConvertHalfToFloat(v[1]),x,y));
+            }
+        }
+        readback->Unmap(0,nullptr);
+        // The next frame without a guide returns to FG's own estimate.
+        gpu.Begin(); output.Run(input.Get(),true);
+        if (output.Vectors()==guide.Get()) throw std::runtime_error("FG kept a stale shared guide.");
+        gpu.Submit(); if (!gpu.Drain()) throw std::runtime_error("FG fallback motion timeout.");
+        std::cout << "PASS half-size NR motion resampled to output pixels for FG\n" << std::flush;
+    }
     FrameGenerationPresentCheck(gpu,fg,processor.get());
     ComPtr<ID3D12InfoQueue> diagnostics; gpu.device.As(&diagnostics);
     if (diagnostics) for (UINT64 i=0;i<diagnostics->GetNumStoredMessagesAllowedByRetrievalFilter();++i) {

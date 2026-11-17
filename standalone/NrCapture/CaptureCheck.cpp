@@ -161,13 +161,16 @@ void MonitorCheck(Settings settings) {
         if (!matches) throw std::runtime_error("Screen capture includes the overlay or fails to reveal the underlying window.");
         maximumDelta = std::max(maximumDelta, delta);
     }
+    // The filter stays on while the controls have focus, directly beneath them.
     ShowWindow(controls.value, SW_SHOW); SetForegroundWindow(controls.value); Pump(); display.RefreshVisibility();
-    if (display.Active() || IsWindowVisible(display.Window())) throw std::runtime_error("Overlay obscures its own controls.");
+    if (!display.Active() || !IsWindowVisible(display.Window()) || GetWindow(controls.value, GW_HWNDNEXT) != display.Window())
+        throw std::runtime_error("Overlay is not directly beneath its focused controls.");
     ShowWindow(controls.value, SW_HIDE); SetForegroundWindow(second.value); Pump(); display.Present();
-    if (!display.Active() || !IsWindowVisible(display.Window())) throw std::runtime_error("Monitor overlay failed to resume.");
+    if (!display.Active() || !IsWindowVisible(display.Window()) || !(GetWindowLongPtrW(display.Window(), GWL_EXSTYLE) & WS_EX_TOPMOST))
+        throw std::runtime_error("Monitor overlay failed to return to topmost.");
     display.Hide(); if (!gpu.Drain()) throw std::runtime_error("Monitor stop timeout."); capture.Stop();
     { Capture restarted(gpu, source); next(restarted); if (!gpu.Drain()) throw std::runtime_error("Monitor restart timeout."); }
-    std::cout << std::format("PASS monitor capture: NR, identity, exclusion across four changed frames (max mean delta {:.6f}), window switching, click-through, control pause/resume and restart\n", maximumDelta);
+    std::cout << std::format("PASS monitor capture: NR, identity, exclusion across four changed frames (max mean delta {:.6f}), window switching, click-through, output beneath focused controls and restart\n", maximumDelta);
 }
 void CaptureCheck(Settings settings, UINT width, UINT height, unsigned requested) {
     Gpu gpu; Processor processor(gpu, settings.runtime);
@@ -181,7 +184,9 @@ void CaptureCheck(Settings settings, UINT width, UINT height, unsigned requested
     const auto focusDeadline = ClockMs() + 30000;
     while (GetForegroundWindow() != fixture.value && ClockMs() < focusDeadline) { Pump(); Sleep(10); }
     if (GetForegroundWindow() != fixture.value) throw std::runtime_error("Focus the independent validation window to run its presentation checks.");
-    Presentation display(gpu, fixture.value);
+    FixtureWindow panel; // Stands in for the application's controls; shown later.
+    panel.value = CreateWindowW(wc.lpszClassName, L"Controls fixture", WS_OVERLAPPEDWINDOW, 60, 60, 320, 200, nullptr, nullptr, wc.hInstance, nullptr);
+    Presentation display(gpu, fixture.value, panel.value);
     Capture capture(gpu, fixture.value);
     double start = ClockMs(), lastCapture = start;
     std::vector<double> latency, completion;
@@ -282,13 +287,26 @@ void CaptureCheck(Settings settings, UINT width, UINT height, unsigned requested
     {
         Capture restarted(gpu, fixture.value); presentFresh(restarted);
     }
+    // The filter stays on while the controls have focus: directly above the source, so beneath the controls.
+    ShowWindow(panel.value, SW_SHOW); SetForegroundWindow(panel.value); Pump();
+    {
+        Capture restarted(gpu, fixture.value); presentFresh(restarted); display.RefreshVisibility();
+        if (GetForegroundWindow() != panel.value) throw std::runtime_error("The controls fixture did not take focus.");
+        if (!display.Active() || !IsWindowVisible(display.Window()) || GetWindow(fixture.value, GW_HWNDPREV) != display.Window() ||
+            (GetWindowLongPtrW(display.Window(), GWL_EXSTYLE) & WS_EX_TOPMOST))
+            throw std::runtime_error("Output is not directly above the source while the controls have focus.");
+        SetForegroundWindow(fixture.value); Pump(); presentFresh(restarted);
+        if (!display.Active() || !IsWindowVisible(display.Window()) || !(GetWindowLongPtrW(display.Window(), GWL_EXSTYLE) & WS_EX_TOPMOST))
+            throw std::runtime_error("Output did not return to topmost with the source.");
+    }
+    ShowWindow(panel.value, SW_HIDE);
     FixtureWindow other;
     other.value = CreateWindowW(wc.lpszClassName, L"Focus loss fixture", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
         750, 100, 400, 250, nullptr, nullptr, wc.hInstance, nullptr);
     SetForegroundWindow(other.value); Pump();
     if (display.Active()) throw std::runtime_error("Focus loss was not detected.");
     display.Hide(); if (IsWindowVisible(display.Window())) throw std::runtime_error("Focus loss left output visible.");
-    std::cout << "PASS decorated-window crop, resize, capture restart, minimize/restore and focus loss\n";
+    std::cout << "PASS decorated-window crop, resize, capture restart, minimize/restore, output beneath focused controls and focus loss\n";
 }
 
 void WindowCheck(Settings settings, const std::wstring& title, unsigned requested) {

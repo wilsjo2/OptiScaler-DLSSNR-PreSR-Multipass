@@ -35,6 +35,7 @@ struct VkState
     NgxPassVk models[DlssNr::MaxPassCount] {};
     ModelSettings builtSettings[DlssNr::MaxPassCount] {};
     unsigned int activePasses = 0;
+    unsigned int loggedReapplied = 0;
     VkEvent creationReady = VK_NULL_HANDLE;
     bool creationPending = false;
 

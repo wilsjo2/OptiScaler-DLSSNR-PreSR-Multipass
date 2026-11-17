@@ -45,17 +45,24 @@ bool ModelVk::Impl::PrepareIndependent(uint32_t width, uint32_t height, unsigned
                    independentBeforeSr != frame.BeforeUpscale || independentRayReconstruction != frame.RayReconstruction;
     for (unsigned int i = 0; i < passes; ++i)
     {
+        // A re-applying pass has no stage of its own, only an output image for its run's dispatch.
+        if (Profiles::PassReapplies(cfg, i))
+        {
+            changed = changed || independentPasses[i].model != nullptr;
+            continue;
+        }
         const auto resolution = Profiles::PassResolutionSettings(cfg, i);
         if (resolution.workingScale < 1.0f && DlssNrUsesDlssEnlargement(resolution.transfer))
         {
             independentStatus.failureReason =
                 std::format("Pass {}: DLSS enlargement requires the DX12 processing path.", i + 1);
             for (auto& pass : independentPasses)
-                pass.model->state.reset = true;
+                if (pass.model)
+                    pass.model->state.reset = true;
             state.reset = true;
             return false;
         }
-        if (!changed && (independentPasses[i].resolution != resolution ||
+        if (!changed && (!independentPasses[i].model || independentPasses[i].resolution != resolution ||
                          independentPasses[i].settings != Profiles::PassSettings(cfg, i)))
             changed = true;
     }
@@ -84,12 +91,16 @@ bool ModelVk::Impl::PrepareIndependent(uint32_t width, uint32_t height, unsigned
     for (unsigned int i = 0; i < passes; ++i)
     {
         auto& pass = independentPasses.emplace_back();
-        pass.shader = std::make_unique<DlssNr_Vk>(std::format("DLSS-NR VK pass {}", i + 1), state.device,
-                                                state.physicalDevice);
-        pass.model = std::make_unique<Impl>(*pass.shader);
-        pass.settings = Profiles::PassSettings(cfg, i);
-        pass.resolution = Profiles::PassResolutionSettings(cfg, i);
-        if (!pass.shader->IsInit() ||
+        const bool reapply = Profiles::PassReapplies(cfg, i);
+        if (!reapply)
+        {
+            pass.shader = std::make_unique<DlssNr_Vk>(std::format("DLSS-NR VK pass {}", i + 1), state.device,
+                                                    state.physicalDevice);
+            pass.model = std::make_unique<Impl>(*pass.shader);
+            pass.settings = Profiles::PassSettings(cfg, i);
+            pass.resolution = Profiles::PassResolutionSettings(cfg, i);
+        }
+        if ((!reapply && !pass.shader->IsInit()) ||
             !pass.output.Ensure(state.device, state.physicalDevice, width, height, format))
         {
             independentStatus.failureReason = std::format("Could not allocate Vulkan pass {}.", i + 1);
@@ -130,13 +141,67 @@ bool ModelVk::Impl::EvaluateIndependent(VkCommandBuffer cmdBuffer, const VkImage
             {
                 owner.state.reset = true;
                 for (auto& pass : owner.independentPasses)
-                    pass.model->state.reset = true;
+                    if (pass.model)
+                        pass.model->state.reset = true;
             }
         }
     } history { *this };
+    ImageVk* shown = input; // the last network stage's input, for a following re-apply run
+    unsigned int lastNetwork = 0;
     for (unsigned int i = 0; i < independentPasses.size(); ++i)
     {
+        if (const auto run = i == 0 ? 0 : Profiles::ReapplyRun(cfg, i, (unsigned int) independentPasses.size()))
+        {
+            // One dispatch into the run's last output image; it never aliases the input or answer it reads.
+            auto& target = independentPasses[i + run - 1].output;
+            i += run - 1;
+            if (!ready)
+                continue;
+            Transition(cmdBuffer, *shown, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            Transition(cmdBuffer, *input, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            Transition(cmdBuffer, target, VK_IMAGE_LAYOUT_GENERAL);
+            DlssNrConstants reapply {};
+            reapply.Mode = DlssNrMode_Reapply;
+            reapply.WhitePoint = float(run) * Profiles::ReapplyGain(cfg);
+            reapply.Width = encode.Width;
+            reapply.Height = encode.Height;
+            if (!state.pass->Dispatch(cmdBuffer, reapply, encode.Width, encode.Height, shown->info.ImageView,
+                                      input->info.ImageView, VK_NULL_HANDLE, VK_NULL_HANDLE, target.info.ImageView,
+                                      VK_NULL_HANDLE))
+            {
+                independentStatus.failureReason = std::format("Pass {}: re-apply failed", i + 2 - run);
+                ready = false;
+                continue;
+            }
+            input = &target;
+            Transition(cmdBuffer, *input, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            if (i + 1 < independentPasses.size())
+            {
+                // The last network stage's encode proxy is no longer needed, and is not what that stage was shown.
+                auto& clamped = independentPasses[lastNetwork].model->state.proxy;
+                Transition(cmdBuffer, clamped, VK_IMAGE_LAYOUT_GENERAL);
+                DlssNrConstants clamp {};
+                clamp.Mode = DlssNrMode_ClampProxy;
+                clamp.Width = encode.Width;
+                clamp.Height = encode.Height;
+                if (!state.pass->Dispatch(cmdBuffer, clamp, encode.Width, encode.Height, input->info.ImageView,
+                                          VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, clamped.info.ImageView,
+                                          VK_NULL_HANDLE))
+                {
+                    independentStatus.failureReason = std::format("Pass {}: proxy clamp failed", i + 1);
+                    ready = false;
+                }
+                else
+                {
+                    input = &clamped;
+                    Transition(cmdBuffer, *input, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                }
+            }
+            continue;
+        }
         auto& pass = independentPasses[i];
+        lastNetwork = i;
+        shown = input;
         Profiles::ApplyPassConfig(passConfig, cfg, i);
         // Return only a reconstructed encoded answer. The parent's resolve applies all
         // user composition controls once against the original frame.
@@ -159,6 +224,8 @@ bool ModelVk::Impl::EvaluateIndependent(VkCommandBuffer cmdBuffer, const VkImage
         // have its own temporal state, including two stages with identical settings.
         for (unsigned int earlier = 0; feature && earlier < i; ++earlier)
         {
+            if (!independentPasses[earlier].model)
+                continue;
             const auto* other = independentPasses[earlier].model->state.models[0].feature;
             if (other && (feature == other || feature->Id == other->Id))
             {
@@ -177,7 +244,7 @@ bool ModelVk::Impl::EvaluateIndependent(VkCommandBuffer cmdBuffer, const VkImage
         {
             input = &pass.output;
             Transition(cmdBuffer, *input, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-            if (i + 1 < independentPasses.size())
+            if (i + 1 < independentPasses.size() && !Profiles::PassReapplies(cfg, i + 1))
             {
                 // Match ordinary layered NR: only intermediate answers are clamped.
                 // This stage's encode proxy is no longer needed and has native dimensions.
@@ -240,7 +307,7 @@ bool ModelVk::Impl::EvaluateIndependent(VkCommandBuffer cmdBuffer, const VkImage
     auto* resolveProxy = &state.proxy;
     if (resolve.DebugView == 4)
     {
-        auto& last = independentPasses.back().model->state;
+        auto& last = independentPasses[lastNetwork].model->state;
         resolveProxy = last.spatialRan ? &last.spatialProxy : last.proxySmall.Valid() ? &last.proxySmall : &last.proxy;
         Transition(cmdBuffer, *resolveProxy, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         resolve.DebugView = 1;
@@ -787,17 +854,46 @@ bool ModelVk::Impl::Evaluate(VkCommandBuffer cmdBuffer, const VkImageInfo& colou
     bool clampFailed = false;
     uint32_t clampSlots[2] = { UINT32_MAX, UINT32_MAX };
     NVSDK_NGX_Result evaluated = NVSDK_NGX_Result_Success;
-    for (unsigned int pass = 0; pass < passes; ++pass)
+    unsigned int reapplied = 0;
+    for (unsigned int pass = 0; pass < passes;)
     {
-        Transition(cmdBuffer, *input, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        Transition(cmdBuffer, *answer, VK_IMAGE_LAYOUT_GENERAL);
-        auto inputResource = WrapImage(input->info, true);
-        auto answerResource = WrapImage(answer->info, true);
-        evaluated = EvaluateModel(cmdBuffer, pass, &inputResource, depth, motion, &answerResource, workWidth,
-                                  workHeight, guides, depthInverted, mvX, mvY, cfg);
-        if (evaluated != NVSDK_NGX_Result_Success)
-            break;
-        if (pass + 1 < passes)
+        if (const auto run = pass == 0 ? 0 : Profiles::ReapplyRun(cfg, pass, passes))
+        {
+            // input and answer are the last network pass's input and answer; write the other ping-pong image.
+            ImageVk* target = answer == &state.output ? &state.scratch : &state.output;
+            Transition(cmdBuffer, *input, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            Transition(cmdBuffer, *answer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            Transition(cmdBuffer, *target, VK_IMAGE_LAYOUT_GENERAL);
+            DlssNrConstants reapply {};
+            reapply.Mode = DlssNrMode_Reapply;
+            reapply.WhitePoint = float(run) * Profiles::ReapplyGain(cfg);
+            reapply.Width = workWidth;
+            reapply.Height = workHeight;
+            if (!state.pass->Dispatch(cmdBuffer, reapply, workWidth, workHeight, input->info.ImageView,
+                                      answer->info.ImageView, VK_NULL_HANDLE, VK_NULL_HANDLE, target->info.ImageView,
+                                      VK_NULL_HANDLE))
+            {
+                LOG_WARN("DLSS-NR Vulkan: the re-apply dispatch failed; using the last model answer");
+                break;
+            }
+            answer = target;
+            reapplied += run;
+            pass += run;
+        }
+        else
+        {
+            Transition(cmdBuffer, *input, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            Transition(cmdBuffer, *answer, VK_IMAGE_LAYOUT_GENERAL);
+            auto inputResource = WrapImage(input->info, true);
+            auto answerResource = WrapImage(answer->info, true);
+            evaluated = EvaluateModel(cmdBuffer, pass, &inputResource, depth, motion, &answerResource, workWidth,
+                                      workHeight, guides, depthInverted, mvX, mvY, cfg);
+            if (evaluated != NVSDK_NGX_Result_Success)
+                break;
+            ++pass;
+        }
+        // The next network pass reads the clamped answer; a following re-apply reads this pass's input instead.
+        if (pass < passes && !Profiles::PassReapplies(cfg, pass))
         {
             Transition(cmdBuffer, *answer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             Transition(cmdBuffer, state.passClamp, VK_IMAGE_LAYOUT_GENERAL);
@@ -808,7 +904,8 @@ bool ModelVk::Impl::Evaluate(VkCommandBuffer cmdBuffer, const VkImageInfo& colou
             if (!state.pass->Dispatch(cmdBuffer, clamp, workWidth, workHeight, answer->info.ImageView, VK_NULL_HANDLE,
                                       VK_NULL_HANDLE, VK_NULL_HANDLE, state.passClamp.info.ImageView, VK_NULL_HANDLE,
                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, false, &clampSlots[pass % 2]))
+                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, false,
+                                      &clampSlots[answer == &state.output ? 0 : 1]))
             {
                 clampFailed = true;
                 break; // Resolve the last valid answer and reset skipped histories next frame.
@@ -820,6 +917,12 @@ bool ModelVk::Impl::Evaluate(VkCommandBuffer cmdBuffer, const VkImageInfo& colou
 
     state.reset = clampFailed;
     state.frames++;
+    if (reapplied != state.loggedReapplied)
+    {
+        state.loggedReapplied = reapplied;
+        LOG_INFO("DLSS-NR Vulkan model passes: configured {}, {} re-applied (gain {:.3f})", passes, reapplied,
+                 Profiles::ReapplyGain(cfg));
+    }
 
     if (evaluated != NVSDK_NGX_Result_Success)
     {
@@ -997,6 +1100,16 @@ bool ModelVk::Evaluate(VkCommandBuffer cmd, const VkImageInfo& colour, const VkI
                        const VkImageInfo& motion, const VkImageInfo& output, const DlssNrFrameInfo_Vk& frame,
                        VkInstance instance, VkPhysicalDevice physicalDevice, VkDevice device, VkImageLayout inputLayout)
 {
+    // The 4-bit models exist on the D3D12 path only, and there is no fallback to the runtime's own model.
+    {
+        const auto& cfg = *Config::Instance();
+        const unsigned int passes = std::clamp(cfg.DlssNrPasses.value_or_default(), 1u, DlssNr::MaxPassCount);
+        if (Profiles::WantsNvfp4(cfg, passes))
+        {
+            Nvfp4::Refuse("the 4-bit models need the D3D12 processing path (this game runs NR on Vulkan)");
+            return false;
+        }
+    }
     return _impl->Evaluate(cmd, colour, depth, motion, output, frame, instance, physicalDevice, device, inputLayout);
 }
 } // namespace DlssNr

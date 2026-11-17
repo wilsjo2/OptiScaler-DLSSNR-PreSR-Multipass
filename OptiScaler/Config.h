@@ -333,8 +333,14 @@ class Config
         CustomOptional<bool, NoDefault> spatialCompression;
         CustomOptional<float, NoDefault> spatialCenterX, spatialCenterY, spatialWorkX, spatialWorkY;
         CustomOptional<float, NoDefault> spatialOffsetX, spatialOffsetY, spatialShiftX, spatialShiftY;
+        // Reapply: skip the network and repeat the last network pass's change. Borrow*: run the network but take
+        // the transformer, or every block at 1/borrowLevel size and below, from the frame's first evaluation.
+        CustomOptional<bool, NoDefault> reapply, borrowTransformer, borrowBelow;
+        CustomOptional<uint32_t, NoDefault> borrowLevel;
     };
     NrPassOverrides DlssNrPassOverrides[29]; // Existing Pass2..Pass30 INI keys remain unchanged.
+    // Gain of each re-applied pass: out = saturate(out_m + r*gain*(out_m - in_m)) for r re-applied passes.
+    CustomOptional<float> DlssNrReapplyGain { 0.81f };
 
     // Composition strengths are separate from model creation settings.
     CustomOptional<float> DlssNrTransferStrength { 1.0f };

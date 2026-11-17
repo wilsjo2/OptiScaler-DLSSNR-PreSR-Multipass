@@ -152,6 +152,15 @@ void CaptureColour(uint3 id : SV_DispatchThreadID)
         gTarget[id.xy] = encoded; gKeep[id.xy] = encoded;
         return;
     }
+    if (gMode == 22) {
+        // Re-apply: a run of r passes without the network extends the last evaluated pass's change once,
+        // saturate(out + r * gain * (out - in)), keeping out's alpha. gSource = out, gModel = in.
+        float4 answer = gSource.Load(int3(id.xy, 0));
+        float3 after = SanitizeFinite3(answer.rgb, 0.5);
+        float3 before = SanitizeFinite3(gModel.Load(int3(id.xy, 0)).rgb, after); // Non-finite input: no change there.
+        gTarget[id.xy] = float4(saturate(after + gTransferStrength * (after - before)), answer.a);
+        return;
+    }
     if (gMode == 19) {
         // Independent stages retain the legacy inter-pass bounded input.
         float4 sample = gSource.Load(int3(id.xy, 0));

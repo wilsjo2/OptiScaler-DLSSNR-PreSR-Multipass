@@ -1,8 +1,10 @@
 #include "pch.h"
+#include "DlssNrFeature_Dx12.h"
 #include "DlssNr_MenuSections.h"
 #include "DlssNr_Placement.h"
 #include "DlssNr_Status.h"
 #include "PassProfiles.h"
+#include "NrPassBorrow.h"
 #include <shaders/dlssnr/DlssNr_Spatial.h>
 #include <Config.h>
 #include <menu/menu_common.h>
@@ -310,22 +312,32 @@ static void DeferredSlider(const char* label, Option* opt, float mn, float mx, f
 
 template <typename Option> static void NrModelCombo(Option* opt, bool allowInherit)
 {
-    static const char* names[] = { "Automatic", "Original", "Optimized" };
+    // The runtime's presets 0..2, then DlssNr::Nvfp4's choices shown (4, 15, 16): Model A with our 4-bit kernels and
+    // weight sets.
+    static const char* names[] = { "Automatic",
+                                   "Original",
+                                   "Optimized",
+                                   "Original - NVFP4 (4-bit kernels)",
+                                   "NVFP4 2xPass-in-one",
+                                   "NVFP4 3xPass-in-one" };
+    static const uint32_t values[] = { 0, 1, 2, 4, 16, 15 };
     const bool inherited = allowInherit && !opt->has_value();
     const uint32_t preset = opt->has_value() ? opt->value() : 0u;
-    const char* preview = inherited                      ? "Inherit pass 1"
-                          : preset < IM_ARRAYSIZE(names) ? names[preset]
-                                                         : "Unavailable preset";
+    const char* preview = inherited ? "Inherit pass 1" : "Unavailable preset";
+    if (!inherited)
+        for (int index = 0; index < IM_ARRAYSIZE(names); ++index)
+            if (values[index] == preset)
+                preview = names[index];
 
     if (ImGui::BeginCombo("NR model", preview))
     {
         if (allowInherit && ImGui::Selectable("Inherit pass 1", inherited))
             *opt = std::optional<uint32_t> {};
-        for (uint32_t value = 0; value < IM_ARRAYSIZE(names); ++value)
+        for (int index = 0; index < IM_ARRAYSIZE(names); ++index)
         {
-            const bool selected = !inherited && preset == value;
-            if (ImGui::Selectable(names[value], selected))
-                *opt = value;
+            const bool selected = !inherited && preset == values[index];
+            if (ImGui::Selectable(names[index], selected))
+                *opt = values[index];
             if (selected)
                 ImGui::SetItemDefaultFocus();
         }
@@ -335,7 +347,27 @@ template <typename Option> static void NrModelCombo(Option* opt, bool allowInher
                "Original: use the original model (preset 1).\n"
                "Optimized: use the smaller FP8 model (preset 2), included in NR 310.9.16.0.\n"
                "Older runtimes fall back to their default when a model is unavailable.\n"
+               "Original - NVFP4, NVFP4 2xPass-in-one, NVFP4 3xPass-in-one: 4-bit models for RTX 50 series GPUs\n"
+               "(D3D12 path; files in OptiScaler/nvfp4). They carry all their own weights and use none of the\n"
+               "runtime's, so any NR runtime that offers the original model (preset 1) works, such as 310.8.0\n"
+               "or 310.9.16.0.\n"
+               "There is no fallback: if they cannot run, NR is not applied and the reason is shown here in red.\n"
+               "2xPass-in-one and 3xPass-in-one give the look of two or three passes in one. Run either as ONE\n"
+               "pass: Cinematic, intensity, tone and structure at 1.\n"
                "Changing the model rebuilds this pass and resets its history.");
+    if (!inherited && DlssNr::Nvfp4::IsNvfp4(preset))
+    {
+        if (const auto problem = DlssNr::Nvfp4::Problem(); !problem.empty())
+        {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.35f, 0.3f, 1.0f));
+            ImGui::TextWrapped("4-bit model is NOT running, NR is not applied: %s", problem.c_str());
+            ImGui::PopStyleColor();
+        }
+        else if (DlssNr::Nvfp4::Running())
+            ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1.0f), "4-bit kernels running");
+        else
+            ImGui::TextDisabled("4-bit kernels starting...");
+    }
 }
 
 static void RenderPassResolution(Config* config, unsigned int selectedPass)
@@ -383,6 +415,69 @@ static void RenderPassResolution(Config* config, unsigned int selectedPass)
     ImGui::TreePop();
 }
 
+// Later passes can skip the model (re-apply) or skip part of it (borrow from the frame's first model pass).
+// Quality figures: Model A, 4K median PSNR against two real passes; one pass alone is 32.1 dB.
+static void RenderPassReuse(Config* config, unsigned int selectedPass)
+{
+    auto& pass = config->DlssNrPassOverrides[selectedPass - 1];
+    bool reapply = pass.reapply.value_or(false);
+    if (ImGui::Checkbox("Re-apply previous change", &reapply))
+        pass.reapply = reapply;
+    HelpMarker("Skip the model and repeat the previous model pass's change in one tiny dispatch "
+               "(41.5 dB at gain 0.81, 39.2 dB at gain 1).");
+    if (reapply)
+    {
+        Slider("Re-apply gain", config->DlssNrReapplyGain, 0.0f, 2.0f, "%.2f", 0.81f);
+        HelpMarker("Shared by every re-applying pass: 1 repeats the change exactly, 0.81 measured best.");
+    }
+
+    const auto feature = State::Instance().currentFeature;
+    const bool nativeVk = feature ? feature->Api() == API::Vulkan && !feature->IsWithDx12()
+                                  : State::Instance().swapchainApi == API::Vulkan;
+    // The same pass count the run uses, so the menu and the chain choice agree.
+    const unsigned runPasses = std::clamp(config->DlssNrPasses.value_or_default(), 1u,
+                                          config->DlssNrUnlockPasses.value_or_default() ? DlssNr::MaxPassCount
+                                                                                        : DlssNr::DefaultMaxPassCount);
+    const bool independent =
+        Profiles::HasPassResolutionOverride(pass) || Profiles::HasPassResolutionOverrides(*config, runPasses);
+    const char* unavailable = reapply       ? "Unavailable while this pass re-applies the previous change."
+                              : nativeVk    ? "Unavailable on native Vulkan: borrowing intercepts the D3D12 NR "
+                                              "runtime's kernel launches."
+                              : independent ? "Unavailable with independent pass resolution: every pass must run "
+                                              "the same model at the same size."
+                                            : nullptr;
+    ImGui::BeginDisabled(unavailable != nullptr);
+    bool transformer = pass.borrowTransformer.value_or(false);
+    if (ImGui::Checkbox("Borrow pass 1's transformer", &transformer))
+        pass.borrowTransformer = transformer;
+    ImGui::EndDisabled();
+    HelpMarker(unavailable ? unavailable
+                           : "Run the model but take pass 1's transformer blocks instead of recomputing them; saves "
+                             "GPU time (43.6 dB).");
+    ImGui::BeginDisabled(unavailable != nullptr);
+    bool below = pass.borrowBelow.value_or(false);
+    if (ImGui::Checkbox("Borrow everything at 1/x size and below", &below))
+        pass.borrowBelow = below;
+    ImGui::EndDisabled();
+    HelpMarker(unavailable ? unavailable
+                           : "Run only the outer, larger blocks and take everything at 1/x of the frame size and "
+                             "smaller from pass 1; overrides the transformer box (1/32 43.1, 1/16 42.1, 1/8 40.7, "
+                             "1/4 40.7, 1/2 40.0 dB).");
+    static const unsigned levels[] = { 2, 4, 8, 16, 32 };
+    static const char* levelNames[] = { "1/2", "1/4", "1/8", "1/16", "1/32" };
+    // Show the level the run will use: ChooseCut snaps an INI value to the nearest (Below2..Below32 = 6..2).
+    int index = 6 - int(NrPassBorrow::ChooseCut(false, true, pass.borrowLevel.value_or(32u)));
+    ImGui::BeginDisabled(unavailable != nullptr || !below);
+    ImGui::Indent();
+    if (ImGui::Combo("Borrow at 1/x and below", &index, levelNames, IM_ARRAYSIZE(levelNames)))
+        pass.borrowLevel = (uint32_t) levels[index];
+    ImGui::Unindent();
+    ImGui::EndDisabled();
+    char status[192];
+    NrPassBorrow::Status(status, sizeof(status));
+    ImGui::TextDisabled("%s", status);
+}
+
 void RenderModel(Config* config)
 {
     bool unlockPasses = config->DlssNrUnlockPasses.value_or_default();
@@ -399,6 +494,26 @@ void RenderModel(Config* config)
     {
         config->DlssNrUnlockPasses = unlockPasses;
         config->DlssNrPasses = std::clamp(config->DlssNrPasses.value_or_default(), 1u, unlockPasses ? 10u : 2u);
+    }
+
+    // Pass shortcuts sit right under the pass count so they are visible without picking a pass to edit.
+    const unsigned activePasses = std::clamp(config->DlssNrPasses.value_or_default(), 1u, (unsigned) menuPassLimit);
+    if (activePasses >= 2)
+    {
+        ImGui::SeparatorText("Later-pass shortcuts (re-apply / borrow)");
+        for (unsigned shortcutPass = 1; shortcutPass < activePasses; ++shortcutPass)
+        {
+            ImGui::PushID(1000 + (int) shortcutPass);
+            if (activePasses > 2)
+                ImGui::TextDisabled("Pass %u", shortcutPass + 1);
+            RenderPassReuse(config, shortcutPass);
+            ImGui::PopID();
+        }
+        ImGui::Separator();
+    }
+    else
+    {
+        ImGui::TextDisabled("Set 2 or more passes for the re-apply and borrow options.");
     }
 
     static unsigned selectedPass = 0;

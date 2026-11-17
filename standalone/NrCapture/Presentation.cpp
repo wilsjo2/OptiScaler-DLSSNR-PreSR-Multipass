@@ -47,12 +47,26 @@ void Presentation::RefreshVisibility() {
         (UINT)(bounds.bottom - bounds.top) != height) { Hide(); return; }
     if (bounds.left != previous.left || bounds.top != previous.top) {
         if (fg) fg->Quiesce(swapchain.Get());
-        SetWindowPos(window, HWND_TOPMOST, bounds.left, bounds.top, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+        SetWindowPos(window, nullptr, bounds.left, bounds.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
+    Order();
 }
 bool Presentation::Active() const {
-    // Reveal the unfiltered desktop while the user operates our controls.
-    return source.Active() && (!controls || GetForegroundWindow() != controls);
+    // The filter stays on while the user operates our controls; Order keeps them above the output.
+    return source.Active() || (ControlsFocused() && source.Shown());
+}
+void Presentation::Order() {
+    // Topmost over a focused source. While our controls have focus the output sits directly above the
+    // source window (screen mode: directly below the controls), so whatever covers the source covers it too.
+    HWND after = HWND_TOPMOST;
+    if (ControlsFocused()) {
+        after = source.window ? GetWindow(source.window, GW_HWNDPREV) : controls;
+        if (source.window ? after == window : GetWindow(controls, GW_HWNDNEXT) == window) return;
+        if (!after) after = HWND_TOP;
+    } else if (fg && (GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOPMOST)) return;
+    // Without FG the output is raised every frame, as before. FG leaves the HWND alone unless it must move.
+    if (fg) fg->Quiesce(swapchain.Get());
+    SetWindowPos(window, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 bool Presentation::Hdr() const {
     const HMONITOR monitor = source.Monitor();
@@ -128,8 +142,8 @@ void Presentation::BeginFrame(unsigned targetFps) {
         if (!source.Bounds(bounds)) throw std::runtime_error("Output bounds are unavailable.");
         if (!EqualRect(&bounds, &previous)) {
             fg->Quiesce(swapchain.Get());
-            Check(SetWindowPos(window, HWND_TOPMOST, bounds.left, bounds.top,
-                bounds.right - bounds.left, bounds.bottom - bounds.top, SWP_NOACTIVATE) ? S_OK :
+            Check(SetWindowPos(window, nullptr, bounds.left, bounds.top,
+                bounds.right - bounds.left, bounds.bottom - bounds.top, SWP_NOZORDER | SWP_NOACTIVATE) ? S_OK :
                 HRESULT_FROM_WIN32(GetLastError()), "Position FG output");
         }
         // Resume with one ordinary present, then show the populated window while
@@ -138,9 +152,9 @@ void Presentation::BeginFrame(unsigned targetFps) {
         fg->BeginFrame(float(targetFps));
     }
 }
-void Presentation::Copy(ID3D12Resource* output, bool reset, ID3D12Resource* fullResolutionMotion) {
+void Presentation::Copy(ID3D12Resource* output, bool reset, ID3D12Resource* sceneMotion) {
     if (fg) {
-        const bool cut = fgOutput->Run(output, reset, fullResolutionMotion);
+        const bool cut = fgOutput->Run(output, reset, sceneMotion);
         output = fgOutput->Colour();
         fg->Tag(output, fgOutput->Depth(), fgOutput->Vectors(), cut);
         Barrier(gpu.commands.Get(), output, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -160,10 +174,13 @@ void Presentation::Present() {
     RECT bounds{};
     if (!source.Bounds(bounds) || (UINT)(bounds.right - bounds.left) != width ||
         (UINT)(bounds.bottom - bounds.top) != height) { Hide(); return; }
-    if (!fg) SetWindowPos(window, HWND_TOPMOST, bounds.left, bounds.top, (int)width, (int)height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    else if (!IsWindowVisible(window)) {
+    if (!fg) {
+        Order();
+        SetWindowPos(window, nullptr, bounds.left, bounds.top, (int)width, (int)height, SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    } else if (!IsWindowVisible(window)) {
         fg->Quiesce(swapchain.Get());
-        ShowWindow(window, SW_SHOWNOACTIVATE);
+        Order();
+        SetWindowPos(window, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
     }
 }
 }

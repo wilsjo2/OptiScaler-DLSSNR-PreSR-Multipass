@@ -1701,6 +1701,11 @@
     <ClCompile Include="dlssnr\DlssNr_CompatibilityRuntimePaths.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClInclude Include="dlssnr\DlssNr_CompatibilityRuntime.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="dlssnr\DlssNr_RuntimeImports.h"><Filter>Header Files</Filter></ClInclude>
+    <ClCompile Include="dlssnr\NrPassBorrow.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClInclude Include="dlssnr\NrPassBorrow.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="dlssnr\NrPassBorrowCopy.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="dlssnr\NrPassBorrowTables.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="dlssnr\NrPassBorrowTest.h"><Filter>Header Files</Filter></ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dlssnr\DlssNrFeature_Vk_Resources.cpp"><Filter>Source Files</Filter></ClCompile>

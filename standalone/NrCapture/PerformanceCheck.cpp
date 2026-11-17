@@ -68,7 +68,7 @@ void PerformanceCheck(Gpu& gpu, Processor& processor, ID3D12Resource* input, Set
     std::cout << (moving ? "Fixture: wrapped translation, 7px horizontal/3px vertical per frame; preparation excluded\n"
                          : "Fixture: unchanged captured frame\n");
     for (unsigned pass = 0; pass < settings.passes; ++pass) {
-        const auto profile = settings.PassResolution(pass);
+        const auto profile = settings.EffectiveResolution(pass);
         const auto [width, height] = processor.PassModelSize(pass);
         std::cout << std::format("Pass {}: {}x{} model, {}% scale, transfer {}, upscaler {}, downscaler {}, foveation {}\n",
             pass + 1, width, height, profile.modelScale, profile.transfer, profile.upscaler,
@@ -126,11 +126,15 @@ void PerformanceCheck(Gpu& gpu, Processor& processor, ID3D12Resource* input, Set
             const auto resizeStart = ClockMs();
             processor.Resize(processor.width, processor.height, settings);
             const auto start = ClockMs();
+            // NR_PERF_SPLIT: as the application does, late work (Settings::editLate) goes into its own list after the
+            // frame's. The timestamp span is then the picture's alone; the stages still hold the model's time.
+            static const bool split = _wgetenv(L"NR_PERF_SPLIT") != nullptr;
+            gpu.lateSplit = split;
             gpu.Begin(); gpu.BeginTimings();
             gpu.commands->EndQuery(queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
             auto* output = processor.Run(moving ? movedInput.Get() : input, settings, hdr, false, 1, 8.33f, fps);
             finalOutput = output;
-            auto* sharedMotion = mode == 3 ? processor.FullResolutionMotion() : nullptr;
+            auto* sharedMotion = mode == 3 ? processor.SceneMotion() : nullptr;
             // Match live capture: zero-motion NR resets its own history every
             // frame, but independent FG motion still retains its history.
             if (mode >= 2) fgOutput->Run(output, frame == 0 || (sharedMotion && processor.historyReset), sharedMotion);

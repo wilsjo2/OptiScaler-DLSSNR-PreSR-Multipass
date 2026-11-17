@@ -412,6 +412,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrUnlockPasses.set_from_config(readBool("DlssNr", "UnlockPasses"));
             DlssNrMatchGuides.set_from_config(readBool("DlssNr", "MatchGuides"));
             DlssNrRenderMotionScale.set_from_config(readBool("DlssNr", "RenderMotionScale"));
+            DlssNrReapplyGain.set_from_config(readFloat("DlssNr", "ReapplyGain"));
             for (unsigned int i = 0; i < std::size(DlssNrPassOverrides); ++i)
             {
                 auto& pass = DlssNrPassOverrides[i];
@@ -437,6 +438,10 @@ bool Config::Reload(std::filesystem::path iniPath)
                 pass.spatialOffsetY.set_from_config(readFloat("DlssNr", std::format("Pass{}SpatialOffsetY", i + 2)));
                 pass.spatialShiftX.set_from_config(readFloat("DlssNr", std::format("Pass{}SpatialShiftX", i + 2)));
                 pass.spatialShiftY.set_from_config(readFloat("DlssNr", std::format("Pass{}SpatialShiftY", i + 2)));
+                pass.reapply.set_from_config(readBool("DlssNr", std::format("Pass{}Reapply", i + 2)));
+                pass.borrowTransformer.set_from_config(readBool("DlssNr", std::format("Pass{}BorrowTransformer", i + 2)));
+                pass.borrowBelow.set_from_config(readBool("DlssNr", std::format("Pass{}BorrowBelow", i + 2)));
+                pass.borrowLevel.set_from_config(readUInt("DlssNr", std::format("Pass{}BorrowLevel", i + 2)));
             }
             DlssNrReversibleMode.set_from_config(readUInt("DlssNr", "ReversibleMode"));
             DlssNrApplyModel.set_from_config(readBool("DlssNr", "ApplyModel"));
@@ -1419,6 +1424,7 @@ bool Config::SaveIni(std::filesystem::path destination)
         ini.SetValue("DlssNr", "MatchGuides", GetBoolValue(Instance()->DlssNrMatchGuides.value_for_config()).c_str());
         ini.SetValue("DlssNr", "RenderMotionScale",
                      GetBoolValue(Instance()->DlssNrRenderMotionScale.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "ReapplyGain", GetFloatValue(Instance()->DlssNrReapplyGain.value_for_config()).c_str());
         for (unsigned int i = 0; i < std::size(Instance()->DlssNrPassOverrides); ++i)
         {
             auto& pass = Instance()->DlssNrPassOverrides[i];
@@ -1463,6 +1469,14 @@ bool Config::SaveIni(std::filesystem::path destination)
                          GetFloatValue(pass.spatialShiftX.value_for_config()).c_str());
             ini.SetValue("DlssNr", std::format("Pass{}SpatialShiftY", i + 2).c_str(),
                          GetFloatValue(pass.spatialShiftY.value_for_config()).c_str());
+            ini.SetValue("DlssNr", std::format("Pass{}Reapply", i + 2).c_str(),
+                         GetBoolValue(pass.reapply.value_for_config()).c_str());
+            ini.SetValue("DlssNr", std::format("Pass{}BorrowTransformer", i + 2).c_str(),
+                         GetBoolValue(pass.borrowTransformer.value_for_config()).c_str());
+            ini.SetValue("DlssNr", std::format("Pass{}BorrowBelow", i + 2).c_str(),
+                         GetBoolValue(pass.borrowBelow.value_for_config()).c_str());
+            ini.SetValue("DlssNr", std::format("Pass{}BorrowLevel", i + 2).c_str(),
+                         GetIntValue(pass.borrowLevel.value_for_config()).c_str());
         }
         ini.SetValue("DlssNr", "ReversibleMode",
                      GetIntValue(Instance()->DlssNrReversibleMode.value_for_config()).c_str());

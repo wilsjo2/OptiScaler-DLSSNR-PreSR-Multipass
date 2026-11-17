@@ -11,7 +11,7 @@ public:
     ~Presentation();
     void Resize(UINT width, UINT height);
     void BeginFrame(unsigned targetFps = 0);
-    void Copy(ID3D12Resource* output, bool reset = false, ID3D12Resource* fullResolutionMotion = nullptr);
+    void Copy(ID3D12Resource* output, bool reset = false, ID3D12Resource* sceneMotion = nullptr);
     void Present();
     void RefreshVisibility();
     bool Active() const;
@@ -20,6 +20,8 @@ public:
     void Hide();
     HWND Window() const { return window; }
 private:
+    bool ControlsFocused() const { return controls && GetForegroundWindow() == controls; }
+    void Order();
     Gpu& gpu;
     CaptureSource source;
     HWND controls, window = nullptr;

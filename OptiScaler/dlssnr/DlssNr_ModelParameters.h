@@ -10,6 +10,9 @@ struct ModelSettings
     unsigned int preset = 0, style = 0;
     float intensity = 1.0f, localStructure = 1.0f, localTone = 0.0f, skinStructure = -1.0f;
     bool autoMask = true;
+    // A model of ours the pass asked for (DlssNr::Nvfp4: 4..6), 0 for the runtime's own. `preset` is then 1: our
+    // kernels replace the launches of the runtime's Model A.
+    unsigned int requested = 0;
     bool operator==(const ModelSettings&) const = default;
 };
 

@@ -70,6 +70,7 @@ class DlssNr_Dx12 : public Shader_Dx12, public DlssNr_Common
     // Denoise-first step 2: resample NR's edit by the jitter and put it onto the raw render.
     ID3D12PipelineState* _denoiseFirstPipelineState = nullptr;
     ID3D12PipelineState* _rawResidualPipelineState = nullptr;
+    ID3D12PipelineState* _reapplyPipelineState = nullptr; // dlssnr_reapply.hlsl, DlssNrMode_Reapply
 
     bool DispatchConfigured(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* colour, ID3D12Resource* depth,
                             ID3D12Resource* motion, ID3D12Resource* output, const DlssNrFrameInfo& frame,

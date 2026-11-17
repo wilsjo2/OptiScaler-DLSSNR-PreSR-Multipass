@@ -98,3 +98,30 @@ Explicit **Automatic (0)** follows the runtime default independently of pass 1.
 Passes 4 onward inherit pass 1's model. Existing INI values and defaults are preserved;
 unknown values display **Unavailable preset** until changed. Model changes use the
 existing guarded rebuild and reset the affected pass's history.
+
+## Cheaper later passes
+
+With **Model passes** at 2 or more, the **Later-pass shortcuts** group directly under the pass slider shows
+three tick-boxes for each pass from 2 onward. They trade a little of the multipass result for less GPU time:
+
+- **Re-apply previous change** (`Pass2Reapply=true`): skip the model and repeat the change of the last
+  pass that ran it, in one tiny dispatch. **Re-apply gain** (`ReapplyGain`, default 0.81) is shared by
+  every re-applying pass.
+- **Borrow pass 1's transformer** (`Pass2BorrowTransformer=true`): run the model but take pass 1's
+  transformer blocks instead of recomputing them.
+- **Borrow everything at 1/x size and below** (`Pass2BorrowBelow=true`, `Pass2BorrowLevel=2..32`): take
+  every block at that fraction of the frame size and smaller from pass 1.
+
+Measured in the standalone app on an RTX 5090 at 4K (NR 310.9.16, PSNR against two real passes, higher is
+better). When later passes use pass 1's controls, Model A scores: one pass 32.9 dB, re-apply 42.5 dB (gain
+0.81) or 39.1 dB (gain 1), borrow transformer 45.1, 1/32 and below 44.6, 1/16 43.1, 1/8 41.2, 1/4 41.2, 1/2
+40.3; Model B is similar. With the default pass profile, later passes use local tone 0, so pass 2 changes
+much less than pass 1 (one pass already scores about 40 dB). Re-apply and borrowing at 1/8 and below then
+repeat pass 1's lighting change and score worse than a single pass; the transformer and 1/32 borrows stay
+close to two real passes (about 50 dB). Use re-apply and the deeper borrows when later passes keep pass 1's
+tone. Borrowing needs DX12 (or its DX11/Vulkan bridges), the shared-resolution chain and an audited NR
+runtime; the menu shows its status, and any mismatch runs the whole model instead.
+
+GPU cost of pass 2 at 4K (Model A, approximate): re-apply about 4% of a full pass; borrowing the transformer 95%,
+1/32 79%, 1/16 73%, 1/8 56%, 1/4 and 1/2 about 25%. Borrowing the transformer saves little time; the deep
+borrows save the most.

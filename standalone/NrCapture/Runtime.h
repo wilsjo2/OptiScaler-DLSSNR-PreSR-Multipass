@@ -13,9 +13,15 @@ public:
     Runtime(const Runtime&) = delete;
     NVSDK_NGX_Result Create(ID3D12GraphicsCommandList* commands, UINT width, UINT height,
                            const DlssNr::ModelSettings& settings, unsigned passes = 1,
-                           const std::array<std::optional<DlssNr::ModelSettings>, Settings::MaxPasses - 1>& overrides = {});
+                           const std::array<std::optional<DlssNr::ModelSettings>, Settings::MaxPasses - 1>& overrides = {},
+                           unsigned skipMask = 0); // Bit p set: create no feature for pass p (never pass 0).
     void Evaluate(ID3D12GraphicsCommandList* commands, ID3D12Resource* color, ID3D12Resource* depth,
                   ID3D12Resource* motion, ID3D12Resource* output, UINT width, UINT height, bool reset = true, unsigned pass = 0);
+    // The motion vectors are one frame's; a caller that evaluates on every n-th frame only sets n here for that
+    // evaluation (the history is then n frames old).
+    float motionScale = 1.0f;
+    // The model the pass was created with, as chosen (Settings::ModelANvfp4 included; the runtime itself got preset 1).
+    unsigned RequestedModel(unsigned pass) const { return pass < requested.size() ? requested[pass] : 0; }
     void Release(); // Only after the host's fence completes, or recording is discarded.
     NVSDK_NGX_Result CreateDlss(ID3D12GraphicsCommandList* commands, UINT width, UINT height, UINT outWidth, UINT outHeight);
     void EvaluateDlss(ID3D12GraphicsCommandList* commands, ID3D12Resource* colour, ID3D12Resource* depth,
@@ -37,6 +43,7 @@ private:
     bool loggedRuntime = false;
     std::array<NVSDK_NGX_Handle*, Settings::MaxPasses> features{};
     std::array<DlssNr::ModelSettings, Settings::MaxPasses> settings{};
+    std::array<unsigned, Settings::MaxPasses> requested{};
     decltype(&NVSDK_NGX_D3D12_CreateFeature) create = nullptr;
     decltype(&NVSDK_NGX_D3D12_EvaluateFeature) evaluate = nullptr;
     decltype(&NVSDK_NGX_D3D12_ReleaseFeature) release = nullptr;

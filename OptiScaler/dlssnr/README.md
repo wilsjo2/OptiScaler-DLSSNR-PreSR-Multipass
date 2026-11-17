@@ -39,6 +39,24 @@ D3D12 completion markers protect retirement; CPU frame counts only pair logical 
 The model menu's **Edit pass** selector exposes all 30 profiles, independently of the active pass count.
 Inactive profiles can be prepared in advance; later passes inherit pass 1 except for Local tone, which defaults to zero.
 
+## Re-applying and borrowing later passes
+
+`PassNReapply=true` (menu: **Re-apply previous change**) replaces pass N's model with
+`dlssnr_reapply.hlsl` (`DlssNrMode_Reapply`). Let m be the last pass that ran the model, with input `in_m`
+and answer `out_m`. A run of r consecutive re-applying passes is one dispatch,
+`saturate(out_m + r * ReapplyGain * (out_m - in_m))` with alpha from `out_m`, written to the ping-pong
+texture the dispatch does not read. A following model pass reads that result through the usual
+between-pass clamp. Re-applying passes build no NGX feature. The shared and independent chains on DX12
+and native Vulkan all support it.
+
+`PassNBorrowTransformer` / `PassNBorrowBelow` + `PassNBorrowLevel` choose an `NrPassBorrow::Cut` for that
+pass's model evaluation (`NrPassBorrow::ChooseCut`; BorrowBelow wins, Reapply wins over both).
+`NrPassBorrow.{h,cpp}` wraps the NR runtime's NvAPI CUDA kernel entry points through the existing
+`nvapi_QueryInterface` hook (`NvApiHooks.cpp`). `State::Run` brackets each evaluation of the
+shared-resolution chain with `BeginFrame`/`BeginEvaluation`/`EndEvaluation`/`EndFrame`, but only when some
+cut is not None. It resets the module when the cuts change or a feature is created. The independent chain
+and native Vulkan never borrow.
+
 ## Independent resolution and upscaling per pass
 
 Choose **Edit pass**, open **Resolution and upscaling**, and enable **Independent resolution and upscaling** for
@@ -82,6 +100,7 @@ msbuild OptiScaler.sln /m /p:Configuration=Release /p:Platform=x64 /p:PostBuildE
 ./tests/run_nr_private_upscaler_smoke.ps1
 ./tests/run_nr_pass_profiles_smoke.ps1
 ./tests/run_nr_raw_residual_smoke.ps1
+./tests/run_nr_reapply_smoke.ps1
 ```
 
 Shader edits must regenerate DX12 and Vulkan binaries/headers with matching constants and stable operation numbers. C++ units include `pch.h` first per [CONTRIBUTING.md](../../CONTRIBUTING.md). See [runtime test boundaries](../../tests/nr_private_upscaler_smoke.md) and [game results](../../docs/NR-UPSTREAM-REVIEW.md).

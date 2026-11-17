@@ -10,6 +10,7 @@
 #include "precompile/dlssnr_spatial_guides_Shader.h"
 #include "precompile/dlssnr_denoise_first_Shader.h"
 #include "precompile/dlssnr_raw_residual_Shader.h"
+#include "precompile/dlssnr_reapply_Shader.h"
 
 namespace
 {
@@ -153,6 +154,13 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
             CreateComputePipeline(_device, &_rawResidualPipelineState, dlssnr_raw_residual_cso,
                                   sizeof(dlssnr_raw_residual_cso), nullptr);
         pipeline = _rawResidualPipelineState;
+    }
+    else if (InConstants.Mode == DlssNrMode_Reapply)
+    {
+        if (!_reapplyPipelineState)
+            CreateComputePipeline(_device, &_reapplyPipelineState, dlssnr_reapply_cso, sizeof(dlssnr_reapply_cso),
+                                  nullptr);
+        pipeline = _reapplyPipelineState;
     }
     return DispatchCompute(InCmdList, InConstants, pipeline, InSource, InModel, InOriginal, InMotion, InPrevEdit,
                            OutTarget, OutKeep, immutableSlot);
@@ -321,6 +329,8 @@ DlssNr_Dx12::~DlssNr_Dx12()
         _finishedColorPipelineState->Release();
     if (_rawResidualPipelineState)
         _rawResidualPipelineState->Release();
+    if (_reapplyPipelineState)
+        _reapplyPipelineState->Release();
     for (auto& buffer : _constantBuffers)
     {
         if (buffer != nullptr)

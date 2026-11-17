@@ -1,6 +1,6 @@
 # Display Filter validation — 20 September 2026
 
-Hardware: RTX 5090, NVIDIA driver 616.64, Windows 11. Original NVIDIA-signed NR 310.8 runtime. Ordinary driver feature creation and evaluation succeeded using this application's own project identity. No compatibility loader, DLL patching, game injection or game process-memory access was used.
+Hardware: RTX 5090, NVIDIA driver 616.64, Windows 11. Original NVIDIA-signed NR 310.8 runtime (for this September validation; later sections name their own runtime, and packages can now ship 310.9.16 with Models A and B). Ordinary driver feature creation and evaluation succeeded using this application's own project identity. No compatibility loader, DLL patching, game injection or game process-memory access was used.
 
 ## Feature/control parity update
 
@@ -306,7 +306,7 @@ No live desktop/game image was captured, no game was launched or controlled, and
 
 ## 2026-10-28: current shared code, edge-aware enlargement and halo controls
 
-Merged main 6125a75b into the standalone source branch. Added spatial edge-aware enlargement below native model resolution, the shared dark-rim filters and radius controls, and Automatic/Original/Optimized model labels. Legacy preset 3 remains available for saved profiles. NR runtime 310.8 is unchanged; this package does not supply the newer optimized network. In-game RR history rejection is not part of the external-capture pipeline.
+Merged main 6125a75b into the standalone source branch. Added spatial edge-aware enlargement below native model resolution, the shared dark-rim filters and radius controls, and Automatic/Original/Optimized model labels. Legacy preset 3 remains available for saved profiles. NR runtime 310.8 is unchanged; this package does not supply the newer optimized network (superseded: see "Faster passes and Models A/B" below, 2026-11-06). In-game RR history rejection is not part of the external-capture pipeline.
 
 A fresh x64 Release build passed. Tests used the RTX 5090, NVIDIA NR 310.8, the existing DLSS SR runtime, and the D3D12 debug layer:
 - Feature checks passed: settings round trips, 1/10 passes, inactive profiles, hold/resume, all eight supersampling filters, motion, comparison/debug views, private DLSS, 99/100/101% transitions and HDR controls.
@@ -634,3 +634,16 @@ Recreated nightclub, car, portrait and vendor Cyberpunk captures at 3840x2160 fo
 Committed the ordinary-probe style selector as `d91548b5` before building. Probe SHA-256: `c6ea6f546094ea4043577b8795decd8acda04b2620e1d02a8c604e073f4d07f6`. All 16 native RGBA outputs are finite and have byte-identical first/final reset evaluations. Each second pass differs from its first, and all eight Cinematic first-pass outputs differ from their prior Standard controls. The Cinematic census records 158/82 native launch calls for A/B, respectively. No replay, bookend or bypass hooks are active.
 
 Artifacts are in `out-model-map/cinematic-4k-20261106/`: `index.html` links four full-frame preview grids, 16 individual 4K output PNGs, four input PNGs and eight comparison sheets with two unscaled 3840x2160 panels each (7680x2272 including labels). Raw FP16 outputs and second-pass inputs, exact commands/settings/source/binary hashes, logs, timing samples, reproduction scripts and export checks remain alongside them. All four preview grids were visually inspected. PNG display clips model-space RGB to SDR [0,1] and rounds to RGB8, with no extra colour grade; FP16 originals are retained. Vendor remains the historical encoded model-proxy capture with unknown original encoding curve. These are static headless DLL examples, without the application's final composition. This run does not establish gameplay performance or temporal quality.
+
+## Faster passes and Models A/B (2026-11-06)
+
+Added three per-pass options for pass 2 and later (Faster passes tab, saved as `Pass{n}.Reapply`, `Pass{n}.BorrowTransformer`, `Pass{n}.BorrowBelow`, `Pass{n}.BorrowLevel` and the global `ReapplyGain`, default 0.81): re-apply the previous change without the network, borrow pass 1's transformer, and borrow every block at 1/x size and below (x = 2..32). Both processing paths honour them: the shared-feature path, including foveation, and the independent-pass chain. A run of r re-apply passes is one dispatch of `saturate(out + r * gain * (out - in))` from the last network pass's input and output. Re-apply passes create no NR feature. Borrowing uses the shared `OptiScaler/dlssnr/NrPassBorrow` module. Its NvAPI hook is installed at app start, and evaluations are wrapped only when at least one cut is set. The Model selector now reads Automatic / Model A (Original) / Model B (Optimized), with unchanged preset values. A saved runtime path pointing at another package's bundled runtime no longer overrides this package's `runtime/` DLL.
+
+Verified in this change (x64 Release build in a separate build directory; no NVIDIA runtime, NGX evaluation or game was run):
+- The build of `display_filter.exe`, `NrCaptureCheck.exe`, `NrModelProbe.exe` and `NrMfgUnlockCheck.exe` succeeded, including `NrPassBorrow.cpp` in the core library.
+- `--runtime-path-check 1` passed, including an older package's bundled runtime yielding to this package's runtime or adjacent DLL, a user-chosen DLL in a `runtime` folder without a package executable, and the fallback when this package has no runtime.
+- `--settings-check 1` passed: isolated INI round trip of every control including the new per-pass options and gain, clamping of out-of-range gain/levels, and defaults.
+- `--reapply-check 1` passed, with the D3D12 debug layer requested. CPU pass plan: re-apply evaluates nothing and wins over borrowing; cuts are listed per network evaluation; inactive passes are ignored. The re-apply shader ran on the WARP adapter at gains 0, 0.81, 1, 1.62 and 2 against the CPU formula (max error 0.00048, FP16), including saturation, non-finite inputs and alpha.
+- `--logging-check 1` passed.
+
+Not yet verified (requires the NVIDIA GPU and NR runtime): the feature check's new re-apply assertions (`--feature-check 1`), any borrowing outcome, image quality and GPU time in this app. Run `--borrow-check` on the research fixtures, for example `out-model-map/validation-cyberpunk-20261106/fixtures/portrait-3840x2160.rgba16f` (model-space RGBA16F) with `--preset 1` and `--preset 2` on runtime 310.9.16, then compare against the reference figures in README.md. The UI layout of the new tab was not inspected on screen.

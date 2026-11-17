@@ -128,15 +128,21 @@ void Runtime::Release() {
     for (auto& params : parameters) if (params) { destroy(params); params = nullptr; }
 }
 NVSDK_NGX_Result Runtime::Create(ID3D12GraphicsCommandList* commands, UINT w, UINT h, const DlssNr::ModelSettings& model, unsigned passes,
-    const std::array<std::optional<DlssNr::ModelSettings>, Settings::MaxPasses - 1>& overrides) {
+    const std::array<std::optional<DlssNr::ModelSettings>, Settings::MaxPasses - 1>& overrides, unsigned skipMask) {
     if (passes < 1 || passes > features.size()) throw std::runtime_error("Choose 1-10 NR passes.");
     Release();
     if (owner && owner->compatibility) compatibility = owner->compatibility;
     for (unsigned pass = 0; pass < passes; ++pass) {
+        if (skipMask >> pass & 1) continue; // Re-apply passes evaluate nothing; Evaluate refuses them.
         CheckResult(capabilities(&parameters[pass]), "NR pass parameters");
         auto* p = parameters[pass]; if (!p) throw std::runtime_error("NGX returned no parameter map.");
         auto& tuning = settings[pass]; tuning = model;
         if (pass) { tuning.localTone = 0; if (overrides[pass - 1]) tuning = *overrides[pass - 1]; }
+        requested[pass] = tuning.preset;
+        if (!Settings::IsModel(tuning.preset)) // A removed model saved in the settings: never run another model in its place.
+            throw std::runtime_error("NR pass " + std::to_string(pass + 1) + " asks for model " + std::to_string(tuning.preset) +
+                ", which was removed from this build. Choose another model in the Model list.");
+        if (Settings::IsNvfp4(tuning.preset)) tuning.preset = 1; // Model A; Processor::Evaluate lets the 4-bit kernels in.
         tuning.preset = std::min(tuning.preset, 3u); tuning.style = std::min(tuning.style, 2u);
         tuning.intensity = std::clamp(tuning.intensity, 0.0f, 2.0f);
         tuning.localStructure = std::clamp(tuning.localStructure, 0.0f, 2.0f);
@@ -187,7 +193,7 @@ void Runtime::Evaluate(ID3D12GraphicsCommandList* commands, ID3D12Resource* colo
     parameters->Set("DLSSNR.Color", color); parameters->Set("DLSSNR.Depth", depth);
     parameters->Set("DLSSNR.MVec", motion); parameters->Set("DLSSNR.Output", output);
     parameters->Set("DLSSNR.Reset", reset ? 1u : 0u); parameters->Set("DLSSNR.DepthInverted", 0u);
-    parameters->Set("DLSSNR.MVecScaleX", 1.0f); parameters->Set("DLSSNR.MVecScaleY", 1.0f);
+    parameters->Set("DLSSNR.MVecScaleX", motionScale); parameters->Set("DLSSNR.MVecScaleY", motionScale);
     DlssNr::GuideRegions guides{}; guides.depth = {0, 0, w, h}; guides.motion = {0, 0, w, h};
     DlssNr::SetModelRegions(parameters, {w, h}, guides);
     DlssNr::SetModelTuning(parameters, settings[pass]);

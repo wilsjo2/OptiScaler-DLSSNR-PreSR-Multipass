@@ -1,7 +1,10 @@
 Texture2D<float4> Input : register(t0);
+Texture2D<float2> SceneMotion : register(t1);
 RWTexture2D<float4> Colour : register(u0);
 RWTexture2D<float> Depth : register(u1);
-cbuffer Params : register(b0) { uint Width, Height, Hdr; };
+RWTexture2D<float2> Vectors : register(u2);
+SamplerState LinearClamp : register(s0);
+cbuffer Params : register(b0) { uint Width, Height, Hdr, MotionWidth, MotionHeight; };
 float3 Pq(float3 value) {
     float3 p = pow(saturate(value), 2610.0 / 16384.0);
     return pow((3424.0 / 4096.0 + (2413.0 / 128.0) * p) / (1.0 + (2392.0 / 128.0) * p), 2523.0 / 32.0);
@@ -24,4 +27,8 @@ void Encode(uint3 id : SV_DispatchThreadID) {
     }
     Colour[id.xy] = float4(value, 1);
     Depth[id.xy] = 0.5; // Explicitly synthetic planar depth; no engine/camera data is available.
+    // NR's scene motion at another size: resample it and convert its pixel units to output pixels.
+    if (MotionWidth)
+        Vectors[id.xy] = SceneMotion.SampleLevel(LinearClamp, (id.xy + 0.5) / float2(Width, Height), 0) *
+            (float2(Width, Height) / float2(MotionWidth, MotionHeight));
 }

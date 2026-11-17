@@ -59,6 +59,7 @@ struct DlssNr_Dx12::State
     std::array<std::unique_ptr<DlssNr_Dx12>, DlssNr::MaxPassCount> independentPasses;
     std::vector<DlssNr::Profiles::ResolutionSettings> independentSizes;
     std::vector<DlssNr::ModelSettings> independentModels;
+    std::vector<bool> independentReapply;
     bool independentActive = false;
     std::string independentStatus;
     std::string independentSpatialStatus;
@@ -551,6 +552,9 @@ struct DlssNr_Dx12::State
     bool warnedSuper = false;
     unsigned int loggedConfigured = 0;
     unsigned int loggedEffective = 0;
+    unsigned int loggedReapplied = 0;
+    // NrPassBorrow cuts last handed to BeginFrame, one per network evaluation; a change resets the module.
+    uint8_t borrowCuts[DlssNr::MaxPassCount] {};
     unsigned int lastSuper = 0;
     unsigned long long lastSplitLog = 0;
     unsigned lastFinishedMode = 0;

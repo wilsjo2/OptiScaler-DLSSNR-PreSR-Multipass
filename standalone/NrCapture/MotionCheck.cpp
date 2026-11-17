@@ -77,8 +77,13 @@ void MotionCheck() {
     if (still.first || !zero(still)) throw std::runtime_error("Static frame generated motion or reset history.");
     auto discontinuity=run(-40,28,true,false);
     if (!discontinuity.first || !zero(discontinuity)) throw std::runtime_error("Explicit reset retained old motion.");
+    // The cut frame's vectors are zeroed on the GPU; the history reset follows on the next frame.
     auto cut=run(0,0,false,true);
-    if (!cut.first || !zero(cut)) throw std::runtime_error("Scene cut did not zero motion and reset history.");
+    if (cut.first || !zero(cut)) throw std::runtime_error("Scene cut did not zero motion within its own frame.");
+    auto after=run(0,0,false,false);
+    if (!after.first || !zero(after)) throw std::runtime_error("The frame after a scene cut did not reset history.");
+    auto resumed=run(6,4,false,false);
+    if (resumed.first || zero(resumed)) throw std::runtime_error("Motion did not resume after a scene-cut reset.");
     std::cout<<"PASS optical-flow direction/scale, finite vectors, static identity, first frame, discontinuity and scene cut\n";
 }
 }

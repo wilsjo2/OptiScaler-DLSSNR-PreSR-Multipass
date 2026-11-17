@@ -75,6 +75,7 @@ struct State {
     std::recursive_mutex mutex;
     HMODULE module = nullptr;
     Query query = nullptr;
+    void* (*layer)(unsigned, void*) = nullptr;
     decltype(&NvAPI_D3D12_CreateCuFunction) create = nullptr;
     decltype(&NvAPI_D3D12_DestroyCuFunction) destroyFunction = nullptr;
     decltype(&NvAPI_D3D12_DestroyCuModule) destroyModule = nullptr;
@@ -633,11 +634,16 @@ void* __stdcall QueryInterface(unsigned id) {
     case kDestroyFunction: return reinterpret_cast<void*>(&DestroyFunction);
     case kDestroyModule: return reinterpret_cast<void*>(&DestroyModule);
     case kLaunch: return reinterpret_cast<void*>(&LaunchKernels);
-    default: return original;
+    default: return state.layer ? state.layer(id, original) : original;
     }
 }
 }
 
+void SetDriverLayer(void* (*wrap)(unsigned id, void* original)) {
+    auto& state = Get(); std::lock_guard lock(state.mutex);
+    if (state.installed) throw std::runtime_error("Set the driver layer before installing the model trace");
+    state.layer = wrap;
+}
 void Install() {
     auto& state = Get(); std::lock_guard lock(state.mutex);
     if (state.installed) return;
@@ -652,6 +658,14 @@ void Install() {
     state.launch = reinterpret_cast<decltype(state.launch)>(state.query(kLaunch));
     if (!state.create || !state.destroyFunction || !state.destroyModule || !state.launch)
         throw std::runtime_error("NvAPI CUDA entrypoints unavailable");
+    if (state.layer) {
+        // The layer sits under the tracer: traced calls reach it, and it alone reaches the driver.
+        state.layer(kCreateModule, state.query(kCreateModule));
+        state.create = reinterpret_cast<decltype(state.create)>(state.layer(kCreateFunction, state.create));
+        state.destroyFunction = reinterpret_cast<decltype(state.destroyFunction)>(state.layer(kDestroyFunction, state.destroyFunction));
+        state.destroyModule = reinterpret_cast<decltype(state.destroyModule)>(state.layer(kDestroyModule, state.destroyModule));
+        state.launch = reinterpret_cast<decltype(state.launch)>(state.layer(kLaunch, state.launch));
+    }
     LONG result = DetourTransactionBegin();
     if (result == NO_ERROR) {
         result = DetourUpdateThread(GetCurrentThread());

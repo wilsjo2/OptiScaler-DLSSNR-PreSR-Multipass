@@ -3,14 +3,19 @@ param(
     [string]$Runtime,
     [string]$DlssRuntime = "$PSScriptRoot/runtime/nvngx_dlss.dll",
     [string]$FrameGenerationRuntime = "$PSScriptRoot/runtime/streamline",
+    [string]$Nvfp4Assets = "$PSScriptRoot/runtime/nvfp4",
     [string]$BuildDirectory = "$PSScriptRoot/out"
 )
 $ErrorActionPreference = 'Stop'
+# Copies unless the destination already holds the same bytes (a running Display Filter keeps its DLLs locked).
+function Copy-Same([string]$source, [string]$copied) {
+    if ((Test-Path -LiteralPath $copied -PathType Leaf) -and (Get-FileHash -LiteralPath $copied -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash) { return }
+    Copy-Item -LiteralPath $source -Destination $copied -Force
+}
 if (!$DlssRuntime -or !(Test-Path -LiteralPath $DlssRuntime -PathType Leaf)) {
     throw 'DLSS SR is required in standalone packages. Place nvngx_dlss.dll in runtime/ or supply -DlssRuntime.'
 }
-$fgFiles = @('sl.interposer.dll', 'sl.common.dll', 'sl.dlss_g.dll', 'sl.reflex.dll', 'sl.pcl.dll', 'nvngx_dlssg.dll',
-    'nvngx_dlss.license.txt', 'reflex.license.txt', 'streamline-license.txt')
+$fgFiles = @('sl.interposer.dll', 'sl.common.dll', 'sl.dlss_g.dll', 'sl.reflex.dll', 'sl.pcl.dll', 'nvngx_dlssg.dll')
 foreach ($file in $fgFiles) {
     if (!(Test-Path -LiteralPath (Join-Path $FrameGenerationRuntime $file) -PathType Leaf)) {
         throw "Missing frame-generation distribution file: $file"
@@ -26,19 +31,17 @@ if (Test-Path -LiteralPath $target) {
 }
 New-Item -ItemType Directory -Path $target -Force | Out-Null
 Copy-Item -LiteralPath $binary -Destination (Join-Path $target 'display_filter.exe') -Force
-foreach ($file in @('README.md', 'VALIDATION.md', 'ALIGNMENT.md', 'PARITY.md', 'FRAMEGEN.md', 'MFG.md')) {
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination (Join-Path $target $file) -Force
+# No documents or licence/attribution files go into the package; ones an earlier build left are removed.
+foreach ($item in @(Get-ChildItem -LiteralPath $target -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like '*.md' -or $_.Name -eq 'LICENSE' -or $_.Name -like '*license*.txt' -or $_.Name -like '*attribution*.txt' })) {
+    Remove-Item -LiteralPath $item.FullName -Force
 }
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../../LICENSE') -Destination (Join-Path $target 'LICENSE') -Force
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../../Licenses/MFGUnlock_LICENSE.txt') -Destination (Join-Path $target 'MFGUnlock_LICENSE.txt') -Force
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../../Licenses/RenoDX_ATTRIBUTION.txt') -Destination (Join-Path $target 'RenoDX_ATTRIBUTION.txt') -Force
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../../external/peripheral_warp/LICENSE') -Destination (Join-Path $target 'PeripheralWarp_LICENSE.txt') -Force
 $runtimeHash = $null
 if ($Runtime) {
     $runtimeDirectory = Join-Path $target 'runtime'
     New-Item -ItemType Directory -Path $runtimeDirectory -Force | Out-Null
     $destinationRuntime = Join-Path $runtimeDirectory 'nvngx_dlssnr.dll'
-    Copy-Item -LiteralPath $Runtime -Destination $destinationRuntime -Force
+    Copy-Same $Runtime $destinationRuntime
     $runtimeHash = (Get-FileHash -LiteralPath $Runtime -Algorithm SHA256).Hash
     if ((Get-FileHash -LiteralPath $destinationRuntime -Algorithm SHA256).Hash -ne $runtimeHash) {
         throw 'Packaged runtime hash mismatch.'
@@ -53,7 +56,7 @@ if ($DlssRuntime) {
     $runtimeDirectory = Join-Path $target 'runtime'
     New-Item -ItemType Directory -Path $runtimeDirectory -Force | Out-Null
     $destinationDlss = Join-Path $runtimeDirectory 'nvngx_dlss.dll'
-    Copy-Item -LiteralPath $DlssRuntime -Destination $destinationDlss -Force
+    Copy-Same $DlssRuntime $destinationDlss
     $dlssHash = (Get-FileHash -LiteralPath $DlssRuntime -Algorithm SHA256).Hash
     if ((Get-FileHash -LiteralPath $destinationDlss -Algorithm SHA256).Hash -ne $dlssHash) {
         throw 'Packaged DLSS runtime hash mismatch.'
@@ -65,10 +68,92 @@ $fgHashes = [ordered]@{}
 foreach ($file in $fgFiles) {
     $source = Join-Path $FrameGenerationRuntime $file
     $copied = Join-Path $fgDestination $file
-    Copy-Item -LiteralPath $source -Destination $copied -Force
+    Copy-Same $source $copied
     $hash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
     if ((Get-FileHash -LiteralPath $copied -Algorithm SHA256).Hash -ne $hash) { throw "FG runtime hash mismatch: $file" }
     $fgHashes[$file] = $hash
+}
+# Optional: kernels and repacked weights of the experimental NVFP4 feed-forward option.
+$nvfp4Hashes = $null
+if ($Nvfp4Assets -and (Test-Path -LiteralPath (Join-Path $Nvfp4Assets 'ffn_v2.cubin') -PathType Leaf)) {
+    $nvfp4Hashes = [ordered]@{}
+    foreach ($file in @('ffn_v2.cubin', 'modelA/ffn_v2.bin', 'modelA/ffn_v2.txt', 'modelB/ffn_v2.bin', 'modelB/ffn_v2.txt')) {
+        $source = Join-Path $Nvfp4Assets $file
+        if (!(Test-Path -LiteralPath $source -PathType Leaf)) { throw "Missing NVFP4 asset: $file" }
+        $copied = Join-Path (Join-Path $target 'nvfp4') $file
+        New-Item -ItemType Directory -Path (Split-Path -Parent $copied) -Force | Out-Null
+        Copy-Item -LiteralPath $source -Destination $copied -Force
+        $hash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+        if ((Get-FileHash -LiteralPath $copied -Algorithm SHA256).Hash -ne $hash) { throw "NVFP4 asset hash mismatch: $file" }
+        $nvfp4Hashes[$file] = $hash
+    }
+    # Optional second weight set of a model: trained 4-bit codes in the layout of ffn_v2.bin.
+    foreach ($file in @('modelA/ffn_v2_trained.bin', 'modelB/ffn_v2_trained.bin')) {
+        $source = Join-Path $Nvfp4Assets $file
+        $copied = Join-Path (Join-Path $target 'nvfp4') $file
+        if (!(Test-Path -LiteralPath $source -PathType Leaf)) {
+            if (Test-Path -LiteralPath $copied -PathType Leaf) { Remove-Item -LiteralPath $copied -Force }
+            continue
+        }
+        Copy-Item -LiteralPath $source -Destination $copied -Force
+        $hash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+        if ((Get-FileHash -LiteralPath $copied -Algorithm SHA256).Hash -ne $hash) { throw "NVFP4 asset hash mismatch: $file" }
+        $nvfp4Hashes[$file] = $hash
+    }
+    # Optional: a second feed-forward kernel for small frames, named by a model's manifest
+    # ("small_direct ... file <cubin>" / "small_contract ... file <cubin>", beside the manifest).
+    foreach ($model in @('modelA', 'modelB')) {
+        $kept = @()
+        foreach ($line in Get-Content -LiteralPath (Join-Path $Nvfp4Assets "$model/ffn_v2.txt")) {
+            if ($line -match '^\s*small_(direct|contract)\b.*\bfile\s+(\S+)') { $kept += $Matches[2] }
+        }
+        foreach ($item in @(Get-ChildItem -Path (Join-Path $target "nvfp4/$model") -Filter '*.cubin' -File -ErrorAction SilentlyContinue)) {
+            if ($kept -notcontains $item.Name) { Remove-Item -LiteralPath $item.FullName -Force }
+        }
+        foreach ($name in $kept) {
+            $file = "$model/$name"
+            $source = Join-Path $Nvfp4Assets $file
+            if (!(Test-Path -LiteralPath $source -PathType Leaf)) { throw "Missing NVFP4 asset: $file" }
+            $copied = Join-Path (Join-Path $target 'nvfp4') $file
+            Copy-Item -LiteralPath $source -Destination $copied -Force
+            $hash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+            if ((Get-FileHash -LiteralPath $copied -Algorithm SHA256).Hash -ne $hash) { throw "NVFP4 asset hash mismatch: $file" }
+            $nvfp4Hashes[$file] = $hash
+        }
+    }
+    # Optional: what a numbered weight set keeps outside the family folders:
+    # net4_set<n>.txt (bottleneck blocks left out, pooled transformer, split sides) and modelA/ffn_v2_set<n>.bin.
+    $stale = @(Get-ChildItem -Path (Join-Path $target 'nvfp4') -Filter 'net4_set*.txt' -File -ErrorAction SilentlyContinue) +
+             @(Get-ChildItem -Path (Join-Path $target 'nvfp4/modelA') -Filter 'ffn_v2_set*.bin' -File -ErrorAction SilentlyContinue)
+    foreach ($item in $stale) { Remove-Item -LiteralPath $item.FullName -Force }
+    $setFiles = @(Get-ChildItem -Path $Nvfp4Assets -Filter 'net4_set*.txt' -File -ErrorAction SilentlyContinue) +
+                @(Get-ChildItem -Path (Join-Path $Nvfp4Assets 'modelA') -Filter 'ffn_v2_set*.bin' -File -ErrorAction SilentlyContinue)
+    foreach ($item in $setFiles) {
+        $relative = if ($item.Name -like 'net4_set*') { $item.Name } else { "modelA/$($item.Name)" }
+        $copied = Join-Path (Join-Path $target 'nvfp4') $relative
+        Copy-Item -LiteralPath $item.FullName -Destination $copied -Force
+        $hash = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash
+        if ((Get-FileHash -LiteralPath $copied -Algorithm SHA256).Hash -ne $hash) { throw "NVFP4 asset hash mismatch: $relative" }
+        $nvfp4Hashes[$relative] = $hash
+    }
+    # Optional: the NVFP4 fused-block kernels and weights of Model A.
+    # ... and of the rest of Model A's pass: split blocks, transformer
+    # attention, input and output block. A family's folder is copied whole when its manifest is there.
+    foreach ($family in @('swin4', 'split4', 'vit4', 'prepost4')) {
+        $folder = Join-Path $Nvfp4Assets $family
+        if (!(Test-Path -LiteralPath (Join-Path $folder "$family.txt") -PathType Leaf)) { continue }
+        $familyTarget = Join-Path $target "nvfp4/$family"
+        New-Item -ItemType Directory -Path $familyTarget -Force | Out-Null
+        # What an earlier build left there (a kernel that no longer exists) must not stay.
+        Get-ChildItem -LiteralPath $familyTarget -File | Remove-Item -Force
+        foreach ($item in Get-ChildItem -LiteralPath $folder -File | Sort-Object Name) {
+            $copied = Join-Path $familyTarget $item.Name
+            Copy-Item -LiteralPath $item.FullName -Destination $copied -Force
+            $hash = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash
+            if ((Get-FileHash -LiteralPath $copied -Algorithm SHA256).Hash -ne $hash) { throw "NVFP4 asset hash mismatch: $family/$($item.Name)" }
+            $nvfp4Hashes["$family/$($item.Name)"] = $hash
+        }
+    }
 }
 [ordered]@{
     application = 'Display Filter screen and window overlay'
@@ -77,6 +162,7 @@ foreach ($file in $fgFiles) {
     runtimeSha256 = $runtimeHash
     dlssRuntimeSha256 = $dlssHash
     frameGenerationRuntimeSha256 = $fgHashes
+    nvfp4AssetsSha256 = $nvfp4Hashes
     gameFilesChanged = $false
     multiplayerVerified = $false
 } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $target 'external-nr-package.json') -Encoding utf8

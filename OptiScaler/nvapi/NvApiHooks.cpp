@@ -10,6 +10,8 @@
 #include <detours/detours.h>
 #include <misc/IdentifyGpu.h>
 #include <low_latency/input/input_reflex.h>
+#include <dlssnr/NrPassBorrow.h>
+#include <dlssnr/NrNvfp4.h>
 
 // #define LOG_ALL_DRS_GET_CALLS
 
@@ -259,6 +261,11 @@ void* __stdcall NvApiHooks::hkNvAPI_QueryInterface(unsigned int InterfaceId)
             o_NvAPI_DRS_GetSetting = reinterpret_cast<decltype(&NvAPI_DRS_GetSetting)>(functionPointer);
             return &hkNvAPI_DRS_GetSetting;
         }
+
+        // DLSS-NR pass borrowing wraps the NR runtime's CUDA kernel entry points; other ids come back unchanged.
+        // The 4-bit kernels and pass-in-one weight sets sit between pass borrowing and the driver; they change nothing
+        // until a pass asks for them (DlssNr::Nvfp4::Configure).
+        return NrPassBorrow::WrapInterface(InterfaceId, DlssNr::Nvfp4::WrapNvapi(InterfaceId, functionPointer));
     }
 
     // LOG_DEBUG("counter: {} functionPointer: {:X}", qiCounter, (size_t)functionPointer);
@@ -288,6 +295,17 @@ void NvApiHooks::Hook(HMODULE nvapiModule)
     if (o_NvAPI_QueryInterface != nullptr)
     {
         LOG_INFO("NvAPI_QueryInterface found, hooking!");
+        NrPassBorrow::SetLog(
+            [](int level, const char* message)
+            {
+                if (level >= 2)
+                    LOG_ERROR("DLSS-NR pass borrow: {}", message);
+                else if (level == 1)
+                    LOG_WARN("DLSS-NR pass borrow: {}", message);
+                else
+                    LOG_INFO("DLSS-NR pass borrow: {}", message);
+            });
+        DlssNr::Nvfp4::SetLog([](const char* line) { LOG_INFO("DLSS-NR NVFP4: {}", line ? line : ""); });
 
         constexpr bool leanMode = true;
         if (fakenvapi::isUsingAsMainNvapi())

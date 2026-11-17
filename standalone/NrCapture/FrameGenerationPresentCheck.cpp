@@ -63,10 +63,13 @@ void FrameGenerationPresentCheck(Gpu& gpu, FrameGeneration& fg, Processor* proce
                     picture=processor->Run(input.Get(),settings,false,frame==0 || frame%15==0,1,1000.f*multiplier/120);
                     Barrier(gpu.commands.Get(),input.Get(),D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_COPY_SOURCE);
                 }
-                auto* guide=processor ? processor->FullResolutionMotion() : nullptr;
+                auto* guide=processor ? processor->SceneMotion() : nullptr;
                 const auto serialBefore=gpu.serial;
                 const bool reset=output.Run(picture,frame==0 || (guide && processor->historyReset),guide);
-                if (guide && (output.Vectors()!=guide || gpu.serial!=serialBefore))
+                // An output-size guide is passed through; any other size is resampled by the encode pass.
+                const bool sameSize=guide && guide->GetDesc().Width==output.Colour()->GetDesc().Width &&
+                    guide->GetDesc().Height==output.Colour()->GetDesc().Height;
+                if (guide && ((output.Vectors()==guide)!=sameSize || gpu.serial!=serialBefore))
                     throw std::runtime_error("Shared FG motion must reuse the guide without a second submission/wait.");
                 fg.Tag(output.Colour(),output.Depth(),output.Vectors(),reset);
                 ComPtr<ID3D12Resource> back; Check(chain->GetBuffer(chain->GetCurrentBackBufferIndex(),IID_PPV_ARGS(&back)),"FG test backbuffer");
