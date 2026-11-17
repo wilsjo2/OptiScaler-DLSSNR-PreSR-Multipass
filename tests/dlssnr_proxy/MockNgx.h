@@ -16,6 +16,7 @@ struct ID3D12CommandQueue
 struct ID3D12Resource {};
 
 #define LOG_INFO(...) ((void) 0)
+#define LOG_WARN(...) ((void) 0)
 #define LOG_ERROR(...) ((void) 0)
 
 template <typename T> struct Setting

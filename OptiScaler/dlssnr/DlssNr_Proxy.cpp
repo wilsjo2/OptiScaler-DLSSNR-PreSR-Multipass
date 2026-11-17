@@ -19,8 +19,9 @@ struct ProxyState
     DlssNr::ModelSettings settings {};
     unsigned int width = 0, height = 0;
     uint64_t creationEpoch = 0;
-    std::function<bool()> creationComplete;
+    std::function<DlssNr::GpuLifetime::Recorded()> creation; // what became of the command list CreateFeature recorded on
     bool creationReady = false;
+    unsigned discards = 0; // creations in a row whose command list was thrown away before it reached a queue
     ID3D12Device* device = nullptr;
     bool failed = false;
     bool reset = true;
@@ -85,10 +86,28 @@ struct Context::Impl
 {
     ProxyState state;
     DlssNr::GpuLifetime lifetime;
+    // CreateFeature records the feature's setup on the caller's command list. The feature may be evaluated once the
+    // GPU has run that setup, or once the list has been given to a queue and a later submission epoch has begun
+    // (whatever is recorded now is queued behind it). A list that is still open, or that was reset or released
+    // without being executed, has not set anything up: evaluating then would run the model on unwritten GPU state.
+    // Without submission notifications (Untracked) the epoch is all there is to go by.
     bool CreationReady(uint64_t epoch)
     {
-        return state.creationReady = state.creationReady || epoch != state.creationEpoch ||
-                                     (state.creationComplete && state.creationComplete());
+        if (state.creationReady)
+            return true;
+        using Recorded = DlssNr::GpuLifetime::Recorded;
+        const auto recorded = state.creation ? state.creation() : Recorded::Untracked;
+        const bool ready = recorded == Recorded::Finished ||
+                           (epoch != state.creationEpoch &&
+                            (recorded == Recorded::Submitted || recorded == Recorded::Untracked));
+        if (ready)
+            state.discards = 0;
+        return state.creationReady = ready;
+    }
+    bool CreationDiscarded() const
+    {
+        return state.feature && !state.creationReady && state.creation &&
+               state.creation() == DlssNr::GpuLifetime::Recorded::Discarded;
     }
     void RetireState();
     unsigned int Prepare(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, unsigned int width,
@@ -132,6 +151,24 @@ unsigned int Context::Impl::Prepare(ID3D12GraphicsCommandList* cmdList, ID3D12De
     if (state.feature &&
         (state.settings != settings || state.device != device || state.width != width || state.height != height))
         RetireState();
+    if (CreationDiscarded())
+    {
+        // The command list that carried this feature's setup was reset or released without being executed. The
+        // feature is retired unused and built again on this command list.
+        constexpr unsigned kMaxDiscards = 3;
+        const unsigned discards = state.discards + 1;
+        LOG_WARN("DLSS-NR: the command list that carried the feature's setup was discarded before it reached the GPU "
+                 "({} in a row); creating the feature again", discards);
+        RetireState();
+        if (discards >= kMaxDiscards)
+        {
+            state.failed = true;
+            LOG_ERROR("DLSS-NR: the feature's setup was discarded {} times in a row; NR is off until Retry or a "
+                      "settings change", discards);
+            return (unsigned int) NVSDK_NGX_Result_Fail;
+        }
+        state.discards = discards;
+    }
     if (state.params == nullptr)
     {
         // A dedicated parameter map populated with NGX capabilities. Unlike the deprecated
@@ -189,7 +226,7 @@ unsigned int Context::Impl::Prepare(ID3D12GraphicsCommandList* cmdList, ID3D12De
         state.width = width;
         state.height = height;
         state.creationEpoch = submissionEpoch;
-        state.creationComplete = lifetime.CompletionProbe(cmdList);
+        state.creation = lifetime.RecordingProbe(cmdList);
         LOG_INFO("DLSS-NR: feature created at {}x{} through {}", width, height,
                  state.compatibility ? "direct compatibility runtime" : "NVIDIA NGX driver");
 

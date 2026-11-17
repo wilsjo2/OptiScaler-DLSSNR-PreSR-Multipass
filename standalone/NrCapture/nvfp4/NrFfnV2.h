@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <filesystem>
 #include <string>
 
@@ -68,5 +69,20 @@ void RuntimeLaunches(ID3D12GraphicsCommandList* commands, unsigned launches, uns
 // the first set or the trained one, as Options::trained says.
 constexpr unsigned kDefaultSet = ~0u;
 void UseSet(unsigned set);
+// Whether the file of `set` for Model A is in the asset folder (kDefaultSet: ffn_v2_trained.bin where Options::trained
+// asks for it), so that an evaluation with that set runs no other weights in its place. On false, *missing names it.
+bool SetComplete(unsigned set, std::string* missing = nullptr);
+// Since the start: replacements that failed (the kernels of the runtime carried on, or the evaluation was dropped),
+// contracts left to the runtime, and pairs run with other weights than the set asked for. A host that asked for a
+// model of ours compares the value before and after an evaluation: any increase means it is not wholly that model.
+unsigned long long Faults();
+// Buffers are kept per frame size (token count), and recorded command lists refer to them. For hosts that can tell
+// when the GPU has finished: RetireIdleSizes sets aside the buffers of every size of `device` beyond the `keep` most
+// recently used that no evaluation used among the last `recent` ones, and returns a ticket (0: nothing set aside).
+// Call it between evaluations. FreeRetired(device, ticket) frees what that call and earlier ones set aside: call it
+// only once every command list recorded before RetireIdleSizes returned has finished on the GPU. Sizes set aside count
+// towards the limit of sizes held until they are freed. Without these calls, sizes stay until ReleaseDevice().
+uint64_t RetireIdleSizes(ID3D12Device* device, unsigned keep, unsigned recent);
+void FreeRetired(ID3D12Device* device, uint64_t ticket);
 void SkipPair(ID3D12GraphicsCommandList* commands);
 }

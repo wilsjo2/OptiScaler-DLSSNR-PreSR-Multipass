@@ -78,6 +78,14 @@ void ReleaseDevice(ID3D12Device* device);
 // UseSet: the set of the evaluations that follow; kDefaultSet or a set that does not exist: none (FamilyOptions::trained
 // decides the records, nothing is left out). Blocks are only left out of an evaluation whose launches were recognised.
 void UseSet(unsigned set);
+// Whether the split and transformer families (those switched on) have the records of `set` loaded (kDefaultSet: the
+// trained records where FamilyOptions::trained asks for them), so that an evaluation with that set runs no other
+// records in their place. On false, *missing names the file (relative to the asset folder).
+bool SetComplete(unsigned set, std::string* missing = nullptr);
+// Launches since the start that this layer was on for and did not run as asked: left to the runtime's own kernel and
+// weights, or run by our kernel with other records than the set asked for. A host that asked for a model of ours
+// compares the value before and after an evaluation: any increase means the evaluation is not wholly that model.
+unsigned long long Faults();
 // For hosts that know where an evaluation of the model ends.
 void EndEvaluation(ID3D12GraphicsCommandList* commands) noexcept;
 // Checker-only: after a fence, write full/base/final/unpooled stored bytes captured

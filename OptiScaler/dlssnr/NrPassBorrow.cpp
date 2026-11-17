@@ -383,9 +383,10 @@ struct Snapshot
     unsigned evaluation = 0;
     bool valid = false;
 };
+// A GPU object no later recording uses. Recorded command lists may still refer to it.
 struct Retired
 {
-    ComPtr<ID3D12Resource> buffer;
+    ComPtr<ID3D12Object> object;
     uint64_t frame;
 };
 enum class Mode : uint8_t
@@ -430,6 +431,7 @@ struct State
     // GPU.
     Snapshot snapshot[kCuts];
     std::vector<Retired> retired;
+    bool hostRetires = false; // TakeRetired() has been called: the host frees retired objects after GPU completion
     ComPtr<ID3D12Device> device;
     ComPtr<ID3D12RootSignature> root;
     ComPtr<ID3D12PipelineState> pipeline;
@@ -510,7 +512,7 @@ void UavBarrier(ID3D12GraphicsCommandList* list)
 void RetireSnapshot(State& s, Snapshot& snapshot)
 {
     if (snapshot.buffer)
-        s.retired.push_back({ std::move(snapshot.buffer), s.frame });
+        s.retired.push_back({ ComPtr<ID3D12Object>(std::move(snapshot.buffer)), s.frame });
     snapshot.buffer.Reset();
     snapshot.capacity = 0;
     snapshot.valid = false;
@@ -524,6 +526,11 @@ bool PrepareGpu(State& s, ID3D12GraphicsCommandList* list)
         return true;
     for (auto& snapshot : s.snapshot)
         RetireSnapshot(s, snapshot);
+    // Recorded copies on the old device still name its root signature and pipeline.
+    if (s.root)
+        s.retired.push_back({ ComPtr<ID3D12Object>(std::move(s.root)), s.frame });
+    if (s.pipeline)
+        s.retired.push_back({ ComPtr<ID3D12Object>(std::move(s.pipeline)), s.frame });
     s.root.Reset();
     s.pipeline.Reset();
     s.device = device;
@@ -1136,6 +1143,20 @@ void* WrapInterface(uint32_t id, void* original)
     }
 }
 
+unsigned TakeRetired(ID3D12Object** objects, unsigned capacity)
+{
+    auto& s = GetState();
+    std::lock_guard lock(s.mutex);
+    s.hostRetires = true;
+    unsigned count = 0;
+    while (objects && count < capacity && !s.retired.empty())
+    {
+        objects[count++] = s.retired.back().object.Detach();
+        s.retired.pop_back();
+    }
+    return count;
+}
+
 void BeginFrame(ID3D12GraphicsCommandList* list, const Cut* cuts, unsigned evaluations)
 {
     FlushOnExit flush;
@@ -1145,7 +1166,10 @@ void BeginFrame(ID3D12GraphicsCommandList* list, const Cut* cuts, unsigned evalu
     try
     {
         ++s.frame;
-        std::erase_if(s.retired, [&](const Retired& retired) { return s.frame - retired.frame > kRetireFrames; });
+        // A host that tracks GPU completion collects these (TakeRetired). Otherwise they are kept for a number of
+        // frames, which is only safe for a host whose queue finishes each frame before the next is recorded.
+        if (!s.hostRetires)
+            std::erase_if(s.retired, [&](const Retired& retired) { return s.frame - retired.frame > kRetireFrames; });
         s.active = s.inEvaluation = false;
         s.frameReason.clear();
         s.borrowedMask = 0;

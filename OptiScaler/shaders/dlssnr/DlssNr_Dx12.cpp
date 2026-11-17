@@ -1,6 +1,7 @@
 #include "pch.h"
 #include <dlssnr/DlssNr_StreamlinePicture.h>
 #include "DlssNr_Dx12_State.h"
+#include <dlssnr/NrNvfp4.h>
 #include <atomic>
 #include <list>
 #include "precompile/DlssNr_Shader.h"
@@ -322,7 +323,15 @@ DlssNr_Dx12::~DlssNr_Dx12()
         GpuTime.release();
         return;
     }
+    // The 4-bit kernels' objects on this device go with the last NR owner, when no recording of any pass's feature is
+    // unresolved (the features themselves are then released with the state below).
+    bool modelsIdle = true;
+    for (auto& model : _state->nr.models)
+        modelsIdle = modelsIdle && model.Idle();
+    const bool lastOwner = nrOwners.empty();
     _state.reset();
+    if (lastOwner && modelsIdle)
+        DlssNr::Nvfp4::Release(_device);
     for (auto& heap : _frameHeaps)
         heap.ReleaseHeaps();
     if (_finishedColorPipelineState)

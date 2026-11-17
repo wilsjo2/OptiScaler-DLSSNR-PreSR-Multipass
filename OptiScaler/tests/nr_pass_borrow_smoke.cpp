@@ -797,6 +797,59 @@ static void TestWarp()
     readback->Unmap(0, nullptr);
     CHECK(!wrong, "WARP: %u words differ (handoff copied, rest untouched)", wrong);
     CHECK(device->GetDeviceRemovedReason() == S_OK, "device removed");
+
+    // A larger handoff (36 x 36 tokens, over the 1 MiB the first snapshot buffer holds) replaces the snapshot buffer.
+    // Earlier command lists may still refer to the old one, so a host that tracks GPU completion is handed it and this
+    // module must not free it by counting frames.
+    {
+        ID3D12Object* taken[4] {};
+        CHECK(TakeRetired(taken, 4) == 0, "nothing is retired before the snapshot buffer is replaced");
+        constexpr UINT64 bigBytes = 36 * 36 * 1024, bigSize = 2u << 20;
+        auto bigA = buffer(bigSize, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                           D3D12_RESOURCE_STATE_COMMON);
+        auto bigB = buffer(bigSize, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                           D3D12_RESOURCE_STATE_COMMON);
+        CHECK(bigA && bigB && bigBytes <= bigSize, "WARP larger arenas");
+        const UINT64 bigVa[] { bigA->GetGPUVirtualAddress(), bigB->GetGPUVirtualAddress() };
+        std::vector<Sequence> big;
+        big.push_back(Make(variant, 0x720000000000ull));
+        big.push_back(Make(variant, 0x730000000000ull));
+        for (unsigned i = 0; i < 2; ++i)
+        {
+            big[i].Put<uint32_t>(spec->dims, spec->rows, 36);
+            big[i].Put<uint32_t>(spec->dims, spec->cols, 36);
+            big[i].Put<uint32_t>(spec->last, spec->checkRows, 36);
+            big[i].Put<uint32_t>(spec->last, spec->checkCols, 36);
+            big[i].Put<uint64_t>(spec->last, spec->output, bigVa[i]);
+            big[i].Put<uint64_t>(spec->last + 1u, 0, bigVa[i]);
+        }
+        Test::SetCopy(nullptr, nullptr);
+        Reset();
+        bool borrowed = true;
+        for (unsigned frame = 0; frame < 12; ++frame) // more frames than the module would have kept it for
+        {
+            BeginFrame(commands.Get(), cuts, 2);
+            for (unsigned i = 0; i < 2; ++i)
+            {
+                BeginEvaluation(i);
+                for (auto& l : big[i].launches)
+                    launch(commands.Get(), &l, 1);
+                outcomes[i] = EndEvaluation();
+            }
+            EndFrame();
+            borrowed = borrowed && outcomes[0] == Outcome::Native && outcomes[1] == Outcome::Borrowed;
+            submit();
+        }
+        Test::SetCopy(&RecordCopy, nullptr);
+        CHECK(borrowed, "WARP borrow at the larger size (%s)", StatusText().c_str());
+        const unsigned count = TakeRetired(taken, 4);
+        CHECK(count == 1 && taken[0], "the replaced snapshot buffer is handed to the host, 12 frames later (%u)", count);
+        // Everything recorded has finished on the GPU (submit waits): the host's reference is the last one.
+        for (unsigned i = 0; i < count; ++i)
+            CHECK(taken[i]->Release() == 0, "the host holds the only reference to a retired buffer");
+        CHECK(TakeRetired(taken, 4) == 0, "a retired buffer is handed over once");
+        CHECK(device->GetDeviceRemovedReason() == S_OK, "device removed after the larger handoff");
+    }
     ComPtr<ID3D12InfoQueue> info;
     if (debugLayer && SUCCEEDED(device.As(&info)))
     {

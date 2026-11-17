@@ -8,6 +8,7 @@ try {
     & "$PSScriptRoot/run_nr_shutdown.ps1"
     & "$PSScriptRoot/run_nr_gpu_lifetime.ps1"
     & "$PSScriptRoot/dlssnr_proxy/run.ps1"
+    & "$PSScriptRoot/nr_nvfp4_host/run.ps1"
     & "$PSScriptRoot/mfg_unlock/run.ps1"
     & "$PSScriptRoot/run_nr_pipeline_capture.ps1"
     & "$PSScriptRoot/run_nr_streamline_hooks.ps1"

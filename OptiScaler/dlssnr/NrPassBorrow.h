@@ -21,6 +21,7 @@
 #include <cstdint>
 
 struct ID3D12GraphicsCommandList;
+struct ID3D12Object;
 
 namespace NrPassBorrow
 {
@@ -77,6 +78,15 @@ enum class Outcome : uint8_t
 };
 Outcome EndEvaluation(); // immediately after it
 void EndFrame();
+
+// Snapshot buffers are replaced when a cut's tensor grows (a resolution change) and when the device changes. Command
+// lists recorded earlier may still refer to the old ones, so they must outlive those lists' GPU work.
+// A host that tracks GPU completion calls this after each frame's evaluations (and may call it every frame): it hands
+// over up to `capacity` such objects, one reference each, and returns how many (call again while it returns
+// `capacity`). The host releases each once every command list recorded so far has finished on the GPU. After the
+// first call this module never frees them itself. Without it they are freed a fixed number of borrowing frames later,
+// which suits only a host that waits for the GPU each frame.
+unsigned TakeRetired(ID3D12Object** objects, unsigned capacity);
 
 // Clear the latched-off state and the recorded template (call when a borrow option changes or the NR features are
 // recreated). Snapshot buffers are kept and released later, once the GPU can no longer be using them.

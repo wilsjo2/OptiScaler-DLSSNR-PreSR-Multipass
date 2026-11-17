@@ -47,7 +47,7 @@ constexpr uint64_t kWqBytes = 2359296;      // either weight matrix in the kerne
 constexpr unsigned kAqUnit = 576, kWqHalf = 2304;
 constexpr unsigned kMaxShared = 101376;     // the driver drops the device on a larger request instead of refusing the launch
 constexpr uint64_t kMaxTokens = 1u << 15;   // four times an 8K frame's; our buffers grow with the token count
-constexpr size_t kMaxSessions = 6;          // frame sizes per device whose buffers are held (about 50 MB each at 4K)
+constexpr size_t kMaxSessions = 8;          // frame sizes per device whose buffers are held (about 50 MB each at 4K), those set aside included
 // Kernels of the runtime we recognise by name.
 enum Kind : unsigned { ExpandPublish, ExpandChained, Contract, Clear, Other };
 // Position of an evaluation's first feed-forward expand, counted in launches from its cc_cb_clear, in every audited
@@ -128,6 +128,7 @@ struct Session {
     struct Block { Buffer xq, hq, partial; };
     std::array<Block, 8> blocks;
     Buffer flags;                               // per block: [pack: 8 per tile][expand: 64 per tile] ints
+    uint64_t used = 0;                          // State::evaluations when an evaluation last recorded with these buffers
     uint64_t FlagAddress(unsigned block, unsigned tiles, bool expand) const {
         return flags.Address() + (uint64_t(block) * 72 + (expand ? 8 : 0)) * tiles * 4;
     }
@@ -173,6 +174,13 @@ struct State {
     std::map<NVDX_ObjectHandle, Target> targets;
     std::map<ID3D12Device*, Device> devices;
     std::map<std::pair<ID3D12Device*, uint64_t>, Session> sessions;
+    // Buffers of frame sizes no longer in use, kept until the host says the GPU has finished with them (RetireIdleSizes).
+    struct Retired { ID3D12Device* device = nullptr; uint64_t ticket = 0; Session session; };
+    std::vector<Retired> retired;
+    uint64_t retireTicket = 0;
+    uint64_t faults = 0;                        // Faults(): replacements that failed, pairs run with other weights than asked for
+    std::array<bool, 14> setFile{};             // ffn_v2_set<n>.bin of Model A is in the asset folder (SetComplete)
+    bool trainedFile = false;                   // ... and ffn_v2_trained.bin
     std::map<ID3D12GraphicsCommandList*, ListState> lists;
     decltype(&NvAPI_D3D12_CreateCuModule) createModule = nullptr;
     decltype(&NvAPI_D3D12_CreateCuFunction) createFunction = nullptr;
@@ -412,6 +420,7 @@ Session& SessionFor(ID3D12Device* device, uint64_t tokens) {
             throw;
         }
     }
+    session.used = S().evaluations;
     return session;
 }
 
@@ -434,6 +443,14 @@ struct ContractParams { uint64_t hq, w, x, gain, out, flags, counter, ready; uin
 struct PartialParams { ContractParams p; uint64_t partial; };
 static_assert(sizeof(ContractParams) == 88 && sizeof(PartialParams) == 96);
 #pragma pack(pop)
+
+// Where the records of the set asked for start in the weights of a model. A numbered set without a file, or trained
+// records asked for and absent, runs the next best as before, and is counted (Faults()).
+uint64_t SetAt(State& s, const ModelWeights& weights, const Options& opt) {
+    if (s.passSet < weights.setAt.size() && weights.setAt[s.passSet]) return weights.setAt[s.passSet];
+    if (s.passSet < weights.setAt.size() || (opt.trained && !weights.trained && !weights.trainedIsFirst)) ++s.faults;
+    return opt.trained ? weights.trained : 0;
+}
 
 bool SmallContract(const ModelWeights& weights, unsigned tokens, const Options& opt) {
     return (weights.smallSplit || weights.smallDirect) && tokens <= weights.smallMaxTokens &&
@@ -476,7 +493,7 @@ int RecordExpand(ID3D12GraphicsCommandList* commands, ID3D12Device* device, cons
                           tokens, w.tx, generation};
     LaunchKernel(commands, d.pack, &pack, sizeof pack, tiles * 8, 16, 0);
     if ((opt.barriers & 2) || !chained) Barrier(commands);
-    const uint64_t set = s.passSet < weights.setAt.size() && weights.setAt[s.passSet] ? weights.setAt[s.passSet] : opt.trained ? weights.trained : 0;
+    const uint64_t set = SetAt(s, weights, opt);
     const ExpandParams expand{buffers.xq.Address(), weights.weights.Address() + set + w.w1, buffers.hq.Address(), session.FlagAddress(block, tiles, true),
                               chained ? session.FlagAddress(block, tiles, false) : 0, tokens, w.out1, w.th,
                               opt.expandGroups, opt.expandHalves, generation};
@@ -494,7 +511,7 @@ void RecordContract(ID3D12GraphicsCommandList* commands, ID3D12Device* device, c
     const auto& weights = d.models[model];
     const auto& w = weights.blocks[block];
     const auto& opt = s.options;
-    const uint64_t set = s.passSet < weights.setAt.size() && weights.setAt[s.passSet] ? weights.setAt[s.passSet] : opt.trained ? weights.trained : 0;
+    const uint64_t set = SetAt(s, weights, opt);
     const ContractParams contract{session.blocks[block].hq.Address(), weights.weights.Address() + set + w.w2, o.p[1], weights.weights.Address() + set + w.gain, o.p[2],
                                   o.p[7], o.p[4], opt.chained ? session.FlagAddress(block, tiles, true) : 0, tokens, w.out2,
                                   opt.contractGroups, opt.contractHalves, generation};
@@ -566,6 +583,7 @@ int ChooseModel(State& s, const ListState& list) {
 NvAPI_Status Fail(State& s, ListState& list, ID3D12GraphicsCommandList* commands, const NVAPI_CU_KERNEL_LAUNCH_PARAMS* kernels, NvU32 count,
                   const char* what) noexcept {
     const bool half = list.pending.active;
+    ++s.faults;
     s.enabled = false;
     list.replacing = false;
     list.pending.active = false;
@@ -634,6 +652,7 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
                         // number of sizes is capped instead of freeing any while the model runs.
                         size_t held = 0;
                         for (const auto& entry : s.sessions) held += entry.first.first == target->device;
+                        for (const auto& entry : s.retired) held += entry.device == target->device;
                         if (held >= kMaxSessions) text = "off at this resolution: too many frame sizes since the session started";
                     }
                     if (!text.empty()) {
@@ -754,6 +773,10 @@ void Enable(const Options& options) {
         std::error_code ignored;
         s.modelFiles[model] = !options.modelFolders || fs::exists(options.assets / kModelFolder[model] / "ffn_v2.txt", ignored);
     }
+    const fs::path modelA = options.modelFolders ? options.assets / kModelFolder[0] : options.assets;
+    std::error_code absent;
+    s.trainedFile = fs::exists(modelA / "ffn_v2_trained.bin", absent);
+    for (unsigned n = 0; n < s.setFile.size(); ++n) s.setFile[n] = n >= 2 && fs::exists(modelA / ("ffn_v2_set" + std::to_string(n) + ".bin"), absent);
     if (const wchar_t* v = _wgetenv(L"NR_FFN_DEBUG_BARRIERS")) s.options.barriers = unsigned(wcstoul(v, nullptr, 0)) & 15u;
     if (const wchar_t* v = _wgetenv(L"NR_FFN_DEBUG_CHAINED")) s.options.chained = *v != L'0';
     s.failed = false;
@@ -800,6 +823,46 @@ void UseSet(unsigned set) {
     s.passSet = set;
 }
 
+bool SetComplete(unsigned set, std::string* missing) {
+    auto& s = S();
+    std::lock_guard guard(s.mutex);
+    const bool numbered = set != kDefaultSet;
+    const bool complete = numbered ? set < s.setFile.size() && s.setFile[set] : !s.options.trained || s.trainedFile;
+    if (!complete && missing)
+        *missing = std::string(s.options.modelFolders ? "modelA/" : "") + (numbered ? "ffn_v2_set" + std::to_string(set) + ".bin" : std::string("ffn_v2_trained.bin"));
+    return complete;
+}
+
+unsigned long long Faults() {
+    auto& s = S();
+    std::lock_guard guard(s.mutex);
+    return s.faults + s.passedThrough;
+}
+
+uint64_t RetireIdleSizes(ID3D12Device* device, unsigned keep, unsigned recent) {
+    auto& s = S();
+    std::lock_guard guard(s.mutex);
+    std::vector<std::pair<uint64_t, uint64_t>> sizes;      // (last used, tokens)
+    for (const auto& [key, session] : s.sessions) if (key.first == device) sizes.emplace_back(session.used, key.second);
+    if (sizes.size() <= keep) return 0;
+    std::sort(sizes.rbegin(), sizes.rend());                // most recently used first
+    uint64_t ticket = 0;
+    for (size_t i = keep; i < sizes.size(); ++i) {
+        if (sizes[i].first + recent >= s.evaluations) continue;
+        const auto found = s.sessions.find({device, sizes[i].second});
+        if (!ticket) ticket = ++s.retireTicket;
+        s.retired.push_back({device, ticket, std::move(found->second)});
+        s.sessions.erase(found);
+    }
+    return ticket;
+}
+
+void FreeRetired(ID3D12Device* device, uint64_t ticket) {
+    auto& s = S();
+    std::lock_guard guard(s.mutex);
+    std::erase_if(s.retired, [&](const State::Retired& r) { return r.device == device && r.ticket <= ticket; });
+}
+
 void SkipPair(ID3D12GraphicsCommandList* commands) {
     auto& s = S();
     std::lock_guard guard(s.mutex);
@@ -826,6 +889,7 @@ void ReleaseDevice(ID3D12Device* device) {
         s.devices.erase(found);
     }
     for (auto i = s.sessions.begin(); i != s.sessions.end();) i = i->first.first == device ? s.sessions.erase(i) : std::next(i);
+    std::erase_if(s.retired, [&](const State::Retired& r) { return r.device == device; });
     for (auto i = s.targets.begin(); i != s.targets.end();) i = i->second.device == device ? s.targets.erase(i) : std::next(i);
     s.lists.clear();                        // command lists of the device go with it; their addresses may be reused
 }

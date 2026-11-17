@@ -46,27 +46,49 @@ try
         expect(result == WAIT_OBJECT_0, "GPU did not drain");
     };
     auto wait = [&] { waitOn(queue.Get()); };
-    // Readiness must survive collection, but never accept discarded or unsubmitted work.
+    // Readiness must survive collection, but never accept discarded or unsubmitted work; and once submission
+    // notifications are known to arrive, a recording that closed without one is reported as discarded.
     {
+        using Recorded = DlssNr::GpuLifetime::Recorded;
         DlssNr::GpuLifetime life;
         life.Record(commands.Get());
-        auto completed = life.CompletionProbe(commands.Get());
-        expect(!completed(), "unsubmitted creation became ready");
+        auto completed = life.RecordingProbe(commands.Get());
+        expect(completed() == Recorded::Untracked, "nothing can be told before the first submission notification");
         life.ResetRecording(commands.Get());
-        expect(!completed(), "discarded creation became ready");
+        expect(completed() == Recorded::Untracked, "a discard was claimed before any submission notification");
         life.Record(commands.Get());
-        auto submitted = life.CompletionProbe(commands.Get());
+        auto submitted = life.RecordingProbe(commands.Get());
         check(queue->Wait(gate.Get(), 100));
         queue->ExecuteCommandLists(1, lists);
         life.Submitted(queue.Get(), 1, lists);
-        expect(!submitted(), "pending GPU creation became ready");
+        expect(submitted() == Recorded::Submitted, "pending GPU creation became ready");
         check(gate->Signal(100));
         wait();
-        expect(submitted(), "completed creation stayed blocked at fixed epoch");
+        expect(submitted() == Recorded::Finished, "completed creation stayed blocked at fixed epoch");
         life.ResetRecording(commands.Get());
         life.Collect();
-        expect(submitted(), "collection lost completed creation proof");
-        expect(!completed(), "unrelated submission revived discarded creation");
+        expect(submitted() == Recorded::Finished, "collection lost completed creation proof");
+        expect(completed() == Recorded::Discarded, "unrelated submission revived discarded creation");
+        // Still being recorded, then reset without being executed, then released without being executed.
+        life.Record(commands.Get());
+        auto open = life.RecordingProbe(commands.Get());
+        expect(open() == Recorded::Open, "an open recording was not reported as open");
+        life.ResetRecording(commands.Get());
+        life.Collect();
+        expect(open() == Recorded::Discarded, "a reset, unexecuted recording was not reported as discarded");
+        {
+            ComPtr<ID3D12CommandAllocator> otherAllocator;
+            ComPtr<ID3D12GraphicsCommandList> dropped;
+            check(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&otherAllocator)));
+            check(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, otherAllocator.Get(), nullptr,
+                                            IID_PPV_ARGS(&dropped)));
+            life.Record(dropped.Get());
+            auto released = life.RecordingProbe(dropped.Get());
+            expect(released() == Recorded::Open, "a new recording was not reported as open");
+            check(dropped->Close());
+            dropped.Reset();
+            expect(released() == Recorded::Discarded, "a released, unexecuted recording was not reported as discarded");
+        }
         check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate)));
     }
     int released = 0;

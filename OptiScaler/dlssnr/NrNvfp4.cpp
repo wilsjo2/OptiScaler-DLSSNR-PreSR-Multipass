@@ -26,6 +26,8 @@ constexpr unsigned kStarting = 30;
 struct Work
 {
     unsigned long long swin = 0, net = 0, ffn = 0;
+    // Launches that did not run as asked (each layer: Faults()): any during an evaluation and it is not our model.
+    unsigned long long swinFaults = 0, netFaults = 0, ffnFaults = 0;
 };
 
 void (*gLog)(const char*) = nullptr;
@@ -37,7 +39,7 @@ std::string gEnableProblem; // a layer that could not be switched on: nothing ca
 std::string gRefused;       // a path that cannot run these models at all
 bool gOurs = false;         // the evaluation in progress asked for a 4-bit model
 bool gPassInOne = false;
-std::string gSetMissing;     // the pass-in-one model asked for has no weight files: nothing else is run in its place
+std::string gSetMissing;     // the model asked for lacks a weight file: nothing else is run in its place
 Work gBefore;
 unsigned gMissed = 0; // evaluations in a row that asked for our kernels and did not get them
 std::string gWhy;     // why the last of them did not
@@ -113,6 +115,9 @@ Work Read()
     work.swin = SwinWork(NrSwin4::Status(true));
     work.net = After(NrNet4::Status(true), " replaced ");
     work.ffn = After(NrFfnV2::Status(true), "feed-forward pairs replaced: ");
+    work.swinFaults = NrSwin4::Faults();
+    work.netFaults = NrNet4::Faults();
+    work.ffnFaults = NrFfnV2::Faults();
     return work;
 }
 
@@ -220,17 +225,24 @@ void BeginEvaluation(unsigned requestedPreset)
     std::lock_guard guard(gMutex);
     gOurs = IsNvfp4(requestedPreset);
     gPassInOne = IsPassInOne(requestedPreset);
-    PauseAll(!gOurs);
     // A pass-in-one model is the same kernels with its own set of weights.
     const unsigned set = WeightSet(requestedPreset);
     const unsigned taken = NrSwin4::UseSet(set ? set : NrSwin4::kDefaultSet);
+    NrNet4::UseSet(taken);
+    NrFfnV2::UseSet(taken);
     gSetMissing.clear();
     if (gOurs && !IsKnown(requestedPreset))
         gSetMissing = "model " + std::to_string(requestedPreset) + " was removed from this build; choose another NR model";
-    else if (gOn && set && taken != set)
-        gSetMissing = "this model's weight files are missing (OptiScaler/nvfp4/swin4/swin4_set" + std::to_string(set) + ".*)";
-    NrNet4::UseSet(taken);
-    NrFfnV2::UseSet(taken);
+    else if (gOurs && gOn && gEnableProblem.empty())
+    {
+        // Every part of the model: a layer whose file of this set is absent would run another set's weights instead.
+        std::string file;
+        if (!NrSwin4::SetComplete(taken, &file) || !NrNet4::SetComplete(taken, &file) ||
+            !NrFfnV2::SetComplete(taken, &file))
+            gSetMissing = "a weight file of this model is missing or incomplete (OptiScaler/nvfp4/" + file + ")";
+    }
+    // An incomplete model is not run at all: the runtime's own evaluation is recorded and then not shown (OursRan).
+    PauseAll(!gOurs || !gSetMissing.empty());
     if (gOurs && gOn)
         gBefore = Read();
 }
@@ -268,6 +280,15 @@ bool OursRan(bool whole)
             why = "feed-forward: " + NrFfnV2::Status(false);
         else if (NrFfnV2::Failed())
             why = "a feed-forward pair failed half-way";
+        // Our kernels ran, but not all of the pass: a launch that was left to the runtime's kernel and weights, or run
+        // with another weight set, makes the picture a mix of two models.
+        else if (now.swinFaults > gBefore.swinFaults)
+            why = "part of this pass ran with the runtime's own weights (fused blocks: " + NrSwin4::Status(false) + ")";
+        else if (now.netFaults > gBefore.netFaults)
+            why = "part of this pass ran without our kernels or weights (split blocks and transformer: " +
+                  NrNet4::Status(false) + ")";
+        else if (now.ffnFaults > gBefore.ffnFaults)
+            why = "part of this pass ran without our kernels or weights (feed-forward: " + NrFfnV2::Status(false) + ")";
     }
     if (why.empty())
     {
@@ -319,11 +340,27 @@ bool Running()
     return gRunning;
 }
 
+unsigned long long RetireIdle(ID3D12Device* device, unsigned evaluations)
+{
+    // Three sizes stay ready (a game that steps its render resolution moves between a few), and every size a pass of
+    // this frame used, so that a frame with more than three pass sizes does not allocate them again each frame.
+    return NrFfnV2::RetireIdleSizes(device, 3, evaluations);
+}
+
+void FreeRetired(ID3D12Device* device, unsigned long long ticket) { NrFfnV2::FreeRetired(device, ticket); }
+
 void Release(ID3D12Device* device)
 {
+    {
+        std::lock_guard guard(gMutex);
+        if (!gOn)
+            return;
+        gRunning = false;
+    }
     NrFfnV2::ReleaseDevice(device);
     NrSwin4::ReleaseDevice(device);
     NrNet4::ReleaseDevice(device);
+    Say("released the 4-bit kernels, weights and buffers of a device");
 }
 
 std::string Status()

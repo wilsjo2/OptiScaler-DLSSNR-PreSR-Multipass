@@ -214,6 +214,7 @@ struct State {
     bool enabled = false;
     bool paused = false;                        // Pause(): this evaluation is the runtime's
     unsigned passSet = kDefaultSet;             // UseSet(): the set of the evaluations that follow
+    uint64_t ioPassed = 0;                      // input / output block launches that ran with the runtime's own weights while we were on
     std::vector<unsigned> evaluationSets;       // optional harness overrides, consumed by UseSet
     size_t evaluationSetAt = 0;
     Options options;
@@ -1116,6 +1117,7 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
         } catch (...) {
         }
         if(list && list->thinPreUsed && kind.post) { Notice(s,"Thin4 POST missing after Thin4 PRE; evaluation refused"); return NVAPI_ERROR; }
+        if (s.enabled && !s.paused) ++s.ioPassed;       // the runtime's own weights run this input / output block (Faults())
         LeaveWide(s, commands);
         return s.launch(commands, kernels, count);
     }
@@ -1335,6 +1337,26 @@ unsigned UseSet(unsigned set) {
     const unsigned overrideSet = s.evaluationSetAt < s.evaluationSets.size() ? s.evaluationSets[s.evaluationSetAt++] : kDefaultSet;
     s.passSet = overrideSet == kDefaultSet ? set : overrideSet;
     return s.passSet;
+}
+
+bool SetComplete(unsigned set, std::string* missing) {
+    auto& s = S();
+    std::lock_guard guard(s.mutex);
+    const unsigned n = set == kDefaultSet ? s.options.set : set;
+    bool complete = s.manifest.loaded && n < kMaxSets;
+    if (complete && n) {
+        const auto& chosen = s.manifest.sets[n];
+        complete = chosen.present && !chosen.fp8.empty() && (!chosen.blob.empty() || (n == 1 && s.manifest.trainedIsFirst));
+    }
+    if (!complete && missing)
+        *missing = !s.manifest.loaded ? "swin4/swin4.txt" : n == 1 ? "swin4/swin4_trained.*" : "swin4/swin4_set" + std::to_string(n) + ".*";
+    return complete;
+}
+
+unsigned long long Faults() {
+    auto& s = S();
+    std::lock_guard guard(s.mutex);
+    return s.passed + s.ioPassed;
 }
 
 void UseSetsForNextEvaluations(const unsigned* sets, unsigned count) {

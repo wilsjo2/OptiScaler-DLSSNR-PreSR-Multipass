@@ -18,6 +18,9 @@ template <typename T> T* Identity(T* object)
     T* real = nullptr;
     return object && Util::CheckForRealObject(__FUNCTION__, object, (IUnknown**) &real) ? real : object;
 }
+// A submission notification has reached some tracker: the ExecuteCommandLists hook is live, so a recording that
+// closes without one was really thrown away.
+std::atomic_bool submissionsSeen { false };
 } // namespace
 
 struct GpuLifetime::Impl
@@ -153,7 +156,7 @@ void GpuLifetime::Record(ID3D12GraphicsCommandList* commands)
     impl->currentGeneration.push_back(use);
     impl->recordings.push_back(std::move(use));
 }
-std::function<bool()> GpuLifetime::CompletionProbe(ID3D12GraphicsCommandList* commands)
+std::function<GpuLifetime::Recorded()> GpuLifetime::RecordingProbe(ID3D12GraphicsCommandList* commands)
 {
     std::lock_guard lock(impl->mutex);
     commands = Identity(commands);
@@ -162,12 +165,19 @@ std::function<bool()> GpuLifetime::CompletionProbe(ID3D12GraphicsCommandList* co
             return [this, use]
             {
                 std::lock_guard lock(impl->mutex);
-                return !use->completions.empty() && use->Finished();
+                if (!use->completions.empty())
+                    return use->Finished() ? Recorded::Finished : Recorded::Submitted;
+                if (use->signalFailed)
+                    return Recorded::Submitted; // executed; the queue could not be signalled (device lost)
+                if (!submissionsSeen)
+                    return Recorded::Untracked;
+                return use->open ? Recorded::Open : Recorded::Discarded;
             };
-    return [] { return false; };
+    return [] { return Recorded::Untracked; };
 }
 void GpuLifetime::Submitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists)
 {
+    submissionsSeen = true;
     std::lock_guard lock(impl->mutex);
     if (impl->recordings.empty())
         return;

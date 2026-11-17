@@ -65,6 +65,15 @@ void Pause(bool paused);
 inline constexpr unsigned kDefaultSet = ~0u;
 // Returns the effective set after a harness override, for the other families.
 unsigned UseSet(unsigned set);
+// Whether every weight file of `set` (UseSet's numbering; kDefaultSet: Options::set) is loaded, so that an evaluation
+// with that set runs no other weights in its place: its 4-bit records and its records for the runtime's own kernels.
+// On false, *missing names the files (relative to the asset folder's parent).
+bool SetComplete(unsigned set, std::string* missing = nullptr);
+// Launches since the start that ran with the runtime's own weights while this layer was on and not paused: a block
+// left to the runtime (a failure, a block that was not recognised, a set without a record for it). A host that asked
+// for a model of ours compares the value before and after an evaluation: any increase means the evaluation is not
+// wholly that model.
+unsigned long long Faults();
 // Optional harness override for successive UseSet calls (one per Processor evaluation). kDefaultSet entries keep
 // that call's preset selection. Clear with (nullptr, 0) after the frame. Existing hosts need not call this.
 void UseSetsForNextEvaluations(const unsigned* sets, unsigned count);

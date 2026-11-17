@@ -223,6 +223,7 @@ struct State {
     std::array<uint64_t,2> sideRuns{};
     std::array<bool, kFamilies> active{};       // a launch of the family was replaced since the last Enable()
     std::array<uint64_t, kFamilies> replaced{}, passed{};
+    uint64_t substituted = 0;                   // launches of ours that ran other records than the set asked for (Faults())
     std::array<std::array<uint64_t, kMaxGroups>, kFamilies> perGroup{};
     uint64_t learnt = 0;
     std::wstring runtimePath;
@@ -638,6 +639,8 @@ void Replace(State& s, ID3D12GraphicsCommandList* commands, ID3D12Device* device
             }
     uint64_t records = s.options.family[family].trained ? d.weights[family].trained : 0;
     if (s.passSet < kMaxSets && s.sets[s.passSet].present && d.weights[family].setAt[s.passSet]) records = d.weights[family].setAt[s.passSet];
+    else if (family != PrePost && (s.passSet < kMaxSets || (s.options.family[family].trained && !records && !s.manifest[family].trainedIsFirst)))
+        ++s.substituted;                        // the set asked for (or the trained records) has no file for this family
     const uint64_t record = d.weights[family].buffer.Address() + records + slot.offset;
     memcpy(ours + slot.w, &record, 8);
     memcpy(ours + slot.options, &options, 4);
@@ -1228,6 +1231,37 @@ void UseSet(unsigned set) {
     auto& s = S();
     std::lock_guard guard(s.mutex);
     s.passSet = set;
+}
+
+bool SetComplete(unsigned set, std::string* missing) {
+    auto& s = S();
+    std::lock_guard guard(s.mutex);
+    for (unsigned f = 0; f < kFamilies; ++f) {
+        if (f == PrePost || !s.options.family[f].groups) continue;
+        const auto& m = s.manifest[f];
+        const std::string stem = std::string(kFamilyName[f]) + "4";
+        bool complete = m.loaded;
+        std::string file = stem + ".txt";
+        if (complete && set == kDefaultSet) {
+            complete = !s.options.family[f].trained || !m.trained.empty() || m.trainedIsFirst;
+            file = stem + "_trained.bin";
+        } else if (complete) {
+            complete = set < kMaxSets && !m.blob.empty() && s.sets[set].blob[f].size() == m.blob.size();
+            file = stem + "_set" + std::to_string(set) + ".bin";
+        }
+        if (complete) continue;
+        if (missing) *missing = stem + "/" + file;
+        return false;
+    }
+    return true;
+}
+
+unsigned long long Faults() {
+    auto& s = S();
+    std::lock_guard guard(s.mutex);
+    unsigned long long faults = s.substituted;
+    for (const auto passed : s.passed) faults += passed;
+    return faults;
 }
 
 void Disable() {

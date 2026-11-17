@@ -929,6 +929,17 @@ auto DlssNr_Dx12::State::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
             LOG_INFO("DLSS-NR pass borrowing: {}", lastBorrowStatus);
         }
     }
+    // Buffers pass borrowing no longer uses (a resolution change replaces them) and the 4-bit feed-forward buffers of
+    // picture sizes no longer in use: this frame's command list and earlier ones may still refer to them, so they are
+    // freed only once the GPU has finished everything recorded so far.
+    {
+        ID3D12Object* retired[16];
+        for (unsigned count; (count = NrPassBorrow::TakeRetired(retired, 16)) != 0;)
+            for (unsigned i = 0; i < count; ++i)
+                lifetime.Retire([object = retired[i]] { object->Release(); });
+        if (const auto ticket = DlssNr::Nvfp4::RetireIdle(device, evaluation))
+            lifetime.Retire([device, ticket] { DlssNr::Nvfp4::FreeRetired(device, ticket); });
+    }
 
     ngxTime->End(cmdList);
 

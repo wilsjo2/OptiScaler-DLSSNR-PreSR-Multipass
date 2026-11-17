@@ -36,7 +36,13 @@ NVSDK_NGX_Result CompatibilityRuntime::Release(NVSDK_NGX_Handle* h) {
 }
 }
 
-namespace CompletionMock { bool complete = false; }
+// What the tracker says became of the command list a creation was recorded on. Untracked (no submission
+// notifications) leaves the submission epoch to decide, as the tests of creation timing below expect.
+namespace CompletionMock
+{
+bool complete = false;
+auto recorded = DlssNr::GpuLifetime::Recorded::Untracked;
+}
 // NGX tests substitute completion only; nr_gpu_lifetime_smoke exercises real D3D12 fences.
 struct DlssNr::GpuLifetime::Impl
 {
@@ -46,8 +52,8 @@ struct DlssNr::GpuLifetime::Impl
 DlssNr::GpuLifetime::GpuLifetime() : impl(std::make_unique<Impl>()) {}
 DlssNr::GpuLifetime::~GpuLifetime() { Collect(); }
 void DlssNr::GpuLifetime::Record(ID3D12GraphicsCommandList*) { impl->pending = true; }
-std::function<bool()> DlssNr::GpuLifetime::CompletionProbe(ID3D12GraphicsCommandList*)
-{ return [] { return CompletionMock::complete; }; }
+std::function<DlssNr::GpuLifetime::Recorded()> DlssNr::GpuLifetime::RecordingProbe(ID3D12GraphicsCommandList*)
+{ return [] { return CompletionMock::complete ? Recorded::Finished : CompletionMock::recorded; }; }
 void DlssNr::GpuLifetime::Submitted(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*) {}
 void DlssNr::GpuLifetime::ResetRecording(ID3D12CommandList*) { impl->pending = false; Collect(); }
 void DlssNr::GpuLifetime::BeginGeneration() {} // Recording/fence generations are tested with the real helper.
@@ -210,6 +216,54 @@ int main()
     assert(Mock::handles.size() == 1);
     proxy.ResetRecording(&commands);
     assert(Mock::handles.empty() && Mock::allocations == Mock::destructions);
+
+    // A feature whose setup never reached a queue is never evaluated. While its command list is still open it waits,
+    // whatever the epoch; once the list is reset or released unexecuted the feature is retired and built again.
+    {
+        using Recorded = DlssNr::GpuLifetime::Recorded;
+        proxy.RetryAfterFailure();
+        proxy.ResetRecording(&commands);
+        auto creations = Mock::creations, evaluations = Mock::evaluations;
+        CompletionMock::recorded = Recorded::Open;
+        assert(run() == NVSDK_NGX_Result_Success && !evaluated && Mock::creations == creations + 1);
+        for (int frame = 0; frame < 5; ++frame)
+            assert(run() == NVSDK_NGX_Result_Success && !evaluated);
+        assert(Mock::creations == creations + 1 && Mock::evaluations == evaluations);
+        CompletionMock::recorded = Recorded::Discarded;
+        assert(run() == NVSDK_NGX_Result_Success && !evaluated);
+        assert(Mock::creations == creations + 2 && Mock::evaluations == evaluations); // built again, not evaluated
+        proxy.ResetRecording(&commands);
+        assert(Mock::handles.size() == 1); // the discarded feature was released unused
+        // Given to a queue: ready in the next submission epoch, not in the one it was recorded in.
+        CompletionMock::recorded = Recorded::Submitted;
+        assert(run(false) == NVSDK_NGX_Result_Success && !evaluated);
+        assert(run() == NVSDK_NGX_Result_Success && evaluated && Mock::creations == creations + 2);
+        // Once ready it stays ready: later discards of other recordings do not rebuild a working feature.
+        CompletionMock::recorded = Recorded::Discarded;
+        assert(run() == NVSDK_NGX_Result_Success && evaluated && Mock::creations == creations + 2);
+
+        // Three creations discarded in a row latch a failure instead of creating for ever; Retry clears it.
+        proxy.RetryAfterFailure();
+        proxy.ResetRecording(&commands);
+        creations = Mock::creations;
+        evaluations = Mock::evaluations;
+        assert(run() == NVSDK_NGX_Result_Success && !evaluated); // created; its list is then discarded
+        assert(run() == NVSDK_NGX_Result_Success && !evaluated); // discard 1: created again
+        assert(run() == NVSDK_NGX_Result_Success && !evaluated); // discard 2: created again
+        assert(Mock::creations == creations + 3);
+        assert(run() == NVSDK_NGX_Result_Fail && !evaluated);    // discard 3: latched
+        assert(run() == 0 && !evaluated && Mock::creations == creations + 3 && Mock::evaluations == evaluations);
+        proxy.ResetRecording(&commands);
+        assert(Mock::handles.empty() && Mock::allocations == Mock::destructions);
+        CompletionMock::recorded = Recorded::Untracked;
+        proxy.RetryAfterFailure();
+        assert(run() == NVSDK_NGX_Result_Success && !evaluated);
+        assert(run() == NVSDK_NGX_Result_Success && evaluated);
+        proxy.ResetRecording(&commands);
+        proxy.Release();
+        proxy.ResetRecording(&commands);
+        assert(Mock::handles.empty() && Mock::allocations == Mock::destructions);
+    }
 
     // Only the earlier driver initialization rejection tried compatibility loading.
     assert(CompatibilityMock::opens == 1);
