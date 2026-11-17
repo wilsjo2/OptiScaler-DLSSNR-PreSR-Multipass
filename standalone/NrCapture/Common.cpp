@@ -149,7 +149,6 @@ Settings LoadSettings(const std::filesystem::path& settingsFile) {
     s.nvfp4FeedForward = number(L"Nvfp4FeedForward", 0, 0, 1) != 0;
     s.nvfp4Swin = (unsigned)number(L"Nvfp4Swin", 0, 0, 15);
     s.nvfp4SwinTwo = (unsigned)number(L"Nvfp4SwinTwo", 7, 0, 15);
-    s.nvfp4SwinTrained = number(L"Nvfp4SwinTrained", 1, 0, 1) != 0;
     {
         wchar_t text[64]{}; GetPrivateProfileStringW(L"NR", L"Nvfp4SwinLayers", L"", text, 64, file.c_str());
         wchar_t* end = nullptr; const unsigned long long mask = wcstoull(text, &end, 16);
@@ -158,9 +157,6 @@ Settings LoadSettings(const std::filesystem::path& settingsFile) {
     s.nvfp4Split = (unsigned)number(L"Nvfp4Split", 0, 0, 63);
     s.nvfp4Vit = (unsigned)number(L"Nvfp4Vit", 0, 0, 7);
     s.nvfp4PrePost = (unsigned)number(L"Nvfp4PrePost", 0, 0, 3);
-    s.nvfp4SplitTrained = number(L"Nvfp4SplitTrained", 1, 0, 1) != 0;
-    s.nvfp4VitTrained = number(L"Nvfp4VitTrained", 1, 0, 1) != 0;
-    s.nvfp4FfnTrained = number(L"Nvfp4FfnTrained", 1, 0, 1) != 0;
     {
         wchar_t text[512]{}; GetPrivateProfileStringW(L"NR", L"Nvfp4Net", L"", text, 512, file.c_str());
         s.nvfp4Net = Narrow(text);
@@ -243,14 +239,10 @@ void SaveSettings(const Settings& s, const std::filesystem::path& settingsFile) 
     write(L"Nvfp4FeedForward", s.nvfp4FeedForward ? L"1" : L"0");
     write(L"Nvfp4Swin", std::to_wstring(s.nvfp4Swin));
     write(L"Nvfp4SwinTwo", std::to_wstring(s.nvfp4SwinTwo));
-    write(L"Nvfp4SwinTrained", s.nvfp4SwinTrained ? L"1" : L"0");
     write(L"Nvfp4SwinLayers", std::format(L"{:x}", s.nvfp4SwinLayers));
     write(L"Nvfp4Split", std::to_wstring(s.nvfp4Split));
     write(L"Nvfp4Vit", std::to_wstring(s.nvfp4Vit));
     write(L"Nvfp4PrePost", std::to_wstring(s.nvfp4PrePost));
-    write(L"Nvfp4SplitTrained", s.nvfp4SplitTrained ? L"1" : L"0");
-    write(L"Nvfp4VitTrained", s.nvfp4VitTrained ? L"1" : L"0");
-    write(L"Nvfp4FfnTrained", s.nvfp4FfnTrained ? L"1" : L"0");
     write(L"Nvfp4Net", Wide(s.nvfp4Net));
     write(L"InputColour", std::to_wstring(s.inputColour));
     write(L"MaxFps", std::to_wstring(s.maxFps));

@@ -111,8 +111,8 @@ struct Settings {
     // order) on the runtime's kernel. nvfp4SwinTwo (settings file only): NrSwin4::Options::twoTerms.
     unsigned nvfp4Swin = 0, nvfp4SwinTwo = 7;
     unsigned long long nvfp4SwinLayers = ~0ull;
-    // The fused blocks' 4-bit weights: true = the second set (nvfp4/swin4/swin4_trained.bin, where the folder has it),
-    // false = the first set (swin4.bin).
+    // The fused blocks' 4-bit weights: true = swin4_trained.bin (what the application always asks for); false = the
+    // first set, swin4.bin, where a folder still has one.
     bool nvfp4SwinTrained = true;
     // Experimental: the rest of Model A's pass as NVFP4 kernels of ours (nvfp4/NrNet4.h), a bit per group.
     // nvfp4Split (width-512 split blocks): 1 feed-forward, 2 its projection, 4 QKV and attention, 8 attention projection,

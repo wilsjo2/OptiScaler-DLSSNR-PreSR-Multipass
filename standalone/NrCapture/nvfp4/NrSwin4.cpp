@@ -131,6 +131,7 @@ struct Manifest {
     std::array<unsigned, 4> smallAtMost{};
     bool partial256 = false; // `partial 8`: whole4x4 tiles, partial8x8 windows, padded coarse views.
     std::vector<unsigned char> blob;
+    bool trainedIsFirst = false;                // swin4.bin is not there: `blob` holds swin4_trained.bin
     // Sets 1..7 (Options::set). `blob`: the 4-bit records in swin4.bin's layout (empty: the set has none of its own);
     // `skip`: bit n = block n is not launched; `fp8`: records in the runtime's layout for the runtime's own kernels.
     struct Record { bool present = false; uint64_t offset = 0, bytes = 0; };
@@ -278,7 +279,10 @@ void LoadManifest(State& s) {
     if (!m.failure.empty()) throw std::runtime_error(m.failure);
     if (m.loaded) return;
     try {
-        m.blob = ReadAsset(s.options.assets / "swin4.bin");
+        // A package may leave the first set out: swin4_trained.bin then stands in its place (set 0 and set 1 are the same records).
+        std::error_code noFirst;
+        m.trainedIsFirst = !std::filesystem::exists(s.options.assets / "swin4.bin", noFirst);
+        m.blob = ReadAsset(s.options.assets / (m.trainedIsFirst ? "swin4_trained.bin" : "swin4.bin"));
         std::ifstream file(s.options.assets / "swin4.txt");
         if (!file) throw std::runtime_error("missing NVFP4 asset " + (s.options.assets / "swin4.txt").string());
         std::array<bool, kLayers> seen{};
@@ -324,7 +328,9 @@ void LoadManifest(State& s) {
             auto& set = m.sets[n];
             const std::string stem = n == 1 ? "swin4_trained" : "swin4_set" + std::to_string(n);
             std::error_code missing;
-            if (std::filesystem::exists(s.options.assets / (stem + ".bin"), missing)) {
+            if (n == 1 && m.trainedIsFirst) {
+                set.present = true;             // its 4-bit records are `blob` itself
+            } else if (std::filesystem::exists(s.options.assets / (stem + ".bin"), missing)) {
                 set.blob = ReadAsset(s.options.assets / (stem + ".bin"));
                 if (set.blob.size() != m.blob.size()) throw std::runtime_error(stem + ".bin is not the size of swin4.bin");
                 set.present = true;

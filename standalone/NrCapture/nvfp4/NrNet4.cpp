@@ -139,6 +139,7 @@ struct Manifest {
     std::map<std::string, std::pair<unsigned, unsigned>> names; // runtime kernel -> its parameter size and record offset
     std::vector<unsigned char> blob;
     std::vector<unsigned char> trained;         // <family>4_trained.bin: the same records with trained codes; empty without the file
+    bool trainedIsFirst = false;                // <family>4.bin is not there: `blob` holds <family>4_trained.bin
 };
 // Kernels and weights of one device. They stay until ReleaseDevice(), because recorded command lists refer to them.
 struct Device {
@@ -335,9 +336,12 @@ void LoadSets(State& s, const fs::path& folder) {
 Manifest LoadManifest(const fs::path& folder, unsigned family) {
     Manifest m;
     const std::string stem = std::string(kFamilyName[family]) + "4";
-    m.blob = ReadAsset(folder / (stem + ".bin"));
+    // A package may leave the first set out: <family>4_trained.bin then stands in its place.
+    std::error_code noFirst;
+    m.trainedIsFirst = !fs::exists(folder / (stem + ".bin"), noFirst) && fs::exists(folder / (stem + "_trained.bin"), noFirst);
+    m.blob = ReadAsset(folder / (stem + (m.trainedIsFirst ? "_trained.bin" : ".bin")));
     // The trained records are optional and share the manifest, so the file has to be the first one's size.
-    if (std::error_code missing; fs::exists(folder / (stem + "_trained.bin"), missing)) {
+    if (std::error_code missing; !m.trainedIsFirst && fs::exists(folder / (stem + "_trained.bin"), missing)) {
         m.trained = ReadAsset(folder / (stem + "_trained.bin"));
         if (m.trained.size() != m.blob.size()) throw std::runtime_error(stem + "_trained.bin is not the size of " + stem + ".bin");
     }
@@ -1293,7 +1297,7 @@ std::string Status(bool counters) {
         if (!m.loaded) status += "unavailable (" + m.failure + ")";
         else if (!s.enabled) status += "off";
         else status += std::string(s.active[f] ? "active" : s.options.byOrder ? "waiting for the next evaluation" : "waiting to recognise Model A") + " (" + Groups(f, groups) + ")";
-        if (m.loaded && s.options.family[f].trained) status += m.trained.empty() ? ", trained weights not found (the first set is in use)" : ", trained weights";
+        if (m.loaded && s.options.family[f].trained) status += m.trained.empty() && !m.trainedIsFirst ? ", trained weights not found (the first set is in use)" : ", trained weights";
         if (counters && m.loaded) {
             status += " replaced " + std::to_string(s.replaced[f]) + " [";
             bool first = true;

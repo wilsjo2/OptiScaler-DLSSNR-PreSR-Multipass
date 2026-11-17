@@ -159,8 +159,6 @@ void App::ReadControls() {
     next.estimateMotion = SendMessageW(Control(MotionMode), BM_GETCHECK, 0, 0) == BST_CHECKED;
     next.nvfp4FeedForward = checked(Nvfp4Box);
     next.nvfp4Swin = (checked(Nvfp4Swin256) ? 8u : 0u) | (checked(Nvfp4Swin128) ? 4u : 0u) | (checked(Nvfp4Swin64) ? 2u : 0u) | (checked(Nvfp4Swin32) ? 1u : 0u);
-    next.nvfp4SwinTrained = checked(Nvfp4SwinTrained);
-    next.nvfp4SplitTrained = checked(Nvfp4SplitTrained); next.nvfp4VitTrained = checked(Nvfp4VitTrained); next.nvfp4FfnTrained = checked(Nvfp4FfnTrained);
     const auto mask = [&](int first, unsigned count) { unsigned bits = 0; for (unsigned i = 0; i < count; ++i) if (checked(first + int(i))) bits |= 1u << i; return bits; };
     next.nvfp4Split = mask(Nvfp4SplitFfwd, 6); next.nvfp4Vit = mask(Nvfp4VitQkv, 3); next.nvfp4PrePost = mask(Nvfp4Pre, 2);
     { wchar_t text[512]{}; GetWindowTextW(Control(Nvfp4Options), text, 512); next.nvfp4Net = Narrow(text); } // 511 characters, as the settings file reads

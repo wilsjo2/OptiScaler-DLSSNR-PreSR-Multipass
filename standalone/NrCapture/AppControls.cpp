@@ -76,7 +76,7 @@ void App::ShowPass() {
     SetWindowTextW(Control(BorrowStatus), Wide(borrow).c_str());
     SetWindowTextW(Control(Nvfp4Note), Wide(std::string(value.Nvfp4PassInOne() ? "In use: a pass has a 2xPass-in-one or 3xPass-in-one model, which runs all of its own parts (the boxes above are not followed)." :
         value.Nvfp4Pass() ? "In use: a pass has the model \"Model A - NVFP4\"." :
-        "Not in use: no pass has the model \"Model A - NVFP4\" (Model passes tab). Model B follows the feed-forward box alone.") +
+        "Not in use: no pass has the model \"Model A - NVFP4\" (Model passes tab).") +
         "\r\nTransformer feed-forward (4K and above): " + Nvfp4Status() +
         ".\r\nFused blocks: " + Nvfp4SwinStatus() + ".\r\nRest of the network: " + Nvfp4NetStatus() +
         ".\r\nKernel options: <family>.<group>=<number>, separated by spaces (families split, vit, prepost).").c_str());
@@ -276,14 +276,9 @@ void App::CreateControls() {
             {Nvfp4SplitFfwd, L"feed-forward", 105, bit(settings.nvfp4Split, 0)}, {Nvfp4SplitFfwdProj, L"its projection", 110, bit(settings.nvfp4Split, 1)},
             {Nvfp4SplitHead, L"bottleneck head", 125, bit(settings.nvfp4Split, 4)}, {Nvfp4SplitDec, L"decoder input", 110, bit(settings.nvfp4Split, 5)}});
         row(L"Transformer", 382, {{Nvfp4VitQkv, L"QKV", 60, bit(settings.nvfp4Vit, 0)}, {Nvfp4VitAttention, L"attention", 90, bit(settings.nvfp4Vit, 1)},
-            {Nvfp4VitProjection, L"projection", 95, bit(settings.nvfp4Vit, 2)}, {Nvfp4Box, L"feed-forward (also Model B)", 200, settings.nvfp4FeedForward}});
+            {Nvfp4VitProjection, L"projection", 95, bit(settings.nvfp4Vit, 2)}, {Nvfp4Box, L"feed-forward", 200, settings.nvfp4FeedForward}});
         // Option words of the kernels (NrNet4::Parse items such as "prepost.pre=0 vit.attention=0 split.qkv=1"); the
         // boxes above decide which groups run, so group lists typed here are overridden by them.
-        // The second set of 4-bit weights, per family; unticked, or without the file, the first 4-bit set.
-        row(L"Trained 4-bit weights", 416, {{Nvfp4SwinTrained, L"fused blocks", 110, settings.nvfp4SwinTrained},
-            {Nvfp4SplitTrained, L"split blocks", 105, settings.nvfp4SplitTrained}, {Nvfp4VitTrained, L"transformer", 105, settings.nvfp4VitTrained},
-            {Nvfp4FfnTrained, L"feed-forward", 110, settings.nvfp4FfnTrained}});
-        Add(L"STATIC", L"(off: the first 4-bit set)", 0, 706, 419, 210, 22, 0);
         Add(L"STATIC", L"Kernel options", 0, 36, 453, 200, 22, 0);
         Add(L"EDIT", Wide(settings.nvfp4Net).c_str(), WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 240, 450, 676, 25, Nvfp4Options);
         Add(L"STATIC", L"", 0, 36, 484, 880, 132, Nvfp4Note);

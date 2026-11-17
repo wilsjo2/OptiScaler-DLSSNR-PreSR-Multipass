@@ -106,6 +106,7 @@ struct ModelWeights {
     std::string failure;
     Buffer weights;
     uint64_t trained = 0;                       // where the second set (ffn_v2_trained.bin) starts in `weights`; 0: there is none
+    bool trainedIsFirst = false;                // ffn_v2.bin is not there: the buffer starts with ffn_v2_trained.bin
     std::array<uint64_t, 14> setAt{};            // the same for a numbered set (ffn_v2_set<n>.bin)
     std::vector<ComPtr<IUnknown>> parked;       // what an upload that did not finish may still be using; freed with the device
     std::array<BlockWeights, 8> blocks{};
@@ -158,6 +159,7 @@ struct State {
     bool enabled = false, broken = false, failed = false;
     bool paused = false;                        // Pause(): this evaluation is the runtime's
     Options options;
+    std::array<bool, 2> modelFiles{true, true}; // a model's folder is in the asset folder (a package may leave Model B's out)
     std::string status = "off";
     std::string notice;                         // why an evaluation was last left to the runtime; logged when it changes
     uint64_t evaluations = 1, lastReplaced = 0; // cc_cb_clear launches seen (+1); the evaluation that last had a pair replaced
@@ -249,7 +251,10 @@ void LoadWeights(ModelWeights& m, ID3D12Device* device, const fs::path& root) {
     if (!m.failure.empty()) throw std::runtime_error(m.failure);
     if (m.ready) return;
     try {
-        auto blob = ReadAsset(root / "ffn_v2.bin");
+        // A package may leave the first set out: ffn_v2_trained.bin then stands in its place.
+        std::error_code noFirst;
+        m.trainedIsFirst = !fs::exists(root / "ffn_v2.bin", noFirst) && fs::exists(root / "ffn_v2_trained.bin", noFirst);
+        auto blob = ReadAsset(root / (m.trainedIsFirst ? "ffn_v2_trained.bin" : "ffn_v2.bin"));
         const size_t first = blob.size();
         std::ifstream manifest(root / "ffn_v2.txt");
         if (!manifest) throw std::runtime_error("missing NVFP4 asset " + (root / "ffn_v2.txt").string());
@@ -300,7 +305,7 @@ void LoadWeights(ModelWeights& m, ID3D12Device* device, const fs::path& root) {
         for (bool present : seen) if (!present) throw std::runtime_error("NVFP4 manifest does not describe eight blocks");
         // A second set in the same layout (trained codes) goes behind the first, in the same buffer.
         uint64_t second = 0;
-        if (std::error_code ignored; fs::exists(root / "ffn_v2_trained.bin", ignored)) {
+        if (std::error_code ignored; !m.trainedIsFirst && fs::exists(root / "ffn_v2_trained.bin", ignored)) {
             const auto more = ReadAsset(root / "ffn_v2_trained.bin");
             if (more.size() != first) throw std::runtime_error("ffn_v2_trained.bin has another size than ffn_v2.bin");
             second = (first + 255) / 256 * 256;
@@ -547,6 +552,7 @@ int ChooseModel(State& s, const ListState& list) {
     if (!s.options.modelFolders) return 0;
     for (int model = 0; model < 2; ++model)
         if (list.counting && (list.told ? list.told : list.launches) == kFirstExpand[model]) {
+            if (!s.modelFiles[model]) return -1;    // no 4-bit files for this model here: its passes are the runtime's own
             if (RuntimeCarries(s, model)) return model;
             Notice(s, "off: no NR runtime is loaded");
             return -1;
@@ -744,6 +750,10 @@ void Enable(const Options& options) {
     const DWORD length = GetEnvironmentVariableA("NR_NVFP4_TEST_FAIL", text, sizeof text);
     s.testFailAt = length && length < sizeof text ? strtoull(text, nullptr, 10) : 0;
     s.options = options;
+    for (int model = 0; model < 2; ++model) {
+        std::error_code ignored;
+        s.modelFiles[model] = !options.modelFolders || fs::exists(options.assets / kModelFolder[model] / "ffn_v2.txt", ignored);
+    }
     if (const wchar_t* v = _wgetenv(L"NR_FFN_DEBUG_BARRIERS")) s.options.barriers = unsigned(wcstoul(v, nullptr, 0)) & 15u;
     if (const wchar_t* v = _wgetenv(L"NR_FFN_DEBUG_CHAINED")) s.options.chained = *v != L'0';
     s.failed = false;
@@ -827,7 +837,7 @@ std::string Status(bool counters) {
     if (s.enabled && s.options.trained) {
         bool loaded = false, found = false;
         for (const auto& [device, d] : s.devices)
-            for (const auto& m : d.models) if (m.ready) { loaded = true; found = found || m.trained != 0; }
+            for (const auto& m : d.models) if (m.ready) { loaded = true; found = found || m.trained != 0 || m.trainedIsFirst; }
         if (loaded) status += found ? ", trained weights" : ", trained weights not found (the first set is in use)";
     }
     if (s.smallContracts) status += ", small-map contracts " + std::to_string(s.smallContracts);

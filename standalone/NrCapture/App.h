@@ -24,7 +24,7 @@ enum Id { Sources = 100, Refresh, RuntimePath, Browse, Enabled, Strength, Intens
     FoveationEnabled, FoveationCenterWidth, FoveationCenterHeight, FoveationWorkWidth, FoveationWorkHeight,
     FoveationPositionX, FoveationPositionY, FoveationShiftX, FoveationShiftY, ShowFoveation, FoveationNote,
     ShortcutPass, ReapplyPass, ReapplyGain, BorrowTransformer, BorrowBelow, BorrowLevel, ShortcutNote, BorrowStatus, EditInterval, EditLate,
-    Nvfp4Box, Nvfp4Note, Nvfp4Swin256, Nvfp4Swin128, Nvfp4Swin64, Nvfp4Swin32, Nvfp4SwinTrained, Nvfp4SplitTrained, Nvfp4VitTrained, Nvfp4FfnTrained,
+    Nvfp4Box, Nvfp4Note, Nvfp4Swin256, Nvfp4Swin128, Nvfp4Swin64, Nvfp4Swin32,
     // One box per group of nvfp4/NrNet4.h, in the order of its bits: split blocks (6), transformer (3), input and output block.
     Nvfp4SplitFfwd, Nvfp4SplitFfwdProj, Nvfp4SplitQkv, Nvfp4SplitProj, Nvfp4SplitHead, Nvfp4SplitDec,
     Nvfp4VitQkv, Nvfp4VitAttention, Nvfp4VitProjection, Nvfp4Pre, Nvfp4Post,

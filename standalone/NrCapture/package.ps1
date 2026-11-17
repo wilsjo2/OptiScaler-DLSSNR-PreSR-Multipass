@@ -77,9 +77,17 @@ foreach ($file in $fgFiles) {
 $nvfp4Hashes = $null
 if ($Nvfp4Assets -and (Test-Path -LiteralPath (Join-Path $Nvfp4Assets 'ffn_v2.cubin') -PathType Leaf)) {
     $nvfp4Hashes = [ordered]@{}
+    # Model A's first set (modelA/ffn_v2.bin) and Model B's files are optional: a folder may leave them out.
+    foreach ($stale in @('modelA/ffn_v2.bin', 'modelB/ffn_v2.bin', 'modelB/ffn_v2.txt')) {
+        $old = Join-Path (Join-Path $target 'nvfp4') $stale
+        if (!(Test-Path -LiteralPath (Join-Path $Nvfp4Assets $stale) -PathType Leaf) -and (Test-Path -LiteralPath $old -PathType Leaf)) { Remove-Item -LiteralPath $old -Force }
+    }
     foreach ($file in @('ffn_v2.cubin', 'modelA/ffn_v2.bin', 'modelA/ffn_v2.txt', 'modelB/ffn_v2.bin', 'modelB/ffn_v2.txt')) {
         $source = Join-Path $Nvfp4Assets $file
-        if (!(Test-Path -LiteralPath $source -PathType Leaf)) { throw "Missing NVFP4 asset: $file" }
+        if (!(Test-Path -LiteralPath $source -PathType Leaf)) {
+            if ($file -in @('ffn_v2.cubin', 'modelA/ffn_v2.txt')) { throw "Missing NVFP4 asset: $file" }
+            continue
+        }
         $copied = Join-Path (Join-Path $target 'nvfp4') $file
         New-Item -ItemType Directory -Path (Split-Path -Parent $copied) -Force | Out-Null
         Copy-Item -LiteralPath $source -Destination $copied -Force
@@ -103,6 +111,7 @@ if ($Nvfp4Assets -and (Test-Path -LiteralPath (Join-Path $Nvfp4Assets 'ffn_v2.cu
     # Optional: a second feed-forward kernel for small frames, named by a model's manifest
     # ("small_direct ... file <cubin>" / "small_contract ... file <cubin>", beside the manifest).
     foreach ($model in @('modelA', 'modelB')) {
+        if (!(Test-Path -LiteralPath (Join-Path $Nvfp4Assets "$model/ffn_v2.txt") -PathType Leaf)) { continue }
         $kept = @()
         foreach ($line in Get-Content -LiteralPath (Join-Path $Nvfp4Assets "$model/ffn_v2.txt")) {
             if ($line -match '^\s*small_(direct|contract)\b.*\bfile\s+(\S+)') { $kept += $Matches[2] }
