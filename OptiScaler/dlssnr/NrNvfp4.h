@@ -8,6 +8,9 @@
 //   4  Model A with the 4-bit kernels (fused blocks 256 and 128, split blocks, transformer, feed-forward; trained weights)
 //   15 NVFP4 3xPass-in-one (weight set 12)
 //   16 NVFP4 2xPass-in-one (weight set 13)
+//   17 FP8 2xPass-in-one, 18 FP8 3xPass-in-one: NVIDIA's own FP8 kernels with weight records of ours (NrFp8; RTX 40 and
+//      50 series; files OptiScaler/nvfp4/fp8/fp8_set1.* and fp8_set2.*). No 4-bit kernel runs in such a pass.
+//   19 FP8 2xPass-in-one v2, 20 FP8 3xPass-in-one v2: the same with their v2 weights (fp8_set3.*, fp8_set4.*).
 // Any other value from 4 up (5..14 were models that have been removed) is refused, never run as another model.
 // The runtime itself is given preset 1 (Model A) for these, because our kernels replace its launches one by one.
 // Assets: <OptiScaler.dll's folder>/OptiScaler/nvfp4, laid out as the Display Filter package's nvfp4 folder.
@@ -27,8 +30,14 @@ namespace DlssNr::Nvfp4
 inline constexpr unsigned ModelANvfp4 = 4,
                           ModelTwoTriple = 15, // one pass with the look of three
                           ModelTwoDouble = 16; // one pass with the look of two
+inline constexpr unsigned ModelFp8Double = 17, // FP8: one pass with the look of two
+                          ModelFp8Triple = 18, // FP8: one pass with the look of three
+                          ModelFp8Double2 = 19, // the same, v2 weights
+                          ModelFp8Triple2 = 20;
 constexpr bool IsPassInOne(unsigned preset) { return preset == ModelTwoTriple || preset == ModelTwoDouble; }
-constexpr bool IsKnown(unsigned preset) { return preset == ModelANvfp4 || IsPassInOne(preset); }
+constexpr bool IsFp8(unsigned preset) { return preset >= ModelFp8Double && preset <= ModelFp8Triple2; }
+constexpr unsigned Fp8Set(unsigned preset) { return IsFp8(preset) ? preset - 16 : 0; } // fp8/fp8_set<n>
+constexpr bool IsKnown(unsigned preset) { return preset == ModelANvfp4 || IsPassInOne(preset) || IsFp8(preset); }
 // Every value from 4 up asks for a 4-bit model: one this build does not have fails visibly (BeginEvaluation).
 constexpr bool IsNvfp4(unsigned preset) { return preset >= ModelANvfp4; }
 constexpr unsigned WeightSet(unsigned preset) { return IsPassInOne(preset) ? preset - 3 : 0; } // 0: the trained 4-bit codes

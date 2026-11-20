@@ -211,6 +211,7 @@ void App::Run(CaptureSource source, Settings initial) {
                 if (current.nvfp4FeedForward || passInOne) text += " | NVFP4 feed-forward " + Nvfp4Status();
                 if ((current.nvfp4Swin || passInOne) && nvfp4Model) text += " | NVFP4 fused blocks " + Nvfp4SwinStatus();
                 if ((current.nvfp4Split || current.nvfp4Vit || current.nvfp4PrePost || passInOne) && nvfp4Model) text += " | NVFP4 network " + Nvfp4NetStatus();
+                if (current.Fp8Pass()) text += " | FP8 model " + Fp8Status();
                 const auto acquiredFps = (capture.receivedFrames - reportedCaptures) * 1000.0 / (lastFrame - reportAt);
                 text += std::format(" | {} capture {:.1f} fps | GPU wait {:.1f} ms | Present {:.1f} ms",
                     initial.captureBackend ? "DXGI" : "WGC", acquiredFps, timings.gpuWait / frames, timings.present / frames);

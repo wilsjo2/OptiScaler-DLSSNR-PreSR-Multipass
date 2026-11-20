@@ -313,14 +313,18 @@ static void DeferredSlider(const char* label, Option* opt, float mn, float mx, f
 template <typename Option> static void NrModelCombo(Option* opt, bool allowInherit)
 {
     // The runtime's presets 0..2, then DlssNr::Nvfp4's choices shown (4, 15, 16): Model A with our 4-bit kernels and
-    // weight sets.
+    // weight sets, and (17..20) NVIDIA's FP8 kernels of Model A with our weights.
     static const char* names[] = { "Automatic",
                                    "Original",
                                    "Optimized",
                                    "Original - NVFP4 (4-bit kernels)",
                                    "NVFP4 2xPass-in-one",
-                                   "NVFP4 3xPass-in-one" };
-    static const uint32_t values[] = { 0, 1, 2, 4, 16, 15 };
+                                   "NVFP4 3xPass-in-one",
+                                   "FP8 2xPass-in-one",
+                                   "FP8 3xPass-in-one",
+                                   "FP8 2xPass-in-one v2",
+                                   "FP8 3xPass-in-one v2" };
+    static const uint32_t values[] = { 0, 1, 2, 4, 16, 15, 17, 18, 19, 20 };
     const bool inherited = allowInherit && !opt->has_value();
     const uint32_t preset = opt->has_value() ? opt->value() : 0u;
     const char* preview = inherited ? "Inherit pass 1" : "Unavailable preset";
@@ -352,6 +356,10 @@ template <typename Option> static void NrModelCombo(Option* opt, bool allowInher
                "runtime's, so any NR runtime that offers the original model (preset 1) works, such as 310.8.0\n"
                "or 310.9.16.0.\n"
                "There is no fallback: if they cannot run, NR is not applied and the reason is shown here in red.\n"
+               "FP8 2xPass-in-one, FP8 3xPass-in-one: the same two looks as FP8 models for RTX 40 and 50 series\n"
+               "GPUs (NVIDIA's own FP8 kernels with weights of ours; files in OptiScaler/nvfp4/fp8). They too\n"
+               "use none of the runtime's weights, and are not applied if they cannot run.\n"
+               "FP8 2xPass-in-one v2, FP8 3xPass-in-one v2: the same two FP8 models with other weights.\n"
                "2xPass-in-one and 3xPass-in-one give the look of two or three passes in one. Run either as ONE\n"
                "pass: Cinematic, intensity, tone and structure at 1.\n"
                "Changing the model rebuilds this pass and resets its history.");
@@ -360,13 +368,15 @@ template <typename Option> static void NrModelCombo(Option* opt, bool allowInher
         if (const auto problem = DlssNr::Nvfp4::Problem(); !problem.empty())
         {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.35f, 0.3f, 1.0f));
-            ImGui::TextWrapped("4-bit model is NOT running, NR is not applied: %s", problem.c_str());
+            ImGui::TextWrapped("%s model is NOT running, NR is not applied: %s",
+                               DlssNr::Nvfp4::IsFp8(preset) ? "FP8" : "4-bit", problem.c_str());
             ImGui::PopStyleColor();
         }
         else if (DlssNr::Nvfp4::Running())
-            ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1.0f), "4-bit kernels running");
+            ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1.0f),
+                               DlssNr::Nvfp4::IsFp8(preset) ? "FP8 model running" : "4-bit kernels running");
         else
-            ImGui::TextDisabled("4-bit kernels starting...");
+            ImGui::TextDisabled(DlssNr::Nvfp4::IsFp8(preset) ? "FP8 model starting..." : "4-bit kernels starting...");
     }
 }
 

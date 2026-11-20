@@ -51,7 +51,8 @@ foreach ($name in @('amd_fidelityfx_loader_dx12.dll', 'amd_fidelityfx_upscaler_d
     $files["OptiScaler/$name"] = Join-Path $root "external/FidelityFX-SDK-v2/Kits/FidelityFX/signedbin/$name"
 }
 $files['OptiScaler/D3D12_OptiScaler/D3D12Core.dll'] = Join-Path $root 'external/directx_agility_sdk/lib/D3D12Core.dll'
-# The 4-bit (NVFP4) kernels and the two pass-in-one weight sets (Original - NVFP4, NVFP4 2xPass-in-one, NVFP4 3xPass-in-one).
+# The 4-bit (NVFP4) kernels and the two pass-in-one weight sets (Original - NVFP4, NVFP4 2xPass-in-one, NVFP4 3xPass-in-one),
+# and the FP8 records of FP8 2xPass-in-one and FP8 3xPass-in-one (fp8/).
 foreach ($item in Get-ChildItem -LiteralPath $Nvfp4Assets -Recurse -File | Where-Object { $_.Name -notlike '*.md' }) {
     $files['OptiScaler/nvfp4/' + $item.FullName.Substring($Nvfp4Assets.Length).TrimStart('\', '/').Replace('\', '/')] = $item.FullName
 }

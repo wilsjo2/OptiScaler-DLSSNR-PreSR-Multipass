@@ -184,6 +184,8 @@ void App::CreateControls() {
     // Settings::ModelANvfp4 (4), so saved profiles keep their meaning.
     combo(L"Model", Preset, {L"Automatic", L"Model A (Original)", L"Model A - NVFP4 (4-bit kernels, RTX 50 series)",
         L"NVFP4 2xPass-in-one", L"NVFP4 3xPass-in-one",
+        L"FP8 2xPass-in-one (RTX 40 and 50 series)", L"FP8 3xPass-in-one (RTX 40 and 50 series)",
+        L"FP8 2xPass-in-one v2 (RTX 40 and 50 series)", L"FP8 3xPass-in-one v2 (RTX 40 and 50 series)",
         L"Model B (Optimized, NR 310.9.16 or newer)", L"Preset 3 (legacy)"},
         unsigned(std::find(std::begin(ModelChoices), std::end(ModelChoices), settings.model.preset) - std::begin(ModelChoices)), 36, 508);
     label(L"More passes increase GPU time and memory use.", 36, 582);

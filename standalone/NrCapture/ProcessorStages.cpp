@@ -96,6 +96,7 @@ ID3D12Resource* Processor::Run(ID3D12Resource* input, const Settings& s, bool hd
         // A pass-in-one model is made of these parts as 4-bit kernels with its own weights: it runs with them.
         if (s.Nvfp4PassInOne()) { ApplyNvfp4(true, true, true); ApplyNvfp4Swin(12, ~0ull, s.nvfp4SwinTwo, 1, true); ApplyNvfp4Net(63, 7, 0, s.nvfp4Net, 3); }
         else { ApplyNvfp4(s.nvfp4FeedForward, s.nvfp4FfnTrained); ApplyNvfp4Swin(s.nvfp4Swin, s.nvfp4SwinLayers, s.nvfp4SwinTwo, s.nvfp4SwinTrained); ApplyNvfp4Net(s.nvfp4Split, s.nvfp4Vit, s.nvfp4PrePost, s.nvfp4Net, (s.nvfp4SplitTrained ? 1u : 0u) | (s.nvfp4VitTrained ? 2u : 0u)); }
+        ApplyFp8(s.Fp8Pass()); // (throws when a pass asks for an FP8 model that cannot be loaded)
     }
     Settings scratch;
     auto* result = advanced ? RunChain(input, s, hdr, resetHistory, desktopWhitePoint, frameTimeMs, processedFps, outputFps)

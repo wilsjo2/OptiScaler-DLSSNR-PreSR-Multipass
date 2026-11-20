@@ -5,11 +5,13 @@
 
 #include "../../OptiScaler/dlssnr/NrNvfp4.h"
 #include "../../standalone/NrCapture/nvfp4/NrFfnV2.h"
+#include "../../standalone/NrCapture/nvfp4/NrFp8.h"
 #include "../../standalone/NrCapture/nvfp4/NrNet4.h"
 #include "../../standalone/NrCapture/nvfp4/NrSwin4.h"
 
 #include <cstdio>
 #include <cstdlib>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -43,6 +45,15 @@ struct Layer
     }
 };
 Layer swin, net, ffn;
+// The FP8 models: NVIDIA's kernels with our records, counted per evaluation.
+struct Fp8
+{
+    bool enabled = false, failEnable = false;
+    unsigned set = 0, used = 0, missingSet = 0;
+    unsigned long long completed = 0, faults = 0;
+    bool faultNext = false; // the next evaluation with a set does not match
+    unsigned released = 0;
+} fp8;
 std::vector<std::string> log;
 unsigned long long retiredTicket = 0, freedTicket = 0;
 unsigned retireKeep = 0, retireRecent = 0;
@@ -58,6 +69,14 @@ void Evaluate(unsigned long long swinFaults = 0, unsigned long long netFaults = 
         net.faults += netFaults;
     if (ffn.enabled && !ffn.paused)
         ffn.faults += ffnFaults;
+    if (fp8.enabled && fp8.set)
+    {
+        fp8.used = fp8.set;
+        if (fp8.faultNext)
+            ++fp8.faults, fp8.faultNext = false;
+        else
+            ++fp8.completed;
+    }
 }
 } // namespace Mock
 
@@ -121,6 +140,33 @@ std::string Status(bool counters)
            (counters ? " | feed-forward pairs replaced: " + std::to_string(Mock::ffn.work) + " | contracts left to the runtime: 0" : "");
 }
 } // namespace NrFfnV2
+namespace NrFp8
+{
+void* WrapNvapi(unsigned, void* original) { return original; }
+void SetLog(void (*)(const char*)) {}
+void Enable(const Options&)
+{
+    if (Mock::fp8.failEnable)
+        throw std::runtime_error("no FP8 model in assets/fp8");
+    Mock::fp8.enabled = true;
+}
+void Disable() { Mock::fp8.enabled = false; }
+bool Enabled() { return Mock::fp8.enabled; }
+void UseSet(unsigned set) { Mock::fp8.set = set; }
+bool SetComplete(unsigned set, std::string* missing)
+{
+    const bool complete = Mock::fp8.enabled && set && set != Mock::fp8.missingSet;
+    if (!complete && missing)
+        *missing = "fp8/fp8_set" + std::to_string(set) + ".txt and .bin";
+    return complete;
+}
+unsigned long long Faults() { return Mock::fp8.faults; }
+std::string Problem() { return "FP8 set 1: launch 57 is cc_repack, Model A's is cc_vit_1d_qkv_chained_fp8"; }
+unsigned long long Completed() { return Mock::fp8.completed; }
+void EndEvaluation(ID3D12GraphicsCommandList*) noexcept {}
+void ReleaseDevice(ID3D12Device*) { ++Mock::fp8.released; }
+std::string Status(bool) { return "active"; }
+} // namespace NrFp8
 
 namespace
 {
@@ -212,6 +258,32 @@ int main()
     Mock::swin.faults += 5;
     CHECK(Pass(ModelTwoDouble) && Running() && Problem().empty());
 
+    // The FP8 models: their own set each, no 4-bit kernel in their passes, the set released after the evaluation.
+    CHECK(Mock::fp8.enabled);
+    {
+        const auto work = Mock::swin.work + Mock::net.work + Mock::ffn.work;
+        CHECK(Pass(ModelFp8Double) && Mock::fp8.used == 1 && Running() && Problem().empty());
+        CHECK(Pass(ModelFp8Triple) && Mock::fp8.used == 2);
+        CHECK(Pass(ModelFp8Double2) && Mock::fp8.used == 3);
+        CHECK(Pass(ModelFp8Triple2) && Mock::fp8.used == 4);
+        CHECK(Mock::swin.work + Mock::net.work + Mock::ffn.work == work && AllPaused() && Mock::fp8.set == 0);
+    }
+    // ... and a 4-bit pass after them runs its kernels without the FP8 records.
+    CHECK(Pass(ModelTwoDouble) && Mock::fp8.used == 4 && Mock::swin.set == 13);
+    // An FP8 evaluation that did not run wholly on our records is refused at once, with its reason.
+    Mock::fp8.faultNext = true;
+    CHECK(!Pass(ModelFp8Double) && !Running() && Contains(Problem(), "launch 57"));
+    CHECK(Pass(ModelFp8Double) && Problem().empty());
+    // An evaluation the FP8 layer never saw (no cc_cb_clear reached it) is refused too.
+    BeginEvaluation(ModelFp8Triple);
+    EndEvaluation(nullptr);
+    CHECK(!OursRan(true) && Contains(Problem(), "did not see"));
+    // A missing set: nothing of ours is asked for, the pass is refused, the reason names the files.
+    Mock::fp8.missingSet = 2;
+    CHECK(!Pass(ModelFp8Triple) && Contains(Problem(), "fp8/fp8_set2"));
+    CHECK(Pass(ModelFp8Double));
+    Mock::fp8.missingSet = 0;
+
     // A model number this build does not have is refused, never run as another model.
     CHECK(!Pass(9) && Contains(Problem(), "removed from this build"));
 
@@ -221,8 +293,15 @@ int main()
     FreeRetired(device, ticket);
     CHECK(Mock::freedTicket == ticket);
     Release(device);
-    CHECK(Mock::swin.released == 1 && Mock::net.released == 1 && Mock::ffn.released == 1 && !Running());
+    CHECK(Mock::swin.released == 1 && Mock::net.released == 1 && Mock::ffn.released == 1 && Mock::fp8.released == 1 && !Running());
     CHECK(Pass(ModelANvfp4)); // loads again on demand: still switched on
+
+    // FP8 sets that cannot be loaded: the FP8 passes are refused, the 4-bit ones still run (a new asset folder reloads).
+    Mock::fp8.failEnable = true;
+    Mock::fp8.enabled = false;
+    Configure(true, L"other-assets");
+    CHECK(!Pass(ModelFp8Double) && Contains(Problem(), "FP8 models"));
+    CHECK(Pass(ModelTwoTriple));
 
     bool failed = false, running = false;
     for (const auto& line : Mock::log)

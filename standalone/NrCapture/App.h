@@ -37,7 +37,7 @@ enum Id { Sources = 100, Refresh, RuntimePath, Browse, Enabled, Strength, Intens
     CalibrateGoal, CalibrateStart, CalibrateCancel, CalibrateNote, CalibrateSkin };
 // The "Model" list in the order shown, as ModelSettings::preset values (Settings::ModelANvfp4 = 4 sits beside Model A).
 // 5..14 were removed models: a saved one shows no selection here and is refused when the passes are made.
-inline constexpr unsigned ModelChoices[]{0, 1, 4, 16, 15, 2, 3};
+inline constexpr unsigned ModelChoices[]{0, 1, 4, 16, 15, 17, 18, 19, 20, 2, 3};
 inline constexpr const wchar_t* AppearanceNames[]{L"Colour strength", L"Model skin structure", L"Skin detail / lighting",
     L"Skin colour", L"Environment detail / lighting", L"Environment colour"};
 class App {

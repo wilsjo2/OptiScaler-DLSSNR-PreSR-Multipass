@@ -142,7 +142,7 @@ NVSDK_NGX_Result Runtime::Create(ID3D12GraphicsCommandList* commands, UINT w, UI
         if (!Settings::IsModel(tuning.preset)) // A removed model saved in the settings: never run another model in its place.
             throw std::runtime_error("NR pass " + std::to_string(pass + 1) + " asks for model " + std::to_string(tuning.preset) +
                 ", which was removed from this build. Choose another model in the Model list.");
-        if (Settings::IsNvfp4(tuning.preset)) tuning.preset = 1; // Model A; Processor::Evaluate lets the 4-bit kernels in.
+        if (Settings::IsNvfp4(tuning.preset) || Settings::IsFp8(tuning.preset)) tuning.preset = 1; // Model A; Processor::Evaluate lets the 4-bit kernels or the FP8 records in.
         tuning.preset = std::min(tuning.preset, 3u); tuning.style = std::min(tuning.style, 2u);
         tuning.intensity = std::clamp(tuning.intensity, 0.0f, 2.0f);
         tuning.localStructure = std::clamp(tuning.localStructure, 0.0f, 2.0f);

@@ -34,6 +34,10 @@ std::string Nvfp4NetStatus(bool counters = false);
 // A NrNet4::Parse text into settings: its group masks into nvfp4Split, nvfp4Vit and nvfp4PrePost, all of it into nvfp4Net.
 void SetNvfp4Net(Settings& settings, const std::string& text);
 void ReleaseNvfp4(ID3D12Device* device); // Only once the device's queue has drained, or the device is lost.
+// The FP8 pass-in-one models (nvfp4/NrFp8.h), put in place by InstallPassBorrow() the same way: on while a pass has
+// one (Settings::Fp8Pass). Throws when they cannot be loaded. Assets: the folder nvfp4/fp8 beside the executable.
+void ApplyFp8(bool wanted);
+std::string Fp8Status(bool counters = false);
 class Processor {
 public:
     Processor(Gpu& gpu, const std::filesystem::path& runtime, bool unlockAdaMfg = false);

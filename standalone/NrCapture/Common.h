@@ -58,11 +58,19 @@ struct Settings {
     // NVFP4 3xPass-in-one (set 12): the look of three passes. NVFP4 2xPass-in-one (set 13): the look of two.
     // The numbers 5..14 belonged to models that were removed: a saved one is refused (Runtime::Create), never run
     // as another model.
-    static constexpr unsigned ModelANvfp4TwoTriple = 15, ModelANvfp4TwoDouble = 16, ModelLast = 16;
+    static constexpr unsigned ModelANvfp4TwoTriple = 15, ModelANvfp4TwoDouble = 16;
+    // FP8 pass-in-one models: NVIDIA's own FP8 kernels of Model A with weights of ours (nvfp4/NrFp8.h; RTX 40 and 50
+    // series). FP8 2xPass-in-one (set 1): the look of two passes; FP8 3xPass-in-one (set 2): of three; their v2 weights
+    // (sets 3 and 4). No 4-bit kernel runs in such a pass. Run as ONE Cinematic pass at intensity, tone and structure 1,
+    // like the 4-bit ones.
+    static constexpr unsigned ModelAFp8TwoDouble = 17, ModelAFp8TwoTriple = 18, ModelAFp8TwoDouble2 = 19,
+                              ModelAFp8TwoTriple2 = 20, ModelLast = 20;
     static constexpr bool IsPassInOne(unsigned preset) { return preset == ModelANvfp4TwoTriple || preset == ModelANvfp4TwoDouble; }
     static constexpr bool IsNvfp4(unsigned preset) { return preset == ModelANvfp4 || IsPassInOne(preset); }
-    static constexpr bool IsModel(unsigned preset) { return preset <= 3 || IsNvfp4(preset); }
+    static constexpr bool IsFp8(unsigned preset) { return preset >= ModelAFp8TwoDouble && preset <= ModelAFp8TwoTriple2; }
+    static constexpr bool IsModel(unsigned preset) { return preset <= 3 || IsNvfp4(preset) || IsFp8(preset); }
     static constexpr unsigned Nvfp4Set(unsigned preset) { return IsPassInOne(preset) ? preset - 3 : 0; } // 0: the tab's choice
+    static constexpr unsigned Fp8Set(unsigned preset) { return IsFp8(preset) ? preset - 16 : 0; }      // nvfp4/fp8/fp8_set<n>
     std::filesystem::path runtime;
     std::filesystem::path runtimeChosen; // The DLL last picked or typed in the box: kept even in another package.
     DlssNr::ModelSettings model{0, 0, 1, 1, 1, -1, true}; // Match OptiScaler's first-pass defaults.
@@ -163,6 +171,12 @@ struct Settings {
     bool Nvfp4Pass() const {
         for (unsigned pass = 0; pass < std::min(passes, MaxPasses); ++pass)
             if (IsNvfp4(PassModel(pass).preset) && !Shortcut(pass).reapply) return true;
+        return false;
+    }
+    // An active pass that runs the network has an FP8 pass-in-one model.
+    bool Fp8Pass() const {
+        for (unsigned pass = 0; pass < std::min(passes, MaxPasses); ++pass)
+            if (IsFp8(PassModel(pass).preset) && !Shortcut(pass).reapply) return true;
         return false;
     }
     // An active pass that runs the network has a pass-in-one model.

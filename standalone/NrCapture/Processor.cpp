@@ -2,6 +2,7 @@
 #include "nvfp4/NrFfnV2.h"
 #include "nvfp4/NrSwin4.h"
 #include "nvfp4/NrNet4.h"
+#include "nvfp4/NrFp8.h"
 #include <atomic>
 #include <mutex>
 #include <shaders/dlssnr/precompile/DlssNr_Shader.h>
@@ -224,10 +225,12 @@ bool InstallPassBorrow() {
     NrFfnV2::SetLog([](const char* line) { try { Log(line); } catch (...) { /* Logging must not escape into the NvAPI hook. */ } });
     NrSwin4::SetLog([](const char* line) { try { Log(line); } catch (...) { /* As above. */ } });
     NrNet4::SetLog([](const char* line) { try { Log(line); } catch (...) { /* As above. */ } });
-    // The rest-of-the-network layer outermost (it recognises Model A by the runtime's own sequence of launches), then
-    // the fused blocks: each of their launches replaces one of the runtime's, so the feed-forward layer below still
-    // counts the launches of an evaluation as the runtime made them.
-    NrPassBorrow::SetInnerLayer([](unsigned id, void* original) { return NrNet4::WrapNvapi(id, NrSwin4::WrapNvapi(id, NrFfnV2::WrapNvapi(id, original))); });
+    NrFp8::SetLog([](const char* line) { try { Log(line); } catch (...) { /* As above. */ } });
+    // The FP8 models outermost (they count the runtime's own launches of an evaluation and give its kernels our
+    // records; the 4-bit layers are paused in their passes), then the rest-of-the-network layer (it recognises Model A
+    // by the runtime's own sequence of launches), then the fused blocks: each of their launches replaces one of the
+    // runtime's, so the feed-forward layer below still counts the launches of an evaluation as the runtime made them.
+    NrPassBorrow::SetInnerLayer([](unsigned id, void* original) { return NrFp8::WrapNvapi(id, NrNet4::WrapNvapi(id, NrSwin4::WrapNvapi(id, NrFfnV2::WrapNvapi(id, original)))); });
     const char* error = nullptr;
     if (NrPassBorrow::InstallQueryInterfaceHook(&error)) {
         // The runtime asks NvAPI for an entry point when it first needs it. Ask for the two destroy calls now, through
@@ -259,7 +262,17 @@ void ApplyNvfp4(bool wanted, bool trained, bool everySize) {
     catch (const std::exception& e) { Log(std::string("NVFP4 feed-forward unavailable: ") + e.what()); }
 }
 std::string Nvfp4Status() { return NrFfnV2::Status(); }
-void ReleaseNvfp4(ID3D12Device* device) { NrFfnV2::ReleaseDevice(device); NrSwin4::ReleaseDevice(device); NrNet4::ReleaseDevice(device); }
+void ReleaseNvfp4(ID3D12Device* device) { NrFfnV2::ReleaseDevice(device); NrSwin4::ReleaseDevice(device); NrNet4::ReleaseDevice(device); NrFp8::ReleaseDevice(device); }
+void ApplyFp8(bool wanted) {
+    if (!wanted) { if (NrFp8::Enabled()) { NrFp8::Disable(); Log("FP8 models: off"); } return; }
+    if (NrFp8::Enabled()) return;
+    NrFp8::Options options;
+    const wchar_t* folder = _wgetenv(L"NR_FP8_ASSETS"); // Development override.
+    options.assets = folder && *folder ? std::filesystem::path(folder) : ExecutableDirectory() / L"nvfp4" / L"fp8";
+    try { NrFp8::Enable(options); }
+    catch (const std::exception& e) { throw std::runtime_error(std::string("The FP8 pass-in-one models cannot be loaded: ") + e.what()); }
+}
+std::string Fp8Status(bool counters) { return NrFp8::Status(counters); }
 namespace {
 std::mutex nvfp4SwinMutex;
 bool nvfp4SwinSet = false;
@@ -328,7 +341,7 @@ void Processor::Evaluate(ID3D12Resource* colour, ID3D12Resource* depthGuide, ID3
     ID3D12Resource* result, UINT w, UINT h, bool reset, unsigned pass) {
     auto* c = gpu.commands.Get();
     // Tell the NVFP4 layer where the evaluation ends, whatever way this function is left.
-    struct Boundary { ID3D12GraphicsCommandList* list; ~Boundary() { NrFfnV2::EndEvaluation(list); NrSwin4::EndEvaluation(list); NrNet4::EndEvaluation(list); } } boundary{c};
+    struct Boundary { ID3D12GraphicsCommandList* list; ~Boundary() { NrFfnV2::EndEvaluation(list); NrSwin4::EndEvaluation(list); NrNet4::EndEvaluation(list); NrFp8::EndEvaluation(list); } } boundary{c};
     // The 4-bit kernels run where the pass's model is "Model A - NVFP4"; "Model A (Original)" and the others keep
     // NVIDIA's. Model B has only the feed-forward as 4-bit, and that still follows its box alone.
     const unsigned chosen = runtime->RequestedModel(pass);
@@ -339,13 +352,26 @@ void Processor::Evaluate(ID3D12Resource* colour, ID3D12Resource* depthGuide, ID3
     const unsigned selectedSet = NrSwin4::UseSet(Settings::Nvfp4Set(chosen) ? Settings::Nvfp4Set(chosen) : NrSwin4::kDefaultSet);
     NrNet4::UseSet(selectedSet);
     NrFfnV2::UseSet(selectedSet);
-    if (borrowEvaluation < 0) { runtime->Evaluate(c, colour, depthGuide, motionGuide, result, w, h, reset, pass); return; }
+    // An FP8 pass-in-one model: NVIDIA's kernels with our records. It must run wholly or not be shown at all.
+    const unsigned fp8Set = Settings::Fp8Set(chosen);
+    if (fp8Set && !NrFp8::SetComplete(fp8Set))
+        throw std::runtime_error(std::format("NR pass {}: the FP8 model's files (nvfp4/fp8/fp8_set{}.*) are not loaded.", pass + 1, fp8Set));
+    NrFp8::UseSet(fp8Set);
+    const auto fp8Faults = NrFp8::Faults();
+    const auto checkFp8 = [&] {
+        if (!fp8Set) return;
+        NrFp8::EndEvaluation(c);
+        if (NrFp8::Faults() != fp8Faults)
+            throw std::runtime_error(std::format("NR pass {}: the FP8 model could not run ({}). Nothing was shown.", pass + 1, NrFp8::Problem()));
+    };
+    if (borrowEvaluation < 0) { runtime->Evaluate(c, colour, depthGuide, motionGuide, result, w, h, reset, pass); checkFp8(); return; }
     const unsigned evaluation = unsigned(borrowEvaluation++);
     NrPassBorrow::BeginEvaluation(evaluation);
     try { runtime->Evaluate(c, colour, depthGuide, motionGuide, result, w, h, reset, pass); }
     catch (...) { NrPassBorrow::EndEvaluation(); throw; }
     const auto outcome = NrPassBorrow::EndEvaluation();
     if (evaluation < borrowOutcomes.size()) borrowOutcomes[evaluation] = outcome;
+    checkFp8();
 }
 ID3D12Resource* Processor::RunLegacy(ID3D12Resource* input, const Settings& s, bool hdr, bool resetHistory, float desktopWhitePoint, float frameTimeMs, int processedFps, int outputFps) {
     // Colour and signed edits are different DLSS inputs; never reuse one history for the other.

@@ -147,10 +147,12 @@ if ($Nvfp4Assets -and (Test-Path -LiteralPath (Join-Path $Nvfp4Assets 'ffn_v2.cu
     }
     # Optional: the NVFP4 fused-block kernels and weights of Model A.
     # ... and of the rest of Model A's pass: split blocks, transformer
-    # attention, input and output block. A family's folder is copied whole when its manifest is there.
-    foreach ($family in @('swin4', 'split4', 'vit4', 'prepost4')) {
+    # attention, input and output block, and the FP8 models' records (fp8/fp8_set<n>.*). A family's folder is copied
+    # whole when its manifest is there.
+    foreach ($family in @('swin4', 'split4', 'vit4', 'prepost4', 'fp8')) {
         $folder = Join-Path $Nvfp4Assets $family
-        if (!(Test-Path -LiteralPath (Join-Path $folder "$family.txt") -PathType Leaf)) { continue }
+        if (!(Test-Path -LiteralPath (Join-Path $folder "$family.txt") -PathType Leaf) -and
+            !(Get-ChildItem -Path $folder -Filter "${family}_set*.txt" -File -ErrorAction SilentlyContinue)) { continue }
         $familyTarget = Join-Path $target "nvfp4/$family"
         New-Item -ItemType Directory -Path $familyTarget -Force | Out-Null
         # What an earlier build left there (a kernel that no longer exists) must not stay.
