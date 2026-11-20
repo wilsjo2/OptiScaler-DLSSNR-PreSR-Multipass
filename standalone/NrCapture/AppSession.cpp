@@ -9,6 +9,7 @@ struct Session {
 };
 void App::Run(CaptureSource source, Settings initial) {
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
+    Calibration calibration; // (declared before the session: its readback buffer is released after the GPU has drained)
     std::unique_ptr<Session> session;
     try {
         Log(source.monitor ? "Starting monitor capture." : "Starting window capture.");
@@ -49,6 +50,8 @@ void App::Run(CaptureSource source, Settings initial) {
             fpsPresented = session->fg ? session->fg->PresentedFrames() : 0;
             if (pausedReason != reason) { pausedReason = reason; Say(pausedReason); Log(Narrow(pausedReason)); }
         };
+        capturing = true;
+        std::wstring calibrationStatus;
         while (WaitForSingleObject(stop.value, 0) != WAIT_OBJECT_0 && source.Exists() && !session->capture->Closed()) {
             MSG message{}; while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
                 TranslateMessage(&message); DispatchMessageW(&message);
@@ -68,9 +71,26 @@ void App::Run(CaptureSource source, Settings initial) {
             timings.capture += ClockMs() - captureStart;
             pendingCapture |= acquired;
             const bool fresh = pendingCapture;
-            Settings current; { std::lock_guard lock(mutex); current = settings; }
+            calibration.Completed(); // the frame it copied has completed: read it and choose the next values
+            Settings current; std::optional<Calibration::Request> wanted; bool cancel = false;
+            { std::lock_guard lock(mutex); current = settings; wanted = std::move(calibrationRequest); calibrationRequest.reset(); cancel = calibrationCancel; calibrationCancel = false; }
+            if (cancel) calibration.Cancel();
+            if (wanted) {
+                try { calibration.Start(*wanted, current); }
+                catch (const std::exception& e) { std::lock_guard lock(mutex); calibrationResult = Calibration::Result{false, wanted->pass, {}, Wide(e.what()), wanted->skin}; PostMessageW(window, CalibrationMessage, 0, 0); }
+            }
+            if (auto finished = calibration.TakeResult()) {
+                Say(finished->text); calibrationStatus.clear(); historyReset = true;
+                { std::lock_guard lock(mutex); calibrationResult = std::move(finished); }
+                PostMessageW(window, CalibrationMessage, 0, 0);
+            }
+            const bool calibrating = calibration.Active();
+            if (calibrating) {
+                current = calibration.Frame();
+                if (auto text = calibration.Status(); text != calibrationStatus) { calibrationStatus = text; Say(text); }
+            }
             session->capture->SetFrameRate(current.ProcessingFps());
-            const bool repaint = !processed || current != applied || !IsWindowVisible(session->display->Window());
+            const bool repaint = calibrating || !processed || current != applied || !IsWindowVisible(session->display->Window());
             RECT bounds{};
             const bool usable = source.Bounds(bounds) && session->capture->Input() &&
                 session->capture->width == (UINT)(bounds.right - bounds.left) &&
@@ -91,7 +111,7 @@ void App::Run(CaptureSource source, Settings initial) {
                 if (!acquired) WaitForSingleObject(stop.value, 20);
                 continue;
             }
-            if (processed && current == applied && !pacer.Due(current.ProcessingFps(), ClockMs())) {
+            if (!calibrating && processed && current == applied && !pacer.Due(current.ProcessingFps(), ClockMs())) {
                 // Pin the newest completed capture while capped. There is no GPU
                 // work to submit until we actually process it.
                 const auto start = ClockMs(); pacer.Wait(stop.value, session->capture->Event());
@@ -115,7 +135,8 @@ void App::Run(CaptureSource source, Settings initial) {
             const bool hdr = session->display->Hdr();
             const float desktopWhite = session->display->WhitePoint(hdr);
             const HWND foreground = GetForegroundWindow();
-            const bool reset = historyReset || !fresh || capture.timestamp - previousCaptureTime > 250 ||
+            // While calibrating the frame is held: history restarts only when the slider values change.
+            const bool reset = calibrating ? calibration.ResetHistory() : historyReset || !fresh || capture.timestamp - previousCaptureTime > 250 ||
                 (source.monitor && foreground != previousForeground);
             const float frameTime = previousCaptureTime > 0 ? (float)std::clamp(capture.timestamp - previousCaptureTime, 1.0, 1000.0) : 16.67f;
             if (processingStarted - fpsSince >= 500) {
@@ -132,7 +153,9 @@ void App::Run(CaptureSource source, Settings initial) {
             g.lateSplit = true; // (Settings::editLate: the model's list goes to the GPU after the frame is presented)
             g.Begin();
             if (diagnostics && (timingFrame++ % 32) == 0) g.BeginTimings();
-            auto* output = processor.Run(capture.Input(), current, hdr, reset, desktopWhite, frameTime, displayedFps, displayedOutputFps);
+            // (No FPS figures are drawn into a picture the calibrator measures.)
+            auto* output = processor.Run(capture.Input(), current, hdr, reset, desktopWhite, frameTime, calibrating ? -1 : displayedFps, calibrating ? -1 : displayedOutputFps);
+            if (calibrating) calibration.Record(g, output);
             timings.nr += ClockMs() - nrStart;
             const auto fgStart = ClockMs();
             auto* sharedMotion = processor.SceneMotion();
@@ -148,6 +171,7 @@ void App::Run(CaptureSource source, Settings initial) {
             lastFrame = ClockMs();
             ++fpsFrames;
             if (fresh) { latencySum += lastFrame - capture.timestamp; ++frames; resets += processor.historyReset ? 1 : 0; }
+            if (calibrating) { reportAt = lastFrame; frames = resets = 0; latencySum = 0; } // its status line stays up
             if (lastFrame - reportAt >= 2000 && frames) {
                 DXGI_QUERY_VIDEO_MEMORY_INFO memory{}; g.adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &memory);
                 std::string passSizes;
@@ -220,6 +244,12 @@ void App::Run(CaptureSource source, Settings initial) {
         Say(L"Stopped. The overlay is hidden.");
     } catch (const winrt::hresult_error& e) { Say(e.message().c_str()); Log(Narrow(e.message().c_str())); }
       catch (const std::exception& e) { Say(Wide(e.what())); Log(e.what()); }
+    capturing = false;
+    calibration.Cancel(L"Calibration stopped: capture ended.");
+    if (auto finished = calibration.TakeResult()) {
+        { std::lock_guard lock(mutex); calibrationResult = std::move(finished); }
+        PostMessageW(window, CalibrationMessage, 0, 0);
+    }
     if (session) {
         if (session->display) {
             try { session->display->Hide(); } catch (const std::exception& e) { Log(e.what()); }
@@ -228,7 +258,7 @@ void App::Run(CaptureSource source, Settings initial) {
         try {
             if (!session->gpu.Drain()) {
                 // An unresolved submission retains all ownership until process exit.
-                session.release(); restartRequired = true;
+                session.release(); restartRequired = true; calibration.Abandon();
                 Say(L"GPU completion timed out. Capture stopped; restart this application before retrying.");
             }
         } catch (...) { /* Device removal: releasing the dead device's resources is safe. */ }

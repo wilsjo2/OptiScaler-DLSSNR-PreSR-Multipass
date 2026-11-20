@@ -81,6 +81,47 @@ void App::ShowPass() {
         ".\r\nFused blocks: " + Nvfp4SwinStatus() + ".\r\nRest of the network: " + Nvfp4NetStatus() +
         ".\r\nKernel options: <family>.<group>=<number>, separated by spaces (families split, vit, prepost).").c_str());
 }
+void App::ShowSettings() {
+    Settings value; { std::lock_guard lock(mutex); value = settings; }
+    const auto text = [&](int id, float amount) { SetWindowTextW(Control(id), std::format(L"{:.2f}", amount).c_str()); };
+    const auto check = [&](int id, bool on) { SendMessageW(Control(id), BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0); };
+    const auto select = [&](int id, unsigned index) { SendMessageW(Control(id), CB_SETCURSEL, index, 0); };
+    const auto slide = [&](int id, const wchar_t* name, float amount) {
+        SendMessageW(Control(id), TBM_SETPOS, TRUE, (LPARAM)std::lround(amount * 100));
+        SetWindowTextW(Control(id + 1000), std::format(L"{}: {:.2f}", name, amount).c_str());
+    };
+    SetWindowTextW(Control(FpsLimit), std::to_wstring(value.maxFps).c_str());
+    check(UnlockPasses, value.unlockPasses);
+    SendMessageW(Control(Passes), CB_RESETCONTENT, 0, 0);
+    for (unsigned i = 1; i <= (value.unlockPasses ? Settings::MaxPasses : 2); ++i)
+        SendMessageW(Control(Passes), CB_ADDSTRING, 0, (LPARAM)std::to_wstring(i).c_str());
+    select(Passes, value.passes - 1);
+    select(InputColour, value.inputColour); select(Codec, value.tone);
+    text(ReferenceWhite, value.referenceWhiteNits);
+    SendMessageW(Control(WhiteSlider), TBM_SETPOS, TRUE, (LPARAM)std::lround(std::sqrt(value.referenceWhiteNits * 100)));
+    check(MotionMode, value.estimateMotion);
+    text(Strength, value.strength); slide(Colour, AppearanceNames[0], value.colourStrength);
+    text(HighlightGuard, value.highlightGuard); check(SeparateSkin, value.separateSkin);
+    const float amounts[]{value.skinDetail, value.skinColour, value.environmentDetail, value.environmentColour};
+    for (int id = SkinDetail; id <= EnvironmentColour; ++id) {
+        slide(id, AppearanceNames[id - Colour], amounts[id - SkinDetail]);
+        EnableWindow(Control(id), value.separateSkin); EnableWindow(Control(id + 1000), value.separateSkin);
+    }
+    EnableWindow(Control(PreviewSkin), value.separateSkin);
+    text(PeakBrightness, value.peakBrightnessNits);
+    SendMessageW(Control(PeakSlider), TBM_SETPOS, TRUE, (LPARAM)std::lround(std::sqrt(value.peakBrightnessNits * 100)));
+    text(BlackLevel, value.blackLevelNits);
+    SendMessageW(Control(BlackSlider), TBM_SETPOS, TRUE, (LPARAM)std::lround(value.blackLevelNits * 100));
+    text(HaloSuppression, value.haloSuppression); text(HaloBrightSuppression, value.haloBrightSuppression); text(HaloRadius, value.haloRadius);
+    text(ReapplyGain, value.reapplyGain);
+    select(EditInterval, std::clamp(value.editInterval, 1u, 4u) - 1); check(EditLate, value.editLate);
+    check(Nvfp4Box, value.nvfp4FeedForward);
+    const auto bits = [&](int first, unsigned count, unsigned mask) { for (unsigned i = 0; i < count; ++i) check(first + int(i), (mask >> i & 1) != 0); };
+    check(Nvfp4Swin32, value.nvfp4Swin & 1); check(Nvfp4Swin64, value.nvfp4Swin & 2); check(Nvfp4Swin128, value.nvfp4Swin & 4); check(Nvfp4Swin256, value.nvfp4Swin & 8);
+    bits(Nvfp4SplitFfwd, 6, value.nvfp4Split); bits(Nvfp4VitQkv, 3, value.nvfp4Vit); bits(Nvfp4Pre, 2, value.nvfp4PrePost);
+    SetWindowTextW(Control(Nvfp4Options), Wide(value.nvfp4Net).c_str());
+    ShowPass(); // the controls of the pass being edited, and the notes
+}
 void App::CreateControls() {
     auto label = [&](const wchar_t* text, int x, int y, int width = 410, int id = 0) { Add(L"STATIC", text, 0, x, y, width, 22, id); };
     auto edit = [&](const wchar_t* text, int id, float value, int x, int y) {
@@ -123,7 +164,7 @@ void App::CreateControls() {
     label(L"Target FPS (0 = uncapped)", 590, 148, 230);
     Add(L"EDIT", std::to_wstring(settings.maxFps).c_str(), WS_BORDER | ES_NUMBER | WS_TABSTOP, 835, 145, 110, 25, FpsLimit);
     Add(WC_TABCONTROLW, L"", WS_TABSTOP | WS_CLIPSIBLINGS, 16, 188, 934, 440, Tabs);
-    for (auto text : {L"Model passes", L"Input and resolution", L"Composition", L"HDR output", L"Inspect and compare", L"Halo suppression", L"Foveation", L"Faster passes", L"NVFP4"}) {
+    for (auto text : {L"Model passes", L"Input and resolution", L"Composition", L"HDR output", L"Inspect and compare", L"Halo suppression", L"Foveation", L"Faster passes", L"NVFP4", L"Presets"}) {
         TCITEMW item{}; item.mask = TCIF_TEXT; item.pszText = const_cast<wchar_t*>(text);
         TabCtrl_InsertItem(Control(Tabs), TabCtrl_GetItemCount(Control(Tabs)), &item);
     }
@@ -283,8 +324,28 @@ void App::CreateControls() {
         Add(L"EDIT", Wide(settings.nvfp4Net).c_str(), WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 240, 450, 676, 25, Nvfp4Options);
         Add(L"STATIC", L"", 0, 36, 484, 880, 132, Nvfp4Note);
     }
+    buildingPage = 9;
+    label(L"Preset", 36, 232);
+    Add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 36, 256, 410, 300, PresetList);
+    Add(L"BUTTON", L"Load", WS_TABSTOP, 36, 294, 130, 28, PresetLoad);
+    Add(L"BUTTON", L"Overwrite", WS_TABSTOP, 176, 294, 130, 28, PresetOverwrite);
+    Add(L"BUTTON", L"Delete", WS_TABSTOP, 316, 294, 130, 28, PresetDelete);
+    label(L"Name", 36, 346);
+    Add(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, 36, 370, 410, 25, PresetName);
+    SendMessageW(Control(PresetName), EM_SETLIMITTEXT, 64, 0);
+    Add(L"BUTTON", L"Save as new preset", WS_TABSTOP, 36, 406, 200, 28, PresetSaveAs);
+    Add(L"BUTTON", L"Rename selected", WS_TABSTOP, 246, 406, 200, 28, PresetRename);
+    Add(L"STATIC", L"A preset is the current settings saved under a name: the passes and their models, resolution, composition, HDR output, halo suppression, foveation, faster passes, NVFP4, motion and target FPS.\r\n\r\nIt leaves alone the runtime path, capture backend, DLSS FG, Enable NR and the Inspect and compare tab.", 0, 36, 456, 410, 150, 0);
+    label(L"Calibrate the edit pass to this preset", 506, 232);
+    Add(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 506, 256, 410, 300, CalibrateGoal);
+    Add(L"BUTTON", L"Calibrate", WS_TABSTOP, 506, 294, 200, 28, CalibrateStart);
+    Add(L"BUTTON", L"Cancel", WS_TABSTOP, 716, 294, 100, 28, CalibrateCancel);
+    EnableWindow(Control(CalibrateCancel), FALSE);
+    Add(L"BUTTON", L"Enable skin settings optimisation", BS_AUTOCHECKBOX | WS_TABSTOP, 506, 330, 410, 24, CalibrateSkin);
+    Add(L"STATIC", L"", 0, 506, 360, 410, 118, CalibrateNote);
+    Add(L"STATIC", L"Holds the current frame and renders the preset to match on it (all of its passes). Then it tries values of Model intensity, Local structure and Local tone of the pass chosen under \"Edit pass\", and of Detail and Colour strength, until the picture is as close to that preset's as it gets, and leaves the best values in the controls. Skin settings optimisation adds the four skin / environment sliders (switched on) and Highlight guard.\r\n\r\nOther enabled passes keep running as set. Capture must be running.", 0, 506, 482, 410, 134, 0);
     buildingPage = -1;
     Add(L"STATIC", status.c_str(), 0, 16, 647, 935, 83, Status);
-    ShowPass(); ShowPage(); ListSources();
+    ListPresetNames(); ShowPass(); ShowPage(); ListSources();
 }
 }

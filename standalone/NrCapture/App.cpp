@@ -178,6 +178,80 @@ void App::ReadControls() {
     SaveSettings(next);
     { std::lock_guard lock(mutex); settings = next; }
 }
+std::wstring App::Chosen(int combo) {
+    const auto index = SendMessageW(Control(combo), CB_GETCURSEL, 0, 0);
+    if (index == CB_ERR) return {};
+    std::wstring name(size_t(SendMessageW(Control(combo), CB_GETLBTEXTLEN, index, 0)) + 1, L'\0');
+    name.resize(size_t(SendMessageW(Control(combo), CB_GETLBTEXT, index, (LPARAM)name.data())));
+    return name;
+}
+void App::ListPresetNames(const std::wstring& select) {
+    const auto names = ListPresets();
+    for (int combo : {PresetList, CalibrateGoal}) {
+        const auto wanted = combo == PresetList && !select.empty() ? select : Chosen(combo);
+        SendMessageW(Control(combo), CB_RESETCONTENT, 0, 0);
+        for (const auto& name : names) SendMessageW(Control(combo), CB_ADDSTRING, 0, (LPARAM)name.c_str());
+        const auto found = std::find_if(names.begin(), names.end(), [&](const std::wstring& name) { return !_wcsicmp(name.c_str(), wanted.c_str()); });
+        if (found != names.end()) SendMessageW(Control(combo), CB_SETCURSEL, found - names.begin(), 0);
+        else if (!names.empty()) SendMessageW(Control(combo), CB_SETCURSEL, 0, 0);
+    }
+}
+void App::PresetCommand(int id) {
+    const auto selected = Chosen(PresetList);
+    wchar_t typed[128]{}; GetWindowTextW(Control(PresetName), typed, 128);
+    const auto need = [&] { if (selected.empty()) throw std::runtime_error("Select a preset in the list first."); };
+    const auto valid = [&](const std::wstring& name) { if (const auto error = PresetNameError(name); !error.empty()) throw std::runtime_error(Narrow(error)); };
+    if (id == PresetSaveAs) {
+        valid(typed);
+        if (PresetExists(typed)) throw std::runtime_error("A preset with that name exists already. Select it and use Overwrite, or type another name.");
+        ReadControls(); Settings value; { std::lock_guard lock(mutex); value = settings; }
+        SavePreset(typed, value); ListPresetNames(typed);
+        SetWindowTextW(Control(PresetName), L""); Say(std::format(L"Saved the current settings as preset \"{}\".", Chosen(PresetList)));
+    } else if (id == PresetOverwrite) {
+        need(); ReadControls(); Settings value; { std::lock_guard lock(mutex); value = settings; }
+        SavePreset(selected, value); Say(std::format(L"Preset \"{}\" now holds the current settings.", selected));
+    } else if (id == PresetLoad) {
+        need(); Settings value; { std::lock_guard lock(mutex); value = settings; }
+        value = LoadPreset(selected, value);
+        SaveSettings(value);
+        { std::lock_guard lock(mutex); settings = value; }
+        ShowSettings(); Say(std::format(L"Loaded preset \"{}\".", selected));
+    } else if (id == PresetRename) {
+        need(); valid(typed);
+        RenamePreset(selected, typed); ListPresetNames(typed);
+        SetWindowTextW(Control(PresetName), L""); Say(std::format(L"Renamed preset \"{}\" to \"{}\".", selected, Chosen(PresetList)));
+    } else if (id == PresetDelete) {
+        need();
+        if (MessageBoxW(window, std::format(L"Delete the preset \"{}\"?", selected).c_str(), L"Display Filter", MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+        DeletePreset(selected); ListPresetNames(); Say(std::format(L"Deleted preset \"{}\".", selected));
+    }
+}
+void App::StartCalibration() {
+    if (!capturing) throw std::runtime_error("Start capture first: the calibrator works on the captured picture.");
+    const auto name = Chosen(CalibrateGoal);
+    if (name.empty()) throw std::runtime_error("Save the look to match as a preset first, then choose it as the preset to match.");
+    ReadControls(); Settings value; { std::lock_guard lock(mutex); value = settings; }
+    Calibration::Request request{LoadPreset(name, value), name, selectedPass,
+        SendMessageW(Control(CalibrateSkin), BM_GETCHECK, 0, 0) == BST_CHECKED};
+    { std::lock_guard lock(mutex); calibrationRequest = std::move(request); calibrationCancel = false; calibrationResult.reset(); }
+    EnableWindow(Control(CalibrateStart), FALSE); EnableWindow(Control(CalibrateCancel), TRUE);
+    EnableWindow(Control(CalibrateSkin), FALSE);
+    SetWindowTextW(Control(CalibrateNote), L"Calibrating...");
+}
+void App::FinishCalibration() {
+    std::optional<Calibration::Result> result; Settings value;
+    { std::lock_guard lock(mutex); result = std::move(calibrationResult); calibrationResult.reset(); value = settings; }
+    if (!result) return;
+    EnableWindow(Control(CalibrateStart), TRUE); EnableWindow(Control(CalibrateCancel), FALSE);
+    EnableWindow(Control(CalibrateSkin), TRUE);
+    SetWindowTextW(Control(CalibrateNote), result->text.c_str());
+    if (!result->success) return;
+    // The best values go onto the settings as they are now (other controls may have been changed meanwhile).
+    value = Calibration::Applied(value, result->pass, result->values, result->skin);
+    SaveSettings(value);
+    { std::lock_guard lock(mutex); settings = value; }
+    ShowSettings();
+}
 void App::StartCapture() {
     if (restartRequired) throw std::runtime_error("Restart the application after the GPU timeout.");
     ReadControls();
@@ -204,6 +278,7 @@ LRESULT App::Message(UINT m, WPARAM w, LPARAM l) {
             SetWindowTextW(Control(BorrowStatus), Wide(borrow).c_str());
             return 0;
         }
+        if (m == CalibrationMessage) { FinishCalibration(); return 0; }
         if (m == WM_HOTKEY || (m == WM_COMMAND && LOWORD(w) == Stop)) { SetEvent(stop.value); return 0; }
         if (m == WM_HSCROLL && l) {
             const int id = GetDlgCtrlID((HWND)l);
@@ -228,6 +303,9 @@ LRESULT App::Message(UINT m, WPARAM w, LPARAM l) {
             const int id = LOWORD(w), event = HIWORD(w);
             if (id == Refresh) ListSources();
             else if (id == Start) StartCapture();
+            else if (id >= PresetLoad && id <= PresetDelete && event == BN_CLICKED) PresetCommand(id);
+            else if (id == CalibrateStart && event == BN_CLICKED) StartCalibration();
+            else if (id == CalibrateCancel && event == BN_CLICKED) { std::lock_guard lock(mutex); calibrationCancel = true; }
             else if ((id == EditPass || id == ResolutionPass || id == FoveationPass || id == ShortcutPass) && event == CBN_SELCHANGE) {
                 const auto nextPass = (unsigned)SendMessageW(Control(id), CB_GETCURSEL, 0, 0);
                 try { ReadControls(); }

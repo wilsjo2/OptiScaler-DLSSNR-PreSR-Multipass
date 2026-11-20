@@ -244,6 +244,8 @@ bool DlssNr_Dx12::State::RunIndependentPasses(EncodeContext& encoded, ID3D12Reso
         if (composed && captureFrames.isActive())
             captureFrames.record(cmd, encoded.device, nr.colorCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                                  encoded.target, encoded.targetState);
+        if (composed && !passConfig)
+            DlssNr::Calibrate::Composed();
     }
     if (answer)
         Barrier(cmd, answer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -266,6 +268,9 @@ auto DlssNr_Dx12::State::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
                              ID3D12CommandQueue* timingQueue) -> void
 {
     std::lock_guard<std::recursive_mutex> nrLock(mutex);
+    // The slider calibrator changes the settings between frames, here, before this frame reads them.
+    if (!passConfig)
+        DlssNr::Calibrate::Tick(*Config::Instance(), captureFrames);
     const Config& cfg = RunConfig();
     nr.spatialActive = false;
 
@@ -1179,6 +1184,8 @@ auto DlssNr_Dx12::State::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
             captureFrames.record(cmdList, device, nr.colorCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, target,
                                  targetState);
         }
+        if (!passConfig)
+            DlssNr::Calibrate::Composed();
     }
     else if (result != NVSDK_NGX_Result_Success)
     {

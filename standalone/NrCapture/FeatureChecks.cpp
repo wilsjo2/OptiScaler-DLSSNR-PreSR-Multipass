@@ -1,4 +1,5 @@
 #include "FeatureChecks.h"
+#include "Presets.h"
 #include <DirectXPackedVector.h>
 #include <iostream>
 #include <fstream>
@@ -48,6 +49,63 @@ void RuntimePathCheck() {
     expect(old / L"runtime" / L"nvngx_dlssnr.dll", old / L"runtime" / L"nvngx_dlssnr.dll");
     std::cout << "PASS runtime lookup: moved package, missing saved path, executable-relative path, custom DLL, adjacent DLL, other package's bundled runtime (unless chosen) and Unicode folders\n";
 }
+// Presets are files in the data folder: this uses names no user would choose and removes them again.
+static void PresetsCheck(const Settings& saved) {
+    const auto tag = std::format(L"nr-check-{}-{}", GetCurrentProcessId(), GetTickCount64());
+    const std::wstring first = tag + L" one", second = tag + L" two", capitals = tag + L" TWO";
+    struct Cleanup { std::vector<std::wstring> names; ~Cleanup() {
+        for (const auto& name : names) { std::error_code error; std::filesystem::remove(PresetDirectory() / (name + L".ini"), error); } } }
+        cleanup{{first, second}};
+    const auto fails = [](const auto& action) { try { action(); } catch (const std::runtime_error&) { return true; } return false; };
+    const auto listed = [](const std::wstring& name) { const auto names = ListPresets(); return std::find(names.begin(), names.end(), name) != names.end(); };
+    for (const wchar_t* bad : {L"", L"   ", L"a/b", L"a\\b", L"a:b", L"what?", L"con", L"LPT1", L"tab\there"})
+        if (PresetNameError(bad).empty()) throw std::runtime_error("A name that cannot be a file name was accepted for a preset.");
+    if (PresetNameError(std::wstring(65, L'x')).empty() || !PresetNameError(std::wstring(64, L'x')).empty() ||
+        !PresetNameError(L"  2x Cinematic, strong.  ").empty())
+        throw std::runtime_error("Preset name rules changed.");
+    if (PresetExists(first) || listed(first)) throw std::runtime_error("The preset check's name is in use.");
+    SavePreset(L"  " + first + L" ", saved); // (spaces at the ends are not part of the name)
+    if (!PresetExists(first) || !listed(first)) throw std::runtime_error("A saved preset is not listed.");
+    // What belongs to the machine and the session stays as it is when a preset is loaded; the rest is the preset's.
+    Settings current;
+    current.runtime = L"X:/this machine/nvngx_dlssnr.dll"; current.runtimeChosen = L"X:/picked/nvngx_dlssnr.dll";
+    current.captureBackend = 1; current.frameGeneration = 2; current.enabled = false; current.holdFrame = true;
+    current.applyModel = false; current.debugView = 2; current.compare = 3; current.compareSplit = .75f; current.compareZoom = 2.5f;
+    current.compareSwap = !saved.compareSwap; current.compareLabels = !saved.compareLabels; current.labelScale = 3;
+    current.previewSkin = true; current.showFoveation = true; current.foveationPreviewPass = 2;
+    auto expected = saved;
+    expected.runtime = current.runtime; expected.runtimeChosen = current.runtimeChosen;
+    expected.captureBackend = current.captureBackend; expected.frameGeneration = current.frameGeneration;
+    expected.enabled = current.enabled; expected.holdFrame = current.holdFrame; expected.applyModel = current.applyModel;
+    expected.debugView = current.debugView; expected.compare = current.compare; expected.compareSplit = current.compareSplit;
+    expected.compareZoom = current.compareZoom; expected.compareSwap = current.compareSwap; expected.compareLabels = current.compareLabels;
+    expected.labelScale = current.labelScale; expected.previewSkin = current.previewSkin;
+    expected.showFoveation = current.showFoveation; expected.foveationPreviewPass = current.foveationPreviewPass;
+    if (LoadPreset(first, current) != expected) throw std::runtime_error("A preset did not come back as it was saved.");
+    {
+        std::ifstream file(PresetDirectory() / (first + L".ini"), std::ios::binary);
+        const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        std::string plain; for (const char c : text) if (c) plain += c; // (the file may be UTF-16)
+        if (plain.find("chosen/runtime") != std::string::npos || plain.find("nvngx_dlssnr") != std::string::npos)
+            throw std::runtime_error("A preset file holds the runtime's path.");
+    }
+    auto changed = saved; changed.strength = .35f; changed.colourStrength = 3.5f; changed.model.intensity = .6f;
+    SavePreset(first, changed); expected.strength = .35f; expected.colourStrength = 3.5f; expected.model.intensity = .6f;
+    if (LoadPreset(first, current) != expected) throw std::runtime_error("Overwriting a preset did not replace it.");
+    RenamePreset(first, second);
+    if (PresetExists(first) || !listed(second) || LoadPreset(second, current) != expected) throw std::runtime_error("Renaming a preset failed.");
+    RenamePreset(second, capitals); // a change of capitals only
+    if (!listed(capitals) || listed(second)) throw std::runtime_error("Renaming a preset to other capitals failed.");
+    SavePreset(first, saved);
+    if (!fails([&] { RenamePreset(first, second); }) || !PresetExists(first) || LoadPreset(capitals, current) != expected)
+        throw std::runtime_error("A rename onto an existing preset was not refused.");
+    if (!fails([&] { LoadPreset(tag + L" none", current); }) || !fails([&] { DeletePreset(tag + L" none"); }) ||
+        !fails([&] { RenamePreset(tag + L" none", tag + L" other"); }) || !fails([&] { SavePreset(L"a/b", saved); }))
+        throw std::runtime_error("A missing preset or a bad name was not refused.");
+    DeletePreset(first); DeletePreset(capitals);
+    if (PresetExists(first) || PresetExists(second) || listed(first) || listed(capitals)) throw std::runtime_error("Deleting a preset failed.");
+    std::cout << "PASS presets: name rules, save, list, load (session and machine settings kept), overwrite, rename, capitals, refusals, delete\n";
+}
 void SettingsCheck(const Settings& settings) {
     Settings saved = settings;
     if (saved.runtime.empty()) saved.runtime = ResolveRuntimePath({}, ExecutableDirectory()); // What loading resolves it to.
@@ -86,6 +144,7 @@ void SettingsCheck(const Settings& settings) {
     if (!dead.HasPassResolutionOverrides()) throw std::runtime_error("Pass resolution override not seen.");
     dead.passShortcuts[0].reapply = true;
     if (dead.HasPassResolutionOverrides()) throw std::runtime_error("A re-apply pass's resolution override selected the chain.");
+    PresetsCheck(saved);
     std::cout << "PASS per-pass, re-apply/borrow, supersampling, comparison and composition settings round trip and validation (isolated INI)\n";
 }
 void FeatureChecks(Processor& processor, const Settings& settings, std::vector<uint16_t>& pixels,

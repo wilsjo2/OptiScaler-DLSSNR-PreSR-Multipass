@@ -22,8 +22,16 @@ inline void HelpMarker(const char* tip)
     }
 }
 
+// The pass chosen under "Edit pass" (0 = pass 1): the Model section edits it, the calibrator adjusts it.
+inline unsigned& EditPass()
+{
+    static unsigned pass = 0;
+    return pass;
+}
+
 void RenderInput(Config* config);
 void RenderModel(Config* config);
 void RenderBlend(Config* config);
 void RenderInspect(Config* config);
+void RenderPresets(Config* config);
 } // namespace DlssNr::MenuSections

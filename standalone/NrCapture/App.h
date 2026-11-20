@@ -3,6 +3,8 @@
 #include "Processor.h"
 #include "Presentation.h"
 #include "FramePacer.h"
+#include "Presets.h"
+#include "Calibration.h"
 #include <commctrl.h>
 #include <thread>
 #include <mutex>
@@ -12,6 +14,7 @@
 #include <winrt/base.h>
 namespace nr {
 constexpr UINT StatusMessage = WM_APP + 1;
+constexpr UINT CalibrationMessage = WM_APP + 2; // the capture thread has a calibration result for the window
 enum Id { Sources = 100, Refresh, RuntimePath, Browse, Enabled, Strength, Intensity, Structure, LocalTone,
     Codec, Compare, Start, Stop, Status, MotionMode, ReferenceWhite, Passes, WhiteSlider, ModelScale,
     ScaleLabel, Transfer, Upscaler, Colour, SkinStructure, SkinDetail, SkinColour, EnvironmentDetail,
@@ -28,7 +31,10 @@ enum Id { Sources = 100, Refresh, RuntimePath, Browse, Enabled, Strength, Intens
     // One box per group of nvfp4/NrNet4.h, in the order of its bits: split blocks (6), transformer (3), input and output block.
     Nvfp4SplitFfwd, Nvfp4SplitFfwdProj, Nvfp4SplitQkv, Nvfp4SplitProj, Nvfp4SplitHead, Nvfp4SplitDec,
     Nvfp4VitQkv, Nvfp4VitAttention, Nvfp4VitProjection, Nvfp4Pre, Nvfp4Post,
-    Nvfp4Options };   // text field: NrNet4::Parse items for the kernels' option words (Settings::nvfp4Net)
+    Nvfp4Options,     // text field: NrNet4::Parse items for the kernels' option words (Settings::nvfp4Net)
+    // The "Presets" tab: named presets (Presets.h) and the slider calibrator (Calibration.h).
+    PresetList, PresetName, PresetLoad, PresetOverwrite, PresetSaveAs, PresetRename, PresetDelete,
+    CalibrateGoal, CalibrateStart, CalibrateCancel, CalibrateNote, CalibrateSkin };
 // The "Model" list in the order shown, as ModelSettings::preset values (Settings::ModelANvfp4 = 4 sits beside Model A).
 // 5..14 were removed models: a saved one shows no selection here and is refused when the passes are made.
 inline constexpr unsigned ModelChoices[]{0, 1, 4, 16, 15, 2, 3};
@@ -43,6 +49,11 @@ class App {
     Settings settings = LoadSettings();
     std::wstring status = L"Select a screen or window and the NR runtime. Ctrl+Alt+End stops capture.";
     std::atomic_bool restartRequired = false;
+    std::atomic_bool capturing = false; // the capture thread is processing frames
+    // Between the window and the capture thread, under `mutex`: a calibration to start or cancel, and its result.
+    std::optional<Calibration::Request> calibrationRequest;
+    bool calibrationCancel = false;
+    std::optional<Calibration::Result> calibrationResult;
     unsigned selectedPass = 0;
     int buildingPage = -1;
     std::unordered_map<int, HWND> controls;
@@ -67,6 +78,12 @@ class App {
     void CreateControls();
     void ShowPage();
     void ShowPass();
+    void ShowSettings(); // every control that shows a saved setting, from `settings` (after a preset or a calibration)
+    void ListPresetNames(const std::wstring& select = {});
+    std::wstring Chosen(int combo);
+    void PresetCommand(int id);
+    void StartCalibration();
+    void FinishCalibration();
     LRESULT Message(UINT message, WPARAM w, LPARAM l);
     static LRESULT CALLBACK Procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l);
 public:

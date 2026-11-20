@@ -962,6 +962,12 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="dlssnr\DlssNr_GpuLifetime.h" />
     <ClInclude Include="dlssnr\DlssNr_HoldParameters_Dx12.h" />
     <ClCompile Include="dlssnr\DlssNr_MenuControls.cpp" />
+    <ClCompile Include="dlssnr\DlssNr_MenuPresets.cpp" />
+    <ClCompile Include="dlssnr\DlssNr_Presets.cpp" />
+    <ClCompile Include="dlssnr\DlssNr_Calibrate.cpp" />
+    <ClInclude Include="dlssnr\DlssNr_Presets.h" />
+    <ClInclude Include="dlssnr\DlssNr_Calibrate.h" />
+    <ClInclude Include="dlssnr\NrCalibrate.h" />
     <ClCompile Include="dlssnr\DlssNr_MenuOverlay.cpp" />
     <ClInclude Include="dlssnr\DlssNr_MenuOverlay.h" />
     <ClInclude Include="dlssnr\DlssNr_MenuSections.h" />

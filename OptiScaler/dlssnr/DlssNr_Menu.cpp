@@ -334,6 +334,12 @@ void RenderMenu(Config* config, float menuResScale)
             RenderInspect(config);
             ImGui::PopItemWidth();
         }
+        if (ImGui::CollapsingHeader("NR presets and calibration"))
+        {
+            ImGui::PushItemWidth(std::min(220.0f * menuResScale, ImGui::GetContentRegionAvail().x * 0.42f));
+            RenderPresets(config);
+            ImGui::PopItemWidth();
+        }
     }
 }
 

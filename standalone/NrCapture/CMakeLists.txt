@@ -3,7 +3,7 @@ project(OptiScalerNR LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 get_filename_component(REPO "../.." ABSOLUTE)
-add_library(nr_capture_core STATIC Common.cpp Colour.cpp Gpu.cpp GpuTimings.cpp Runtime.cpp RuntimeDlss.cpp Processor.cpp ProcessorStages.cpp Motion.cpp Scaling.cpp Spatial.cpp CaptureQueue.cpp FrameGeneration.cpp FrameGenerationFocus.cpp FrameGenerationOutput.cpp
+add_library(nr_capture_core STATIC Common.cpp Presets.cpp Calibration.cpp Colour.cpp Gpu.cpp GpuTimings.cpp Runtime.cpp RuntimeDlss.cpp Processor.cpp ProcessorStages.cpp Motion.cpp Scaling.cpp Spatial.cpp CaptureQueue.cpp FrameGeneration.cpp FrameGenerationFocus.cpp FrameGenerationOutput.cpp
     AdaMfgUnlock.cpp nvfp4/NrFfnV2.cpp nvfp4/NrSwin4.cpp nvfp4/NrNet4.cpp
     "${REPO}/OptiScaler/dlssnr/DlssNr_GpuLifetime.cpp"
     "${REPO}/OptiScaler/dlssnr/DlssNr_CompatibilityRuntime.cpp"

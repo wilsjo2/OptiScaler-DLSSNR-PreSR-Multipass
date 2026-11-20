@@ -4,6 +4,9 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <functional>
+#include <memory>
+#include <string>
 #include <vector>
 
 namespace capture
@@ -43,6 +46,19 @@ class FrameCapture
             return true;
         }
 
+        // For another capture into the same buffers: no copy counts as submitted yet.
+        bool Rearm()
+        {
+            void* mapped = nullptr;
+            D3D12_RANGE empty {}, written { 0, pairs.size() * sizeof(UINT64) };
+            if (FAILED(stamps->Map(0, &empty, &mapped)))
+                return false;
+            std::memset(mapped, 0, written.End);
+            stamps->Unmap(0, &written);
+            recorded = 0;
+            return true;
+        }
+
         bool AllSubmitted() const
         {
             void* mapped = nullptr;
@@ -58,6 +74,10 @@ class FrameCapture
     std::unique_ptr<Data> data_;
     DlssNr::GpuLifetime lifetime_;
     unsigned wanted_ = 0;
+    // A capture asked for with a reader hands each completed "after" image to it instead of writing files, and
+    // keeps its buffers for the next such capture (the slider calibrator reads hundreds of frames in a row).
+    std::function<void(const DlssNr::ReadbackImage&)> reader_;
+    bool spent_ = false; // data_ holds a capture that was already read
 
     static bool Matches(const DlssNr::ReadbackImage& image, ID3D12Resource* source)
     {
@@ -69,10 +89,14 @@ class FrameCapture
 
   public:
     ~FrameCapture() { release(); }
-    void request(unsigned frames)
+    // False while another capture is under way.
+    bool request(unsigned frames, std::function<void(const DlssNr::ReadbackImage&)> reader = {})
     {
-        if (!isActive())
-            wanted_ = std::min(frames, kMaxFrames);
+        if (isActive())
+            return false;
+        wanted_ = std::min(frames, kMaxFrames);
+        reader_ = std::move(reader);
+        return wanted_ != 0;
     }
     bool isActive() const { return wanted_ != 0; }
     void Submitted(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists)
@@ -85,8 +109,20 @@ class FrameCapture
     void record(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, ID3D12Resource* before,
                 D3D12_RESOURCE_STATES beforeState, ID3D12Resource* after, D3D12_RESOURCE_STATES afterState)
     {
-        if (!isActive() || (data_ && data_->recorded == wanted_))
+        if (!isActive() || (data_ && !spent_ && data_->recorded == wanted_))
             return;
+        if (data_ && spent_)
+        {
+            // Buffers kept from a capture that was read: use them again when they fit, else start afresh.
+            spent_ = false;
+            if (data_->pairs.size() != wanted_ || !lifetime_.Idle() || !data_->Rearm())
+            {
+                auto reader = std::move(reader_);
+                const auto retry = wanted_;
+                release();
+                request(retry, std::move(reader));
+            }
+        }
         if (!data_)
         {
             auto next = std::make_unique<Data>();
@@ -100,9 +136,10 @@ class FrameCapture
         auto& pair = data_->pairs[data_->recorded];
         if (!Matches(pair.before, before) || !Matches(pair.after, after))
         {
+            auto reader = std::move(reader_);
             const auto retry = wanted_;
             release();
-            request(retry);
+            request(retry, std::move(reader));
             return;
         }
         lifetime_.Record(cmd);
@@ -116,13 +153,25 @@ class FrameCapture
 
     std::string write(const std::filesystem::path& directory)
     {
-        if (!data_ || data_->recorded != wanted_ || !lifetime_.Idle())
+        if (!data_ || spent_ || data_->recorded != wanted_ || !lifetime_.Idle())
             return {};
         if (!data_->AllSubmitted())
         {
+            auto reader = std::move(reader_);
             const auto retry = wanted_;
             release();
-            request(retry);
+            request(retry, std::move(reader));
+            return {};
+        }
+        if (reader_)
+        {
+            const auto reader = std::move(reader_);
+            reader_ = {};
+            const auto count = wanted_;
+            wanted_ = 0; // (before the reader runs: it may ask for the next capture)
+            spent_ = true;
+            for (unsigned i = 0; i < count; ++i)
+                reader(data_->pairs[i].after);
             return {};
         }
         std::error_code error;
@@ -164,6 +213,8 @@ class FrameCapture
             lifetime_.Retire([retired] { delete retired; });
         lifetime_.BeginGeneration();
         wanted_ = 0;
+        reader_ = {};
+        spent_ = false;
     }
 };
 } // namespace capture

@@ -516,7 +516,7 @@ void RenderModel(Config* config)
         ImGui::TextDisabled("Set 2 or more passes for the re-apply and borrow options.");
     }
 
-    static unsigned selectedPass = 0;
+    unsigned& selectedPass = EditPass();
     const auto selectedLabel = std::format("Pass {}", selectedPass + 1);
     if (ImGui::BeginCombo("Edit pass", selectedLabel.c_str()))
     {

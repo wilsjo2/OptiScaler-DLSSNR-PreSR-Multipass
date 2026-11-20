@@ -81,6 +81,18 @@ struct ReadbackImage
             cmd->ResourceBarrier(1, &barrier);
     }
 
+    // Hands the copied rows to `use(data, footprint)`; false when the buffer cannot be mapped.
+    template <class Use> bool Read(Use&& use) const
+    {
+        void* data = nullptr;
+        D3D12_RANGE range { 0, SIZE_T(bytes) }, empty {};
+        if (!readback || FAILED(readback->Map(0, &range, &data)))
+            return false;
+        use(static_cast<const void*>(static_cast<const unsigned char*>(data) + layout.Offset), layout.Footprint);
+        readback->Unmap(0, &empty);
+        return true;
+    }
+
     bool Write(const std::filesystem::path& path) const
     {
         void* data = nullptr;

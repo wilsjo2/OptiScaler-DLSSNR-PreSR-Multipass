@@ -16,6 +16,7 @@
 #include <dlssnr/DlssNr.h>
 
 #include <dlssnr/DlssNr_Capture.h>
+#include <dlssnr/DlssNr_Calibrate.h>
 #include <dlssnr/DlssNr_PipelineCapture.h>
 #include <dlssnr/DlssNr_Proxy.h>
 #include <dlssnr/DlssNr_GpuLifetime.h>
