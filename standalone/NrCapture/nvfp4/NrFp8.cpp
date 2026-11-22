@@ -313,9 +313,12 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
         const Entry& e = set.launches[first];
         if (!e.present) return s.launch(commands, kernels, count);         // a launch that reads no weight record
         const std::string name = function ? function->name : "an unknown kernel";
-        if (name != e.name) throw std::runtime_error("launch " + std::to_string(first) + " is " + name + ", Model A's is " + e.name);
+        // The output block has a second form, which the runtime launches when the pass's intensity is not 1 in the
+        // Standard style: the same parameters (weight record, history blend weight) followed by 128 bytes more.
+        const bool blendForm = e.blend && name == e.name + "_simple_blend_full_rect";
+        if (name != e.name && !blendForm) throw std::runtime_error("launch " + std::to_string(first) + " is " + name + ", Model A's is " + e.name);
         uint32_t at = 0;
-        for (const auto& [size, record] : e.layouts) if (kernels->paramSize == size) at = record;
+        for (const auto& [size, record] : e.layouts) if (kernels->paramSize == size + (blendForm ? 128u : 0u)) at = record;
         if (!at || !kernels->pParams)
             throw std::runtime_error("launch " + std::to_string(first) + " (" + name + ") has a " + std::to_string(kernels->paramSize) + "-byte parameter block");
         const Weights& w = LoadWeights(s, s.devices[l.device], l.device, l.set);
