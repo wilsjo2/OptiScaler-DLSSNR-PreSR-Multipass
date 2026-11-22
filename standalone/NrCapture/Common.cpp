@@ -145,6 +145,10 @@ Settings LoadSettings(const std::filesystem::path& settingsFile) {
     s.maxFps = (unsigned)number(L"MaxFps", 0, 0, 360);
     s.captureBackend = (unsigned)number(L"CaptureBackend", 0, 0, 1);
     s.frameGeneration = (unsigned)number(L"FrameGeneration", 1, 1, 4);
+    s.presentMode = (unsigned)number(L"PresentMode", 0, 0, 1);
+    s.latencyMode = (unsigned)number(L"LatencyMode", 0, 0, 1);
+    s.editSmoothing = number(L"EditSmoothing", 0, 0, .9f);
+    s.motionZeroBias = number(L"MotionZeroBias", 0, 0, .5f);
     s.estimateMotion = number(L"EstimateMotion", 0, 0, 1) != 0;
     s.nvfp4FeedForward = number(L"Nvfp4FeedForward", 0, 0, 1) != 0;
     s.nvfp4Swin = (unsigned)number(L"Nvfp4Swin", 0, 0, 15);
@@ -248,6 +252,10 @@ void SaveSettings(const Settings& s, const std::filesystem::path& settingsFile) 
     write(L"MaxFps", std::to_wstring(s.maxFps));
     write(L"CaptureBackend", std::to_wstring(s.captureBackend));
     write(L"FrameGeneration", std::to_wstring(s.frameGeneration));
+    write(L"PresentMode", std::to_wstring(s.presentMode));
+    write(L"LatencyMode", std::to_wstring(s.latencyMode));
+    write(L"EditSmoothing", std::to_wstring(s.editSmoothing));
+    write(L"MotionZeroBias", std::to_wstring(s.motionZeroBias));
     write(L"UnlockPasses", s.unlockPasses ? L"1" : L"0");
     write(L"Downscaler", std::to_wstring(s.downscaler));
     write(L"HighlightGuard", std::to_wstring(s.highlightGuard));

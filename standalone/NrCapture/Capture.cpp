@@ -47,6 +47,7 @@ struct Capture::Impl {
 Capture::Capture(Gpu& gpu, CaptureSource source, unsigned backend, double fps) : impl(std::make_unique<Impl>(gpu, source, backend, fps)) {}
 Capture::~Capture() { Stop(); }
 void Capture::SetFrameRate(double fps) { if (impl) impl->pacing.SetRate(fps); }
+void Capture::SetLowLatency(bool on) { if (impl) impl->pacing.SetLowLatency(on); }
 void Capture::StopProducer() {
     if (!impl) return;
     impl->worker.request_stop();
@@ -66,6 +67,14 @@ bool Capture::Next() {
     receivedFrames = impl->received.load(); publishedFrames = impl->published.load(); copyMilliseconds = impl->copyMs.load();
     if (!impl->queue.Next()) return false;
     width = impl->queue.width; height = impl->queue.height; timestamp = impl->queue.timestamp;
+    return true;
+}
+bool Capture::NextOfSize(UINT w, UINT h) {
+    if (!impl) return false;
+    impl->CheckError();
+    if (!impl->queue.Next(w, h)) return false;
+    receivedFrames = impl->received.load(); publishedFrames = impl->published.load(); copyMilliseconds = impl->copyMs.load();
+    timestamp = impl->queue.timestamp;
     return true;
 }
 ID3D12Resource* Capture::Input() const { return impl ? impl->queue.Input() : nullptr; }

@@ -383,7 +383,9 @@ auto DlssNr_Dx12::State::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
     independentActive = independent;
     for (auto& model : nr.models)
         model.Collect();
-    if ((!NVNGXProxy::IsDx12Inited() && !NVNGXProxy::InitDx12(device)) || !DlssNr::Proxy::Context::Available())
+    // (The INT8 models run on the own pass host and need no NR runtime.)
+    if (DlssNr::Profiles::NeedsRuntime(cfg, requestedPasses) &&
+        ((!NVNGXProxy::IsDx12Inited() && !NVNGXProxy::InitDx12(device)) || !DlssNr::Proxy::Context::Available()))
     {
         nr.failed = true;
         nr.reason = "the NVIDIA NGX driver does not provide Neural Rendering";
@@ -934,6 +936,58 @@ auto DlssNr_Dx12::State::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
             LOG_INFO("DLSS-NR pass borrowing: {}", lastBorrowStatus);
         }
     }
+    // A model comparison (Compare with a model as the other side): one pass of the other model on the same input, with
+    // pass 1's settings. Its own feature and history; the picture is put together after the resolve below.
+    const unsigned int compareModel = passConfig ? 0u : DlssNr::Profiles::CompareModel(cfg);
+    auto& compareContext = nr.models[DlssNr::MaxPassCount];
+    ID3D12Resource* compareAnswer = nullptr;
+    const char* compareNote = "";
+    if (compareModel == 0)
+    {
+        compareContext.RetryAfterFailure();
+        ParkNrResource(nr.compareAnswer);
+        ParkNrResource(nr.compareColor);
+    }
+    else if (spatial || borrowing)
+        compareNote = "not with peripheral compression or pass borrowing";
+    else if (result != NVSDK_NGX_Result_Success || finalAnswer == nullptr)
+        compareNote = "the picture's own passes did not run";
+    else
+    {
+        if (nr.compareAnswer == nullptr)
+            nr.compareAnswer = CreateScratch(device, nr.output->GetDesc().Format, modelWidth, modelHeight);
+        if (nr.compareAnswer == nullptr)
+            compareNote = "its texture could not be allocated";
+        else
+        {
+            const bool hadFeature = compareContext.HasFeature();
+            bool evaluated = false;
+            modelFrame.color = modelInput;
+            modelFrame.output = nr.compareAnswer;
+            DlssNr::Nvfp4::BeginEvaluation(compareModel);
+            const auto compared =
+                compareContext.Run(cmdList, device, modelFrame, DlssNr::Profiles::CompareSettings(cfg),
+                                   frame.SubmissionEpoch, &evaluated);
+            DlssNr::Nvfp4::EndEvaluation(cmdList);
+            if (!hadFeature && compareContext.HasFeature())
+                NrPassBorrow::Reset();
+            if (compared != NVSDK_NGX_Result_Success)
+                compareNote = "the other model could not be set up or run (Retry tries again)";
+            else if (!evaluated)
+                compareNote = "the other model is being set up";
+            else if (!DlssNr::Nvfp4::OursRan(true))
+                compareNote = "the other model did not run";
+            else
+            {
+                ++evaluation;
+                compareAnswer = nr.compareAnswer;
+                Barrier(cmdList, compareAnswer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            }
+        }
+    }
+    unsigned int compareShown = 0;
+
     // Buffers pass borrowing no longer uses (a resolution change replaces them) and the 4-bit feed-forward buffers of
     // picture sizes no longer in use: this frame's command list and earlier ones may still refer to them, so they are
     // freed only once the GPU has finished everything recorded so far.
@@ -1139,6 +1193,29 @@ auto DlssNr_Dx12::State::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
 
+        // The comparison's picture: the same resolve from the other model's answer with the sides exchanged, so the
+        // other model's picture lies where the main resolve shows the original one. That part is copied over below.
+        bool compareResolved = false;
+        if (compareAnswer != nullptr)
+        {
+            if (!enlargementReady || superDownOk || resolveProxy != ordinaryProxy || resolveAnswer != ordinaryAnswer ||
+                resolveParams.DebugView != 0 || resolveParams.CompareMode == 0)
+                compareNote = "not with a debug view, supersampling or DLSS enlargement";
+            else
+            {
+                if (nr.compareColor == nullptr)
+                    nr.compareColor = CreateScratch(device, desc.Format, width, height);
+                auto compareParams = resolveParams;
+                compareParams.CompareSwap ^= 1u;
+                compareResolved = nr.compareColor != nullptr &&
+                                  shader.DispatchPass(cmdList, compareParams, resolveProxy, compareAnswer,
+                                                      resolveOriginal, encoded.exposure, nullptr, nr.compareColor,
+                                                      nullptr);
+                if (!compareResolved)
+                    compareNote = "its picture could not be made";
+            }
+        }
+
         const bool resolved =
             enlargementReady && shader.DispatchPass(cmdList, resolveParams, resolveProxy, resolveAnswer,
                                                     resolveOriginal, encoded.exposure, nullptr, resolveTarget, nullptr);
@@ -1163,6 +1240,35 @@ auto DlssNr_Dx12::State::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
             // warming up. Restore it before the common end-of-frame transition.
             Barrier(cmdList, nr.hdrCopy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        }
+
+        if (compareResolved && resolved)
+        {
+            // The shader's own rule: the original picture is where (x + 0.5) / width < split, unless swapped.
+            const float split =
+                resolveParams.CompareMode == 1 ? 0.5f : std::clamp(resolveParams.CompareSplit, 0.0f, 1.0f);
+            const auto boundary =
+                (unsigned int) std::clamp(std::ceil(split * (float) width - 0.5f), 0.0f, (float) width);
+            const bool otherOnLeft = resolveParams.CompareSwap == 0;
+            D3D12_BOX box { otherOnLeft ? 0u : boundary, 0u, 0u, otherOnLeft ? boundary : (unsigned int) width,
+                            (unsigned int) height, 1u };
+            if (box.right > box.left)
+            {
+                D3D12_TEXTURE_COPY_LOCATION from {}, to {};
+                from.pResource = nr.compareColor;
+                from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                to.pResource = target;
+                to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                Barrier(cmdList, nr.compareColor, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                        D3D12_RESOURCE_STATE_COPY_SOURCE);
+                const D3D12_RESOURCE_STATES priorTargetState = targetState;
+                TransitionTarget(D3D12_RESOURCE_STATE_COPY_DEST);
+                cmdList->CopyTextureRegion(&to, box.left, 0, 0, &from, &box);
+                TransitionTarget(priorTargetState);
+                Barrier(cmdList, nr.compareColor, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            }
+            compareShown = compareModel;
         }
 
         if (superDownOk)
@@ -1208,6 +1314,24 @@ auto DlssNr_Dx12::State::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
                       NgxResultName((unsigned int) result));
         }
     }
+
+    if (!passConfig)
+    {
+        const char* note = compareModel != 0 && compareShown == 0 ? compareNote : "";
+        if (compareShown != DlssNr::Nvfp4::ComparisonShown() || DlssNr::Nvfp4::ComparisonNote() != note)
+        {
+            if (compareShown != 0)
+                LOG_INFO("DLSS-NR model comparison: the other side shows {}", DlssNr::Nvfp4::ModelName(compareShown));
+            else if (compareModel != 0)
+                LOG_INFO("DLSS-NR model comparison: {} is not shown: {}", DlssNr::Nvfp4::ModelName(compareModel), note);
+            else
+                LOG_INFO("DLSS-NR model comparison: off");
+        }
+        DlssNr::Nvfp4::SetComparison(compareShown, note);
+    }
+    if (compareAnswer != nullptr)
+        Barrier(cmdList, compareAnswer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     // Restore all intermediate surfaces to the UAV state expected by the next frame.
     MakeModelWritable(nr.output);

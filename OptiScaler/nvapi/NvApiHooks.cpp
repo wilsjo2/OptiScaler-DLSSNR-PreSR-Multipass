@@ -322,6 +322,11 @@ void NvApiHooks::Hook(HMODULE nvapiModule)
             LOG_ERROR("Failed to hook NvAPI_QueryInterface: {:X}", detourResult);
             o_NvAPI_QueryInterface = nullptr;
         }
+        else
+        {
+            // The INT8 models' pass host launches its kernels through the driver's own entry, past every layer.
+            DlssNr::Nvfp4::SetDriverQuery((void*) o_NvAPI_QueryInterface);
+        }
     }
 }
 

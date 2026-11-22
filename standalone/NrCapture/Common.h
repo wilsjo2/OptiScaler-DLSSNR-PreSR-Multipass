@@ -64,13 +64,38 @@ struct Settings {
     // (sets 3 and 4). No 4-bit kernel runs in such a pass. Run as ONE Cinematic pass at intensity, tone and structure 1,
     // like the 4-bit ones.
     static constexpr unsigned ModelAFp8TwoDouble = 17, ModelAFp8TwoTriple = 18, ModelAFp8TwoDouble2 = 19,
-                              ModelAFp8TwoTriple2 = 20, ModelLast = 20;
-    static constexpr bool IsPassInOne(unsigned preset) { return preset == ModelANvfp4TwoTriple || preset == ModelANvfp4TwoDouble; }
+                              ModelAFp8TwoTriple2 = 20;
+    // The same four looks with their 4K weights: NVFP4 2xPass-in-one 4K (set 10), NVFP4 3xPass-in-one 4K (set 11), FP8
+    // 2xPass-in-one 4K (FP8 set 5), FP8 3xPass-in-one 4K (FP8 set 6).
+    static constexpr unsigned ModelANvfp4TwoDouble4k = 21, ModelANvfp4TwoTriple4k = 22, ModelAFp8TwoDouble4k = 23,
+                              ModelAFp8TwoTriple4k = 24;
+    // INT8 models: Model A with INT8 weights of its own and INT8 kernels of ours, run wholly on the own pass host
+    // (nvfp4/NrHost.h; RTX 30, 40 and 50 series, no NVIDIA NR runtime launch). Original - INT8 (set 1): the look of
+    // Model A. INT8 2xPass-in-one (set 2): one Cinematic pass at intensity, tone and structure 1 with the look of
+    // two. Files: nvfp4/int8.
+    static constexpr unsigned ModelAInt8 = 25, ModelAInt8TwoDouble = 26, ModelLast = 26;
+    static constexpr bool IsPassInOne(unsigned preset)
+    {
+        return preset == ModelANvfp4TwoTriple || preset == ModelANvfp4TwoDouble || preset == ModelANvfp4TwoDouble4k ||
+               preset == ModelANvfp4TwoTriple4k;
+    }
     static constexpr bool IsNvfp4(unsigned preset) { return preset == ModelANvfp4 || IsPassInOne(preset); }
-    static constexpr bool IsFp8(unsigned preset) { return preset >= ModelAFp8TwoDouble && preset <= ModelAFp8TwoTriple2; }
-    static constexpr bool IsModel(unsigned preset) { return preset <= 3 || IsNvfp4(preset) || IsFp8(preset); }
-    static constexpr unsigned Nvfp4Set(unsigned preset) { return IsPassInOne(preset) ? preset - 3 : 0; } // 0: the tab's choice
-    static constexpr unsigned Fp8Set(unsigned preset) { return IsFp8(preset) ? preset - 16 : 0; }      // nvfp4/fp8/fp8_set<n>
+    static constexpr bool IsFp8(unsigned preset)
+    {
+        return (preset >= ModelAFp8TwoDouble && preset <= ModelAFp8TwoTriple2) || preset == ModelAFp8TwoDouble4k ||
+               preset == ModelAFp8TwoTriple4k;
+    }
+    static constexpr bool IsInt8(unsigned preset) { return preset >= ModelAInt8 && preset <= ModelAInt8TwoDouble; }
+    static constexpr unsigned Int8Set(unsigned preset) { return IsInt8(preset) ? preset - (ModelAInt8 - 1) : 0; } // nvfp4/int8/int8_set<n>
+    static constexpr bool IsModel(unsigned preset) { return preset <= 3 || IsNvfp4(preset) || IsFp8(preset) || IsInt8(preset); }
+    static constexpr unsigned Nvfp4Set(unsigned preset) // 0: the tab's choice
+    {
+        return preset == ModelANvfp4TwoDouble4k ? 10 : preset == ModelANvfp4TwoTriple4k ? 11 : IsPassInOne(preset) ? preset - 3 : 0;
+    }
+    static constexpr unsigned Fp8Set(unsigned preset) // nvfp4/fp8/fp8_set<n>
+    {
+        return preset == ModelAFp8TwoDouble4k ? 5 : preset == ModelAFp8TwoTriple4k ? 6 : IsFp8(preset) ? preset - 16 : 0;
+    }
     std::filesystem::path runtime;
     std::filesystem::path runtimeChosen; // The DLL last picked or typed in the box: kept even in another package.
     DlssNr::ModelSettings model{0, 0, 1, 1, 1, -1, true}; // Match OptiScaler's first-pass defaults.
@@ -110,6 +135,12 @@ struct Settings {
     bool showFoveation = false; // Session-only wireframe preview of one pass's actual mapping.
     unsigned foveationPreviewPass = 0;
     unsigned compare = 0; // 0 processed, 1 original, 2 wipe, 3 side by side (same captured frame).
+    // Wipe and side by side: -1 puts the original picture on the other side; a model (a ModelSettings::preset value)
+    // puts there the same passes run with that model in place of each pass's own (ComparisonSide).
+    int compareModel = -1;
+    // Not saved. The comparison side's settings carry which kernel layers the picture's own passes need, so that both
+    // sides ask for the same layers (bit 0: a 4-bit model, 1: a pass-in-one 4-bit model, 2: an FP8 model).
+    unsigned keepLayers = 0;
     bool enabled = true;
     bool estimateMotion = false;
     // Experimental: the transformer's feed-forward layers run as NVFP4 kernels of ours (RTX 50 series; nvfp4/NrFfnV2.h).
@@ -136,6 +167,25 @@ struct Settings {
     unsigned maxFps = 0; // Processing cap; 0 follows available capture/GPU cadence.
     unsigned captureBackend = 0; // 0 WGC, 1 DXGI Desktop Duplication (screens only).
     unsigned frameGeneration = 1; // Total multiplier: 1 = off; 2..4 require runtime/hardware support.
+    // "Pacing and latency" tab.
+    // How the output reaches the screen with DLSS FG off: 0 = overlay surface (DirectComposition; the original way),
+    // 1 = flip window: a flip-model swapchain on the output window, which NVIDIA's driver Smooth Motion can take.
+    // DLSS FG always uses its own flip-model swapchain. Takes effect when capture starts.
+    unsigned presentMode = 0;
+    // 0 = standard pacing (the original: the capture and the processing each keep their own timer at the target FPS);
+    // 1 = low latency: each new source frame is copied and processed as soon as it arrives (the target FPS still
+    // caps the average, with 10 % room, without holding back frames that arrive unevenly: CapturePacer), and the newest
+    // frame is taken again right before recording.
+    unsigned latencyMode = 0;
+    // 0..0.9, "Steady edit": the model's edit (its answer minus its input) is blended with the previous frame's edit,
+    // moved along the estimated motion; where the two differ a lot (movement the vectors miss, a new scene) the new edit
+    // is kept. 0 = off (the original). Needs "Estimate motion"; not with foveation, with passes that have their own
+    // resolution settings, nor with an edit interval above 1 (the tab's note says so). With "Picture first" it runs on
+    // the late evaluation.
+    float editSmoothing = 0;
+    // Motion estimation keeps zero motion where it matches nearly as well as the best displacement (by this share of
+    // the patch error). 0 = the original rule (zero wins only ties). Reduces vectors jittering on a still picture.
+    float motionZeroBias = 0;
     double ProcessingFps() const { return double(maxFps) / std::max(1u, frameGeneration); }
     unsigned HdrMode() const { constexpr unsigned modes[]{3, 1, 0, 4, 2}; return modes[std::min(tone, 4u)]; }
     DlssNr::ModelSettings PassModel(unsigned pass) const {
@@ -171,19 +221,44 @@ struct Settings {
     bool Nvfp4Pass() const {
         for (unsigned pass = 0; pass < std::min(passes, MaxPasses); ++pass)
             if (IsNvfp4(PassModel(pass).preset) && !Shortcut(pass).reapply) return true;
-        return false;
+        return (keepLayers & 1) || (ComparingModels() && IsNvfp4(unsigned(compareModel)));
     }
     // An active pass that runs the network has an FP8 pass-in-one model.
     bool Fp8Pass() const {
         for (unsigned pass = 0; pass < std::min(passes, MaxPasses); ++pass)
             if (IsFp8(PassModel(pass).preset) && !Shortcut(pass).reapply) return true;
-        return false;
+        return (keepLayers & 4) || (ComparingModels() && IsFp8(unsigned(compareModel)));
     }
     // An active pass that runs the network has a pass-in-one model.
     bool Nvfp4PassInOne() const {
         for (unsigned pass = 0; pass < std::min(passes, MaxPasses); ++pass)
             if (Nvfp4Set(PassModel(pass).preset) && !Shortcut(pass).reapply) return true;
+        return (keepLayers & 2) || (ComparingModels() && Nvfp4Set(unsigned(compareModel)));
+    }
+    // An active pass that runs the network has an INT8 model.
+    bool Int8Pass() const {
+        for (unsigned pass = 0; pass < std::min(passes, MaxPasses); ++pass)
+            if (IsInt8(PassModel(pass).preset) && !Shortcut(pass).reapply) return true;
         return false;
+    }
+    // Wipe or side by side with a model on the other side (not while the edit is hidden or the original is shown).
+    bool ComparingModels() const { return compareModel >= 0 && IsModel(unsigned(compareModel)) && (compare == 2 || compare == 3) && applyModel && enabled; }
+    // The other side of a model comparison: these settings with every pass's model replaced, shown whole.
+    Settings ComparisonSide() const {
+        Settings side = *this;
+        side.keepLayers = (Nvfp4Pass() ? 1u : 0u) | (Nvfp4PassInOne() ? 2u : 0u) | (Fp8Pass() ? 4u : 0u);
+        side.model.preset = unsigned(compareModel);
+        for (auto& pass : side.passOverrides) if (pass) pass->preset = unsigned(compareModel);
+        side.compare = 0; side.compareModel = -1; side.showFoveation = false;
+        return side;
+    }
+    // The picture's own side of a model comparison: shown whole; the two are put together afterwards.
+    Settings PictureSide() const {
+        Settings side = *this;
+        const unsigned other = unsigned(compareModel);
+        side.keepLayers = (IsNvfp4(other) ? 1u : 0u) | (Nvfp4Set(other) ? 2u : 0u) | (IsFp8(other) ? 4u : 0u);
+        side.compare = 0; side.compareModel = -1;
+        return side;
     }
     bool operator==(const Settings&) const = default;
 };

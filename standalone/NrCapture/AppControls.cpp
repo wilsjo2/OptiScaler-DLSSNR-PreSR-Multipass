@@ -80,6 +80,21 @@ void App::ShowPass() {
         "\r\nTransformer feed-forward (4K and above): " + Nvfp4Status() +
         ".\r\nFused blocks: " + Nvfp4SwinStatus() + ".\r\nRest of the network: " + Nvfp4NetStatus() +
         ".\r\nKernel options: <family>.<group>=<number>, separated by spaces (families split, vit, prepost).").c_str());
+    // Pacing and latency tab: what of its choices cannot take effect with the other settings, said plainly.
+    std::wstring pacing;
+    if (value.presentMode == 1 && value.frameGeneration > 1)
+        pacing += L"Flip window is not in use while DLSS FG is on: the DLSS FG swapchain presents. ";
+    if ((value.editSmoothing > 0 || value.motionZeroBias > 0) && !value.estimateMotion)
+        pacing += L"Steady edit and Keep still areas still are not in use: Estimate motion is off. ";
+    else if (value.editSmoothing > 0) {
+        if (value.HasPassResolutionOverrides()) pacing += L"Steady edit is not in use: a pass has its own resolution settings. ";
+        else if (value.PassResolution(0).spatial.enabled) pacing += L"Steady edit is not in use with foveation. ";
+        else if (value.editInterval > 1) pacing += L"Steady edit is not in use with an edit interval above 1 (the model does not run every frame). ";
+        else pacing += L"Steady edit is in use. ";
+    }
+    if (value.latencyMode == 1 && value.frameGeneration > 1)
+        pacing += L"Low latency with DLSS FG: Reflex and the newest frame are used, but FG still holds one real frame back.";
+    SetWindowTextW(Control(PacingNote), pacing.c_str());
 }
 void App::ShowSettings() {
     Settings value; { std::lock_guard lock(mutex); value = settings; }
@@ -120,6 +135,8 @@ void App::ShowSettings() {
     check(Nvfp4Swin32, value.nvfp4Swin & 1); check(Nvfp4Swin64, value.nvfp4Swin & 2); check(Nvfp4Swin128, value.nvfp4Swin & 4); check(Nvfp4Swin256, value.nvfp4Swin & 8);
     bits(Nvfp4SplitFfwd, 6, value.nvfp4Split); bits(Nvfp4VitQkv, 3, value.nvfp4Vit); bits(Nvfp4Pre, 2, value.nvfp4PrePost);
     SetWindowTextW(Control(Nvfp4Options), Wide(value.nvfp4Net).c_str());
+    select(PresentModeBox, std::min(value.presentMode, 1u)); select(LatencyModeBox, std::min(value.latencyMode, 1u));
+    text(EditSmoothingBox, value.editSmoothing); text(MotionZeroBiasBox, value.motionZeroBias);
     ShowPass(); // the controls of the pass being edited, and the notes
 }
 void App::CreateControls() {
@@ -164,7 +181,7 @@ void App::CreateControls() {
     label(L"Target FPS (0 = uncapped)", 590, 148, 230);
     Add(L"EDIT", std::to_wstring(settings.maxFps).c_str(), WS_BORDER | ES_NUMBER | WS_TABSTOP, 835, 145, 110, 25, FpsLimit);
     Add(WC_TABCONTROLW, L"", WS_TABSTOP | WS_CLIPSIBLINGS, 16, 188, 934, 440, Tabs);
-    for (auto text : {L"Model passes", L"Input and resolution", L"Composition", L"HDR output", L"Inspect and compare", L"Halo suppression", L"Foveation", L"Faster passes", L"NVFP4", L"Presets"}) {
+    for (auto text : {L"Model passes", L"Input and resolution", L"Composition", L"HDR output", L"Inspect and compare", L"Halo suppression", L"Foveation", L"Faster passes", L"NVFP4", L"Presets", L"Pacing and latency"}) {
         TCITEMW item{}; item.mask = TCIF_TEXT; item.pszText = const_cast<wchar_t*>(text);
         TabCtrl_InsertItem(Control(Tabs), TabCtrl_GetItemCount(Control(Tabs)), &item);
     }
@@ -182,12 +199,9 @@ void App::CreateControls() {
     combo(L"Style", Style, {L"Standard", L"Natural", L"Cinematic"}, settings.model.style, 36, 438);
     // In the order of ModelChoices. Saved values are the runtime preset (0 auto, 1 = Model A, 2 = Model B, 3) or
     // Settings::ModelANvfp4 (4), so saved profiles keep their meaning.
-    combo(L"Model", Preset, {L"Automatic", L"Model A (Original)", L"Model A - NVFP4 (4-bit kernels, RTX 50 series)",
-        L"NVFP4 2xPass-in-one", L"NVFP4 3xPass-in-one",
-        L"FP8 2xPass-in-one (RTX 40 and 50 series)", L"FP8 3xPass-in-one (RTX 40 and 50 series)",
-        L"FP8 2xPass-in-one v2 (RTX 40 and 50 series)", L"FP8 3xPass-in-one v2 (RTX 40 and 50 series)",
-        L"Model B (Optimized, NR 310.9.16 or newer)", L"Preset 3 (legacy)"},
-        unsigned(std::find(std::begin(ModelChoices), std::end(ModelChoices), settings.model.preset) - std::begin(ModelChoices)), 36, 508);
+    combo(L"Model", Preset, {}, 0, 36, 508);
+    for (auto name : ModelNames) SendMessageW(Control(Preset), CB_ADDSTRING, 0, (LPARAM)name);
+    SendMessageW(Control(Preset), CB_SETCURSEL, std::find(std::begin(ModelChoices), std::end(ModelChoices), settings.model.preset) - std::begin(ModelChoices), 0);
     label(L"More passes increase GPU time and memory use.", 36, 582);
     edit(L"Model intensity (0-2)", Intensity, settings.model.intensity, 506, 235);
     edit(L"Local structure (0-2)", Structure, settings.model.localStructure, 506, 280);
@@ -251,8 +265,12 @@ void App::CreateControls() {
     box(L"Hold captured frame", HoldFrame, false, 36, 232);
     box(L"Apply model edit (uncheck to keep NR running hidden)", ApplyModel, true, 36, 278);
     combo(L"Comparison", Compare, {L"Processed", L"Original", L"Wipe", L"Side by side"}, 0, 36, 330);
-    combo(L"Debug view", DebugView, {L"Off", L"Proxy (model input)", L"Raw model output", L"Difference (20x)"}, 0, 36, 415);
-    Add(L"STATIC", L"Hold and inspect settings are session-only.\r\nThe output stays on behind these controls.\r\nCtrl+Alt+End stops capture.", 0, 36, 519, 410, 75, 0);
+    // What a wipe or side by side puts beside the picture: the original, or the same passes run with another model.
+    combo(L"Other side of a wipe or side by side", CompareModelBox, {L"Original picture"}, 0, 36, 400);
+    for (auto name : ModelNames) SendMessageW(Control(CompareModelBox), CB_ADDSTRING, 0, (LPARAM)name);
+    combo(L"Debug view", DebugView, {L"Off", L"Proxy (model input)", L"Raw model output", L"Difference (20x)"}, 0, 36, 470);
+    Add(L"STATIC", L"A model on the other side: every pass runs with it instead of its own model, on the left (swap: right). Side by side then shows the middle of both pictures at full size, without labels.", 0, 36, 540, 410, 80, 0);
+    Add(L"STATIC", L"Hold and inspect settings are session-only. The output stays on behind these controls. Ctrl+Alt+End stops capture.", 0, 506, 548, 410, 60, 0);
     slider(L"Wipe split", CompareSplit, settings.compareSplit, 0, 100, 506, 234);
     slider(L"Side-by-side zoom", CompareZoom, settings.compareZoom, 100, 200, 506, 312);
     box(L"Swap comparison sides", CompareSwap, settings.compareSwap, 506, 393);
@@ -346,6 +364,18 @@ void App::CreateControls() {
     Add(L"BUTTON", L"Enable skin settings optimisation", BS_AUTOCHECKBOX | WS_TABSTOP, 506, 330, 410, 24, CalibrateSkin);
     Add(L"STATIC", L"", 0, 506, 360, 410, 118, CalibrateNote);
     Add(L"STATIC", L"Holds the current frame and renders the preset to match on it (all of its passes). Then it tries values of Model intensity, Local structure and Local tone of the pass chosen under \"Edit pass\", and of Detail and Colour strength, until the picture is as close to that preset's as it gets, and leaves the best values in the controls. Skin settings optimisation adds the four skin / environment sliders (switched on) and Highlight guard.\r\n\r\nOther enabled passes keep running as set. Capture must be running.", 0, 506, 482, 410, 134, 0);
+    buildingPage = 10;
+    // Settings::presentMode, latencyMode, editSmoothing, motionZeroBias. The first takes effect when capture starts.
+    combo(L"Presentation with DLSS FG off (set before Start capture)", PresentModeBox,
+          {L"Overlay surface (original)", L"Flip window (for NVIDIA Smooth Motion)"}, std::min(settings.presentMode, 1u), 36, 232);
+    combo(L"Pacing", LatencyModeBox, {L"Standard (original)", L"Low latency (each new frame at once)"}, std::min(settings.latencyMode, 1u), 36, 296);
+    edit(L"Steady edit (0 = off, up to 0.9)", EditSmoothingBox, settings.editSmoothing, 36, 368);
+    edit(L"Keep still areas still (0 = off, up to 0.5)", MotionZeroBiasBox, settings.motionZeroBias, 36, 413);
+    Add(L"STATIC", L"Steady edit blends the model's change with the previous frame's, moved along the estimated motion, so the effect flickers less (0.7 about halves it on still areas); where the picture itself changed, the new change is used. Keep still areas still makes the motion estimate prefer \"no movement\" where that fits nearly as well; in tests it changed flicker very little, so leave it at 0 unless still areas shimmer. Both need Estimate motion (Input and resolution tab).",
+        0, 36, 458, 410, 160, 0);
+    Add(L"STATIC", L"Smooth Motion (NVIDIA driver frame generation): DLSS FG Off, Flip window, and Smooth Motion on for display_filter.exe in the NVIDIA App (Graphics, Program settings), or \"smooth_motion_profile.exe on\" from an administrator prompt. The game itself should not use Smooth Motion. Standard pacing with Target FPS at the game's rate gives it the most even frames; Low latency is sooner but passes on uneven arrival.\r\n\r\nLow latency: each captured frame is processed as soon as it arrives (no separate timers), and the newest frame is taken again just before recording. Target FPS still caps the average (10 % room), without holding back frames that arrive unevenly; set it at or above the game's rate, or 0.\r\n\r\nThe model's GPU time is also in the delay: \"Picture first\" (Faster passes tab) takes it out, at one frame of edit lag. DLSS FG holds one real frame back to make the one in between; that cannot be removed.",
+        0, 506, 232, 410, 300, 0);
+    Add(L"STATIC", L"", 0, 506, 540, 410, 76, PacingNote);
     buildingPage = -1;
     Add(L"STATIC", status.c_str(), 0, 16, 647, 935, 83, Status);
     ListPresetNames(); ShowPass(); ShowPage(); ListSources();

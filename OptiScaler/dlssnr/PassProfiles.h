@@ -18,13 +18,23 @@ inline unsigned int RequestedPreset(const Config& cfg, unsigned int pass)
     return preset;
 }
 
-// Whether any of the passes asks for one of DlssNr::Nvfp4's models.
+// The model a comparison puts beside the picture (the Compare control's "Other side"); 0: the original picture.
+inline unsigned int CompareModel(const Config& cfg)
+{
+    const unsigned int model = cfg.DlssNrCompareModel.value_or_default();
+    const bool known = (model >= 1 && model <= 2) || Nvfp4::IsKnown(model);
+    return cfg.DlssNrCompare.value_or_default() != 0 && known ? model : 0u;
+}
+
+// Whether any of the passes (or the comparison) asks for one of DlssNr::Nvfp4's models that run as layers over the NR
+// runtime's launches. (An INT8 model runs on the own pass host and needs none of them.)
 inline bool WantsNvfp4(const Config& cfg, unsigned int passes)
 {
+    const auto layered = [](unsigned int preset) { return Nvfp4::IsNvfp4(preset) && !Nvfp4::IsInt8(preset); };
     for (unsigned int pass = 0; pass < passes; ++pass)
-        if (Nvfp4::IsNvfp4(RequestedPreset(cfg, pass)))
+        if (layered(RequestedPreset(cfg, pass)))
             return true;
-    return false;
+    return layered(CompareModel(cfg));
 }
 
 inline ModelSettings PassSettings(const Config& cfg, unsigned int pass)
@@ -57,6 +67,16 @@ inline ModelSettings PassSettings(const Config& cfg, unsigned int pass)
     result.localStructure = bounded(result.localStructure, 1.0f, 0.0f);
     result.localTone = bounded(result.localTone, pass == 0 ? 1.0f : 0.0f, 0.0f);
     result.skinStructure = bounded(result.skinStructure, -1.0f, -1.0f);
+    return result;
+}
+
+// The comparison's pass: the other model with pass 1's settings.
+inline ModelSettings CompareSettings(const Config& cfg)
+{
+    ModelSettings result = PassSettings(cfg, 0);
+    const unsigned int model = CompareModel(cfg);
+    result.requested = Nvfp4::IsNvfp4(model) ? model : 0u;
+    result.preset = result.requested ? 1u : std::min(model, 3u);
     return result;
 }
 
@@ -116,6 +136,15 @@ inline BorrowChoice PassBorrow(const Config& cfg, unsigned int pass)
     const auto& extra = cfg.DlssNrPassOverrides[pass - 1];
     return { extra.borrowTransformer.value_or(false), extra.borrowBelow.value_or(false),
              extra.borrowLevel.value_or(32u) };
+}
+
+// Whether any pass that runs a network needs the NR runtime (every model but the INT8 ones).
+inline bool NeedsRuntime(const Config& cfg, unsigned int passes)
+{
+    for (unsigned int pass = 0; pass < passes; ++pass)
+        if (!PassReapplies(cfg, pass) && !Nvfp4::IsInt8(RequestedPreset(cfg, pass)))
+            return true;
+    return false;
 }
 
 // A re-applying pass runs no network, so its resolution profile is ignored.

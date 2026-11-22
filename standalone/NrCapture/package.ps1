@@ -31,6 +31,9 @@ if (Test-Path -LiteralPath $target) {
 }
 New-Item -ItemType Directory -Path $target -Force | Out-Null
 Copy-Item -LiteralPath $binary -Destination (Join-Path $target 'display_filter.exe') -Force
+# The driver Smooth Motion helper the Pacing and latency tab names (tools/SmoothMotionProfile.cpp), when it was built.
+$tool = Join-Path $BuildDirectory 'Release/smooth_motion_profile.exe'
+if (Test-Path -LiteralPath $tool) { Copy-Item -LiteralPath $tool -Destination (Join-Path $target 'smooth_motion_profile.exe') -Force }
 # No documents or licence/attribution files go into the package; ones an earlier build left are removed.
 foreach ($item in @(Get-ChildItem -LiteralPath $target -Recurse -File -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -like '*.md' -or $_.Name -eq 'LICENSE' -or $_.Name -like '*license*.txt' -or $_.Name -like '*attribution*.txt' })) {
@@ -147,11 +150,13 @@ if ($Nvfp4Assets -and (Test-Path -LiteralPath (Join-Path $Nvfp4Assets 'ffn_v2.cu
     }
     # Optional: the NVFP4 fused-block kernels and weights of Model A.
     # ... and of the rest of Model A's pass: split blocks, transformer
-    # attention, input and output block, and the FP8 models' records (fp8/fp8_set<n>.*). A family's folder is copied
-    # whole when its manifest is there.
-    foreach ($family in @('swin4', 'split4', 'vit4', 'prepost4', 'fp8')) {
+    # attention, input and output block, the FP8 models' records (fp8/fp8_set<n>.*) and the own pass host (host/: its
+    # plan, kernel manifests and cubins; RTX 30 and 40 run the FP8 models on it). A family's folder is copied whole when
+    # its manifest is there.
+    foreach ($family in @('swin4', 'split4', 'vit4', 'prepost4', 'fp8', 'host', 'int8')) {
         $folder = Join-Path $Nvfp4Assets $family
         if (!(Test-Path -LiteralPath (Join-Path $folder "$family.txt") -PathType Leaf) -and
+            !(Test-Path -LiteralPath (Join-Path $folder 'modelA_fp8.plan') -PathType Leaf) -and
             !(Get-ChildItem -Path $folder -Filter "${family}_set*.txt" -File -ErrorAction SilentlyContinue)) { continue }
         $familyTarget = Join-Path $target "nvfp4/$family"
         New-Item -ItemType Directory -Path $familyTarget -Force | Out-Null

@@ -50,6 +50,8 @@ bool DlssNr_Dx12::State::PrepareRunModels(ID3D12GraphicsCommandList* cmdList, ID
             ParkNrResource(nr.motionSmall);
             ParkNrResource(nr.outputNative);
             ParkNrResource(nr.activeColor);
+            ParkNrResource(nr.compareAnswer);
+            ParkNrResource(nr.compareColor);
             nr.passScratchFailed = false;
         }
     }

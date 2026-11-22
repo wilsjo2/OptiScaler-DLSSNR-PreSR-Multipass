@@ -43,6 +43,8 @@ void App::ReadControls() {
     auto choice = [&](int id) { return (unsigned)SendMessageW(Control(id), CB_GETCURSEL, 0, 0); };
     next.captureBackend = choice(Backend);
     next.frameGeneration = choice(FgMode) + 1;
+    next.presentMode = std::min(choice(PresentModeBox), 1u); next.latencyMode = std::min(choice(LatencyModeBox), 1u);
+    next.editSmoothing = number(EditSmoothingBox, 0, .9f); next.motionZeroBias = number(MotionZeroBiasBox, 0, .5f);
     auto model = next.PassModel(selectedPass);
     next.strength = number(Strength, 0, 2); model.intensity = number(Intensity, 0, 2);
     next.referenceWhiteNits = number(ReferenceWhite, 0, 10000);
@@ -174,6 +176,10 @@ void App::ReadControls() {
     next.tone = (unsigned)SendMessageW(Control(Codec), CB_GETCURSEL, 0, 0);
     next.passes = 1 + (unsigned)SendMessageW(Control(Passes), CB_GETCURSEL, 0, 0);
     next.compare = (unsigned)SendMessageW(Control(Compare), CB_GETCURSEL, 0, 0);
+    {   // 0: the original picture; then the models in the order of ModelChoices.
+        const auto other = SendMessageW(Control(CompareModelBox), CB_GETCURSEL, 0, 0);
+        next.compareModel = other >= 1 && size_t(other) <= std::size(ModelChoices) ? int(ModelChoices[other - 1]) : -1;
+    }
     next.passes = std::clamp(next.passes, 1u, next.unlockPasses ? Settings::MaxPasses : 2u);
     SaveSettings(next);
     { std::lock_guard lock(mutex); settings = next; }
@@ -262,7 +268,7 @@ void App::StartCapture() {
         throw std::runtime_error("DXGI captures whole screens. Select a Screen source or choose Windows Graphics Capture.");
     if (worker.joinable()) { SetEvent(stop.value); worker.join(); }
     ResetEvent(stop.value); Settings current; { std::lock_guard lock(mutex); current = settings; }
-    for (int id : {Sources, Refresh, RuntimePath, Browse, Start, Backend, FgMode}) EnableWindow(Control(id), FALSE);
+    for (int id : {Sources, Refresh, RuntimePath, Browse, Start, Backend, FgMode, PresentModeBox}) EnableWindow(Control(id), FALSE);
     worker = std::jthread([this, source = sources[selection], current] { Run(source, current); });
 }
 LRESULT App::Message(UINT m, WPARAM w, LPARAM l) {
@@ -273,7 +279,7 @@ LRESULT App::Message(UINT m, WPARAM w, LPARAM l) {
         }
         if (m == StatusMessage) {
             std::lock_guard lock(mutex); SetWindowTextW(Control(Status), status.c_str());
-            if (w) for (int id : {Sources, Refresh, RuntimePath, Browse, Start, Backend, FgMode}) EnableWindow(Control(id), TRUE);
+            if (w) for (int id : {Sources, Refresh, RuntimePath, Browse, Start, Backend, FgMode, PresentModeBox}) EnableWindow(Control(id), TRUE);
             char borrow[256]{}; NrPassBorrow::Status(borrow, sizeof(borrow));
             SetWindowTextW(Control(BorrowStatus), Wide(borrow).c_str());
             return 0;
@@ -339,15 +345,19 @@ LRESULT App::Message(UINT m, WPARAM w, LPARAM l) {
                 if (GetOpenFileNameW(&picker)) SetWindowTextW(Control(RuntimePath), file);
             } else if ((((id >= Strength && id <= LocalTone) || id == ReferenceWhite || id == FpsLimit || id == HighlightGuard ||
                          id == PeakBrightness || id == BlackLevel || id == HaloSuppression ||
-                         id == HaloBrightSuppression || id == HaloRadius || id == ReapplyGain ||
+                         id == HaloBrightSuppression || id == HaloRadius || id == ReapplyGain || id == EditSmoothingBox || id == MotionZeroBiasBox ||
                          id == Nvfp4Options || (id >= FoveationCenterWidth && id <= FoveationShiftY)) && event == EN_KILLFOCUS) ||
                        ((id == Codec || id == Compare || id == Passes || id == Transfer || id == Upscaler || id == InputColour ||
                          id == Downscaler || id == Style || id == Preset || id == DebugView || id == Backend || id == FgMode ||
-                         id == BorrowLevel || id == EditInterval) && event == CBN_SELCHANGE) ||
+                         id == BorrowLevel || id == EditInterval || id == PresentModeBox || id == LatencyModeBox || id == CompareModelBox) && event == CBN_SELCHANGE) ||
                        ((id == Enabled || id == MotionMode || id == SeparateSkin || id == PreviewSkin || id == AutoMask ||
                          id == HoldFrame || id == ApplyModel || id == CompareSwap || id == CompareLabels ||
                          id == FoveationEnabled || id == ShowFoveation || id == Nvfp4Box || (id >= Nvfp4Swin256 && id <= Nvfp4Post)) && event == BN_CLICKED)) {
-                ReadControls(); if (id == Passes || id == FoveationEnabled || id == Preset) ShowPass(); // Preset: the NVFP4 tab says whether it is in use.
+                ReadControls();
+                // Preset: the NVFP4 tab says whether it is in use; the motion and pacing boxes: the pacing tab's note.
+                if (id == Passes || id == FoveationEnabled || id == Preset || id == MotionMode || id == EditSmoothingBox ||
+                    id == MotionZeroBiasBox || id == Transfer || id == FgMode || id == PresentModeBox || id == LatencyModeBox ||
+                    id == EditInterval) ShowPass();
             }
             return 0;
         }

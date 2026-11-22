@@ -131,10 +131,70 @@ float4 BoundPrivateUpscale(uint2 pixel)
     return float4(candidate, 1);
 }
 
+// Catmull-Rom sampling in nine bilinear taps: the kept edit is moved every frame, and bilinear resampling would blur it
+// a little more each time. At a whole-pixel offset (a still picture) it returns the texel itself.
+float4 SampleCatmullRom(Texture2D<float4> image, float2 uv, float2 size)
+{
+    float2 position = uv * size;
+    float2 centre = floor(position - 0.5) + 0.5;
+    float2 f = position - centre;
+    float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    float2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    float2 w3 = f * f * (-0.5 + 0.5 * f);
+    float2 w12 = w1 + w2;
+    float2 p0 = (centre - 1) / size, p3 = (centre + 2) / size, p12 = (centre + w2 / max(w12, 1e-6)) / size;
+    float4 value = 0;
+    value += image.SampleLevel(gLinear, float2(p0.x, p0.y), 0) * w0.x * w0.y;
+    value += image.SampleLevel(gLinear, float2(p12.x, p0.y), 0) * w12.x * w0.y;
+    value += image.SampleLevel(gLinear, float2(p3.x, p0.y), 0) * w3.x * w0.y;
+    value += image.SampleLevel(gLinear, float2(p0.x, p12.y), 0) * w0.x * w12.y;
+    value += image.SampleLevel(gLinear, float2(p12.x, p12.y), 0) * w12.x * w12.y;
+    value += image.SampleLevel(gLinear, float2(p3.x, p12.y), 0) * w3.x * w12.y;
+    value += image.SampleLevel(gLinear, float2(p0.x, p3.y), 0) * w0.x * w3.y;
+    value += image.SampleLevel(gLinear, float2(p12.x, p3.y), 0) * w12.x * w3.y;
+    value += image.SampleLevel(gLinear, float2(p3.x, p3.y), 0) * w3.x * w3.y;
+    return value;
+}
+
+// Mode 23, Settings::editSmoothing ("Steady edit"), at the model's size: gSource = the model's input, gModel = its
+// answer, gOriginal = the kept edit of the frame before (alpha: that frame's input brightness), gMotion = this frame's
+// motion (current to previous, in pixels).
+// gTransferStrength = the weight of the kept edit (0: the answer is passed on unchanged and becomes the kept edit),
+// gColourStrength = the per-channel difference between the two edits at which the kept one is no longer used,
+// gMaxRatio = the change of the input's brightness (moved along the motion) at which it is no longer used: where the
+// input itself changed (film grain, noise, light, motion the vectors missed) the model's new edit is the right one.
+// Target: the answer with the blended edit; keep: the blended edit and the input's brightness, for the next frame.
+void SteadyEdit(uint2 pixel)
+{
+    float4 answer = gModel.Load(int3(pixel, 0));
+    float3 input = SanitizeFinite3(gSource.Load(int3(pixel, 0)).rgb, 0);
+    float brightness = dot(input, float3(0.2126, 0.7152, 0.0722));
+    float3 edit = SanitizeFinite3(answer.rgb, input) - input;
+    float3 result = edit;
+    float weight = 0;
+    if (gTransferStrength > 0) {
+        float2 size = float2(gWidth, gHeight);
+        float2 previous = (pixel + 0.5 + SanitizeFinite3(float3(gMotion.Load(int3(pixel, 0)).xy, 0), 0).xy) / size;
+        if (all(previous >= 0) && all(previous <= 1)) {
+            float4 kept = SampleCatmullRom(gOriginal, previous, size);
+            kept.rgb = SanitizeFinite3(kept.rgb, edit);
+            float3 gap = abs(kept.rgb - edit);
+            float inputChange = abs(brightness - (isfinite(kept.a) ? kept.a : brightness));
+            weight = gTransferStrength * saturate(1 - max(gap.r, max(gap.g, gap.b)) / max(gColourStrength, 1e-4))
+                                       * saturate(1 - inputChange / max(gMaxRatio, 1e-4));
+            result = lerp(edit, kept.rgb, weight);
+        }
+    }
+    gTarget[pixel] = weight > 0 ? float4(max(input + result, 0), answer.a) : answer;
+    gKeep[pixel] = float4(result, brightness);
+}
+
 [numthreads(8, 8, 1)]
 void CaptureColour(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= gWidth || id.y >= gHeight) return;
+    if (gMode == 23) { SteadyEdit(id.xy); return; }
     if (gMode == 20) {
         // Raw encoded stages have already reconstructed to the capture size.
         // Their replace resolve only keeps the model's nonnegative RGB and the

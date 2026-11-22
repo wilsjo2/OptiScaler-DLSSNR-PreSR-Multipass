@@ -18,9 +18,11 @@ public:
             std::max(next + period, started + period - slack);
         rate = fps;
     }
-    void Wait(HANDLE stop, HANDLE capture = nullptr) {
+    void Wait(HANDLE stop, HANDLE capture = nullptr) { WaitUntil(next, stop, capture); }
+    // Until `deadline` (ClockMs), an event, or at most 20 ms.
+    void WaitUntil(double deadline, HANDLE stop, HANDLE capture = nullptr) {
         LARGE_INTEGER due{};
-        due.QuadPart = -std::max<LONGLONG>(1, (LONGLONG)std::ceil((next - ClockMs()) * 10000));
+        due.QuadPart = -std::max<LONGLONG>(1, (LONGLONG)std::ceil((deadline - ClockMs()) * 10000));
         Check(SetWaitableTimer(timer.value, &due, 0, nullptr, nullptr, FALSE) ? S_OK : HRESULT_FROM_WIN32(GetLastError()),
             "Set frame pacing timer");
         HANDLE events[]{stop, timer.value, capture};

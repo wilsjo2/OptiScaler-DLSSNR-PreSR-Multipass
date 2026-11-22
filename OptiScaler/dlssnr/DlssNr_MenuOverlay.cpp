@@ -2,6 +2,7 @@
 
 #include "DlssNr_MenuOverlay.h"
 #include "DlssNr_Status.h"
+#include "NrNvfp4.h"
 #include <shaders/dlssnr/DlssNr_Spatial.h>
 #include <Config.h>
 #include <imgui/imgui.h>
@@ -64,8 +65,16 @@ void RenderNrCompareTags()
 
     // The left side is the untouched frame unless swapped -- matching the shader's
     // showOriginal = (uv.x < split) != swap.
-    const char* leftText = swap ? "DLSS NR : ON" : "DLSS NR : OFF";
-    const char* rightText = swap ? "DLSS NR : OFF" : "DLSS NR : ON";
+    // In a model comparison the two sides carry the names of their models.
+    const char* onText = "DLSS NR : ON";
+    const char* offText = "DLSS NR : OFF";
+    if (const unsigned other = DlssNr::Nvfp4::ComparisonShown())
+    {
+        onText = DlssNr::Nvfp4::ModelName(config->DlssNrPreset.value_or_default());
+        offText = DlssNr::Nvfp4::ModelName(other);
+    }
+    const char* leftText = swap ? onText : offText;
+    const char* rightText = swap ? offText : onText;
 
     ImDrawList* dl = ImGui::GetForegroundDrawList(ImGui::GetMainViewport());
     ImFont* font = ImGui::GetFont();

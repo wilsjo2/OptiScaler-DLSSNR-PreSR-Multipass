@@ -1,5 +1,6 @@
 #include "Runtime.h"
 #include "AdaMfgUnlock.h"
+#include "nvfp4/NrHost.h"
 #include <wintrust.h>
 #include <softpub.h>
 #include <wincrypt.h>
@@ -134,20 +135,29 @@ NVSDK_NGX_Result Runtime::Create(ID3D12GraphicsCommandList* commands, UINT w, UI
     if (owner && owner->compatibility) compatibility = owner->compatibility;
     for (unsigned pass = 0; pass < passes; ++pass) {
         if (skipMask >> pass & 1) continue; // Re-apply passes evaluate nothing; Evaluate refuses them.
-        CheckResult(capabilities(&parameters[pass]), "NR pass parameters");
-        auto* p = parameters[pass]; if (!p) throw std::runtime_error("NGX returned no parameter map.");
         auto& tuning = settings[pass]; tuning = model;
         if (pass) { tuning.localTone = 0; if (overrides[pass - 1]) tuning = *overrides[pass - 1]; }
         requested[pass] = tuning.preset;
         if (!Settings::IsModel(tuning.preset)) // A removed model saved in the settings: never run another model in its place.
             throw std::runtime_error("NR pass " + std::to_string(pass + 1) + " asks for model " + std::to_string(tuning.preset) +
                 ", which was removed from this build. Choose another model in the Model list.");
-        if (Settings::IsNvfp4(tuning.preset) || Settings::IsFp8(tuning.preset)) tuning.preset = 1; // Model A; Processor::Evaluate lets the 4-bit kernels or the FP8 records in.
+        // NR_HOST=1: an FP8 model runs on the own pass host (Processor::Evaluate); NVIDIA's runtime makes no feature for it
+        // (it refuses GPUs below the RTX 50 series).
+        // An INT8 model always runs there: its kernels are ours on every GPU.
+        const bool ownHost = Settings::IsInt8(tuning.preset) || (Settings::IsFp8(tuning.preset) && NrHost::Requested(device.Get()));
+        if (Settings::IsNvfp4(tuning.preset) || Settings::IsFp8(tuning.preset) || Settings::IsInt8(tuning.preset)) tuning.preset = 1; // Model A; Processor::Evaluate lets the 4-bit kernels or the FP8 records in.
         tuning.preset = std::min(tuning.preset, 3u); tuning.style = std::min(tuning.style, 2u);
         tuning.intensity = std::clamp(tuning.intensity, 0.0f, 2.0f);
         tuning.localStructure = std::clamp(tuning.localStructure, 0.0f, 2.0f);
         tuning.localTone = std::clamp(tuning.localTone, 0.0f, 2.0f);
         tuning.skinStructure = std::clamp(tuning.skinStructure, -1.0f, 2.0f);
+        if (ownHost) {
+            Log(std::format("NR pass {} {}x{}: model {} on the own pass host (no NVIDIA feature); intensity {}, structure {}, tone {}, skin {}, style {}",
+                pass + 1, w, h, requested[pass], tuning.intensity, tuning.localStructure, tuning.localTone, tuning.skinStructure, tuning.style));
+            continue;
+        }
+        CheckResult(capabilities(&parameters[pass]), "NR pass parameters");
+        auto* p = parameters[pass]; if (!p) throw std::runtime_error("NGX returned no parameter map.");
         // Match OptiScaler's default pass profiles: only the first pass changes broad lighting.
         p->Set("DLSSNR.Enabled", 1u); p->Set("DLSSNR.Width", w); p->Set("DLSSNR.Height", h);
         p->Set("CreationNodeMask", 1u); p->Set("VisibilityNodeMask", 1u);

@@ -84,7 +84,8 @@ void CaptureQueue::Publish(const CaptureFrame& frame) {
     }
     copyMs = ClockMs() - start;
 }
-bool CaptureQueue::Next() {
+bool CaptureQueue::Next() { return Next(0, 0); }
+bool CaptureQueue::Next(UINT w, UINT h) {
     if (!gpu.Complete()) throw std::runtime_error("Cannot replace capture input while processing uses it.");
     std::lock_guard lock(mutex);
     int newest = -1;
@@ -92,6 +93,7 @@ bool CaptureQueue::Next() {
         if (!slots[i].writing && slots[i].sequence > consumed &&
             (newest < 0 || slots[i].sequence > slots[newest].sequence)) newest = i;
     if (newest < 0) return false;
+    if (w && (slots[newest].width != w || slots[newest].height != h)) return false;
     reading = newest; consumed = slots[newest].sequence;
     width = slots[newest].width; height = slots[newest].height; timestamp = slots[newest].timestamp;
     return true;

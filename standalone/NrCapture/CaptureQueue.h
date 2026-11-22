@@ -12,6 +12,7 @@ public:
     ID3D11Device5* Device() const { return device.Get(); }
     void Publish(const CaptureFrame& frame); // Capture thread only; waits for its GPU copy, never NR.
     bool Next(); // Processing thread, only after its previous GPU submission is complete.
+    bool Next(UINT width, UINT height); // As Next, taking the newest frame only if it has this size.
     ID3D12Resource* Input() const;
     UINT width = 0, height = 0;
     double timestamp = 0;

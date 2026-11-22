@@ -1,6 +1,9 @@
 cbuffer Params : register(b0) {
     uint Width, Height, InputWidth, InputHeight;
     uint Reset, HasCoarse, Step, CutLimit;
+    // Settings::motionZeroBias (the finest level only; 0 elsewhere): zero displacement is kept where its patch error is
+    // within this share of the best displacement's, so a still area does not take noise-driven vectors.
+    float ZeroBias;
 };
 Texture2D<float4> Current : register(t0);
 Texture2D<float4> Previous : register(t1);
@@ -71,6 +74,7 @@ void Estimate(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint3 la
     // a nearby object's motion merely because the coarser estimate moved.
     float2 best = 0;
     float bestCost = Cost(p,0,1e30,true), bestScore = bestCost;
+    const float zeroCost = bestCost;
     // No candidate can beat a perfect zero-displacement match (ties retain zero).
     if (bestCost == 0) { Result[id.xy] = float4(0,0,0,1); return; }
     if (HasCoarse) {
@@ -109,6 +113,8 @@ void Estimate(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint3 la
         float score = cost + penalty;
         if (score < bestScore) { best = candidate; bestCost = cost; bestScore = score; }
     }
+    // (a small absolute floor as well, so a near-perfect zero match is not lost to a candidate that is only a hair better)
+    if (ZeroBias > 0 && any(best != 0) && zeroCost <= bestCost * (1 + ZeroBias) + 0.002 * ZeroBias) { best = 0; bestCost = zeroCost; }
     if (!HasCoarse && bestCost > 0.12) InterlockedAdd(Cuts[uint2(0,0)],1);
     bool inside = all(p + best >= 0) && all(p + best < float2(Width,Height));
     Result[id.xy] = float4(best, bestCost, inside && bestCost < 0.08 ? 1 : 0);

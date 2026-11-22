@@ -7,6 +7,7 @@
 #include <vector>
 #include <shaders/dlssnr/DlssNr_Common.h>
 #include <dlssnr/NrPassBorrow.h>
+namespace NrHost { class Host; }
 namespace nr {
 // Cuts per network evaluation of a frame (re-apply passes are not evaluations; cuts[0] is None).
 // Returns false when nothing borrows, so the caller leaves NrPassBorrow out of the frame.
@@ -41,6 +42,9 @@ std::string Fp8Status(bool counters = false);
 class Processor {
 public:
     Processor(Gpu& gpu, const std::filesystem::path& runtime, bool unlockAdaMfg = false);
+    // A second processor on the same device with passes and histories of its own, sharing `sharing`'s initialized
+    // runtime (the other side of a model comparison). `sharing` must outlive it.
+    Processor(Gpu& gpu, const Processor& sharing);
     ~Processor();
     void Resize(UINT width, UINT height, const Settings& settings);
     // Input is linear scRGB (also for SDR capture), arrives/leaves COMMON.
@@ -89,6 +93,8 @@ private:
     ComPtr<ID3D12Resource> gridOutput;
     bool gridReadable = false;
     std::shared_ptr<Runtime> runtime;
+    std::array<std::shared_ptr<NrHost::Host>, Settings::MaxPasses> hosts; // the own pass host per pass (INT8 models; FP8 models with NR_HOST=1)
+    std::array<unsigned, Settings::MaxPasses> hostModels{};               // the model each was made for
     std::shared_ptr<Motion> opticalFlow;
     std::shared_ptr<Scaling> scaling;
     ComPtr<ID3D12Resource> nativeAnswer, filteredAnswer;
@@ -134,12 +140,22 @@ private:
     D3D12_CPU_DESCRIPTOR_HANDLE Cpu(UINT index) const;
     D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle(UINT index) const;
     void Dispatch(UINT offset, const DlssNrConstants& settings, ID3D12Resource* source,
-        ID3D12Resource* model, ID3D12Resource* clean, ID3D12Resource* target, ID3D12Resource* keep, ID3D12Resource* fifth = nullptr);
+        ID3D12Resource* model, ID3D12Resource* clean, ID3D12Resource* target, ID3D12Resource* keep, ID3D12Resource* fifth = nullptr,
+        ID3D12Resource* fourth = nullptr); // fourth: t3 (gMotion); the source when null
     void Evaluate(ID3D12Resource* colour, ID3D12Resource* depth, ID3D12Resource* motion, ID3D12Resource* output,
         UINT width, UINT height, bool reset, unsigned pass);
     // Descriptor/constant slots: 0..98 step 7 as before; re-apply run ending at pass p uses ReapplySlot(p) and the
     // clamp from a re-apply result uses ReapplyClampSlot, so no slot is rewritten with other inputs in one list.
     static constexpr UINT ReapplySlot(unsigned pass) { return 105 + 7 * (pass - 1); }
-    static constexpr UINT ReapplyClampSlot = 105 + 7 * (Settings::MaxPasses - 1), SlotCount = ReapplyClampSlot + 7;
+    static constexpr UINT ReapplyClampSlot = 105 + 7 * (Settings::MaxPasses - 1), SteadySlot = ReapplyClampSlot + 7,
+                          SlotCount = SteadySlot + 7;
+    // Settings::editSmoothing ("Steady edit"): the blended answer and the kept edit (two, read one and write the other),
+    // at the model's size. keptValid: the kept edit belongs to the frame before.
+    ComPtr<ID3D12Resource> steadyAnswer, keptEdit[2];
+    unsigned keptIndex = 0;
+    bool keptValid = false;
+public:
+    bool steadyApplied = false; // Diagnostic: the last frame's answer went through the steady edit.
+private:
 };
 }

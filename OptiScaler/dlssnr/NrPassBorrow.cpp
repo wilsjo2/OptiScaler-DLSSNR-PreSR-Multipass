@@ -1078,6 +1078,12 @@ void SetLog(LogFn fn) { gLog.store(fn); }
 
 void SetInnerLayer(InnerLayerFn layer) { GetHooks().inner.store(layer); }
 
+void* DriverQueryInterface()
+{
+    auto& hooks = GetHooks();
+    std::lock_guard lock(hooks.mutex);
+    return hooks.detoured ? reinterpret_cast<void*>(hooks.query) : nullptr;
+}
 bool InstallQueryInterfaceHook(const char** error)
 {
     FlushOnExit flush;

@@ -3,8 +3,8 @@ project(OptiScalerNR LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 get_filename_component(REPO "../.." ABSOLUTE)
-add_library(nr_capture_core STATIC Common.cpp Presets.cpp Calibration.cpp Colour.cpp Gpu.cpp GpuTimings.cpp Runtime.cpp RuntimeDlss.cpp Processor.cpp ProcessorStages.cpp Motion.cpp Scaling.cpp Spatial.cpp CaptureQueue.cpp FrameGeneration.cpp FrameGenerationFocus.cpp FrameGenerationOutput.cpp
-    AdaMfgUnlock.cpp nvfp4/NrFfnV2.cpp nvfp4/NrSwin4.cpp nvfp4/NrNet4.cpp nvfp4/NrFp8.cpp
+add_library(nr_capture_core STATIC Common.cpp ModelCompare.cpp Presets.cpp Calibration.cpp Colour.cpp Gpu.cpp GpuTimings.cpp Runtime.cpp RuntimeDlss.cpp Processor.cpp ProcessorStages.cpp Motion.cpp Scaling.cpp Spatial.cpp CaptureQueue.cpp FrameGeneration.cpp FrameGenerationFocus.cpp FrameGenerationOutput.cpp
+    AdaMfgUnlock.cpp nvfp4/NrFfnV2.cpp nvfp4/NrSwin4.cpp nvfp4/NrNet4.cpp nvfp4/NrFp8.cpp nvfp4/NrAmpere.cpp nvfp4/NrHost.cpp
     "${REPO}/OptiScaler/dlssnr/DlssNr_GpuLifetime.cpp"
     "${REPO}/OptiScaler/dlssnr/DlssNr_CompatibilityRuntime.cpp"
     "${REPO}/OptiScaler/dlssnr/NrPassBorrow.cpp")
@@ -67,7 +67,7 @@ set_target_properties(OptiScalerNR PROPERTIES OUTPUT_NAME display_filter)
 target_link_libraries(OptiScalerNR PRIVATE nr_capture_core)
 # The executable names its symbol file without the build folder.
 target_link_options(OptiScalerNR PRIVATE "/PDBALTPATH:%_PDB%")
-add_executable(NrCaptureCheck Check.cpp ReapplyCheck.cpp BorrowCheck.cpp DepthCheck.cpp PassResolutionCheck.cpp QualityCheck.cpp QualityReference.cpp FeatureChecks.cpp HdrOutputCheck.cpp Capture.cpp WgcCapture.cpp DxgiCapture.cpp Presentation.cpp CaptureCheck.cpp MotionCheck.cpp GpuWaitCheck.cpp PerformanceCheck.cpp CaptureQueueCheck.cpp FrameGenerationCheck.cpp FrameGenerationPresentCheck.cpp ResidualCheck.cpp LoggingCheck.cpp)
+add_executable(NrCaptureCheck Check.cpp ReapplyCheck.cpp BorrowCheck.cpp CompareModelsCheck.cpp DepthCheck.cpp PassResolutionCheck.cpp QualityCheck.cpp QualityReference.cpp FeatureChecks.cpp HdrOutputCheck.cpp Capture.cpp WgcCapture.cpp DxgiCapture.cpp Presentation.cpp CaptureCheck.cpp MotionCheck.cpp GpuWaitCheck.cpp PerformanceCheck.cpp CaptureQueueCheck.cpp FrameGenerationCheck.cpp FrameGenerationPresentCheck.cpp ResidualCheck.cpp LoggingCheck.cpp StabilityCheck.cpp PacingSimulation.cpp)
 target_include_directories(NrCaptureCheck BEFORE PRIVATE check_adapters adapters)
 target_link_libraries(NrCaptureCheck PRIVATE nr_capture_core dbghelp)
 # A local build may add commands: sources in lab/, a folder that is not part of the repository.
@@ -113,6 +113,27 @@ target_include_directories(NrKernelLab PRIVATE "${REPO}/external/nvapi")
 target_compile_definitions(NrKernelLab PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(NrKernelLab PRIVATE /W4 /EHsc /permissive- /utf-8)
 target_link_libraries(NrKernelLab PRIVATE d3d12 dxgi)
+# Reads, sets or removes the driver's Smooth Motion setting for display_filter.exe only (NvAPI driver settings).
+add_executable(NrSmoothMotionProfile tools/SmoothMotionProfile.cpp)
+set_target_properties(NrSmoothMotionProfile PROPERTIES OUTPUT_NAME smooth_motion_profile)
+target_include_directories(NrSmoothMotionProfile PRIVATE "${REPO}/external/nvapi")
+target_compile_definitions(NrSmoothMotionProfile PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(NrSmoothMotionProfile PRIVATE /W4 /EHsc /permissive- /utf-8)
+target_link_libraries(NrSmoothMotionProfile PRIVATE "${REPO}/external/nvapi/amd64/nvapi64.lib")
+# A stand-in game window for pacing and latency tests: an HDR picture that slides at an exact frame rate.
+add_executable(NrPaceSource WIN32 tools/PaceSource.cpp)
+set_target_properties(NrPaceSource PROPERTIES OUTPUT_NAME pace_source)
+target_compile_definitions(NrPaceSource PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(NrPaceSource PRIVATE /W4 /EHsc /permissive- /utf-8)
+target_link_options(NrPaceSource PRIVATE /ENTRY:wmainCRTStartup)
+target_link_libraries(NrPaceSource PRIVATE d3d11 dxgi)
+# Reads pace_source's bar back from the screen (Desktop Duplication, or Windows Graphics Capture when DXGI lists no
+# display): what is shown, when, and frames made in between.
+add_executable(NrFrameWatch tools/FrameWatch.cpp)
+set_target_properties(NrFrameWatch PROPERTIES OUTPUT_NAME frame_watch)
+target_compile_definitions(NrFrameWatch PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(NrFrameWatch PRIVATE /W4 /EHsc /permissive- /utf-8)
+target_link_libraries(NrFrameWatch PRIVATE d3d11 dxgi windowsapp)
 add_executable(NrMfgUnlockCheck AdaMfgUnlockCheck.cpp)
 target_include_directories(NrMfgUnlockCheck PRIVATE . "${REPO}/OptiScaler" "${REPO}/external/nvngx_dlss_sdk")
 target_compile_definitions(NrMfgUnlockCheck PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)

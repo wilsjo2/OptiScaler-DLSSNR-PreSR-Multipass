@@ -55,6 +55,7 @@ Settings LoadPreset(const std::wstring& name, const Settings& current) {
     auto loaded = LoadSettings(File(name));
     loaded.runtime = current.runtime; loaded.runtimeChosen = current.runtimeChosen;
     loaded.captureBackend = current.captureBackend; loaded.frameGeneration = current.frameGeneration;
+    loaded.presentMode = current.presentMode; loaded.latencyMode = current.latencyMode; // (how frames reach the screen, not a look)
     loaded.enabled = current.enabled;
     loaded.holdFrame = current.holdFrame; loaded.applyModel = current.applyModel; loaded.debugView = current.debugView;
     loaded.compare = current.compare; loaded.compareSplit = current.compareSplit; loaded.compareZoom = current.compareZoom;

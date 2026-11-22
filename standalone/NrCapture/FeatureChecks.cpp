@@ -73,7 +73,9 @@ static void PresetsCheck(const Settings& saved) {
     current.applyModel = false; current.debugView = 2; current.compare = 3; current.compareSplit = .75f; current.compareZoom = 2.5f;
     current.compareSwap = !saved.compareSwap; current.compareLabels = !saved.compareLabels; current.labelScale = 3;
     current.previewSkin = true; current.showFoveation = true; current.foveationPreviewPass = 2;
+    current.presentMode = 0; current.latencyMode = 0; // (saved has 1 and 1: the session's presentation and pacing stay)
     auto expected = saved;
+    expected.presentMode = current.presentMode; expected.latencyMode = current.latencyMode;
     expected.runtime = current.runtime; expected.runtimeChosen = current.runtimeChosen;
     expected.captureBackend = current.captureBackend; expected.frameGeneration = current.frameGeneration;
     expected.enabled = current.enabled; expected.holdFrame = current.holdFrame; expected.applyModel = current.applyModel;
@@ -122,6 +124,7 @@ void SettingsCheck(const Settings& settings) {
     saved.passShortcuts[0] = {true, true, false, 8}; // Saved as ticked even though re-apply wins.
     saved.passShortcuts[3] = {false, true, true, 2};
     saved.passShortcuts[8] = {false, false, true, 16}; // Pass 10, without a model override.
+    saved.presentMode = 1; saved.latencyMode = 1; saved.editSmoothing = .5f; saved.motionZeroBias = .25f; // Pacing and latency tab.
     const auto file = std::filesystem::temp_directory_path() / std::format(L"nr-feature-settings-{}-{}.ini", GetCurrentProcessId(), GetTickCount64());
     SaveSettings(saved, file);
     const auto restored = LoadSettings(file);
@@ -132,13 +135,21 @@ void SettingsCheck(const Settings& settings) {
     WritePrivateProfileStringW(L"NR", L"Pass3.BorrowLevel", L"1000", file.c_str());
     WritePrivateProfileStringW(L"NR", L"Pass4.BorrowLevel", L"x", file.c_str());
     WritePrivateProfileStringW(L"NR", L"Pass5.Reapply", L"3", file.c_str());
+    WritePrivateProfileStringW(L"NR", L"PresentMode", L"9", file.c_str());
+    WritePrivateProfileStringW(L"NR", L"LatencyMode", L"9", file.c_str());
+    WritePrivateProfileStringW(L"NR", L"EditSmoothing", L"5", file.c_str());
+    WritePrivateProfileStringW(L"NR", L"MotionZeroBias", L"-1", file.c_str());
     const auto clamped = LoadSettings(file); std::filesystem::remove(file);
     if (clamped.reapplyGain != 2 || clamped.passShortcuts[0].borrowLevel != 4 || clamped.passShortcuts[1].borrowLevel != 32 ||
         clamped.passShortcuts[2].borrowLevel != 32 || !clamped.passShortcuts[3].reapply)
         throw std::runtime_error("Saved re-apply/borrow values were not validated.");
+    if (clamped.presentMode != 1 || clamped.latencyMode != 1 || clamped.editSmoothing != .9f || clamped.motionZeroBias != 0)
+        throw std::runtime_error("Saved pacing/latency/steady values were not validated.");
     const auto missing = LoadSettings(std::filesystem::temp_directory_path() / L"nr-feature-settings-missing.ini");
     if (missing.reapplyGain != .81f || missing.passShortcuts != decltype(missing.passShortcuts){})
         throw std::runtime_error("Re-apply/borrow defaults changed.");
+    if (missing.presentMode != 0 || missing.latencyMode != 0 || missing.editSmoothing != 0 || missing.motionZeroBias != 0)
+        throw std::runtime_error("Pacing/latency/steady defaults are not the original behaviour.");
     // A resolution override left on a re-apply pass is dead: it must not select the independent chain.
     Settings dead; dead.passes = 2; dead.passResolutionOverrides[0] = dead.PassResolution(1);
     if (!dead.HasPassResolutionOverrides()) throw std::runtime_error("Pass resolution override not seen.");

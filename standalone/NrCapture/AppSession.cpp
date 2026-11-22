@@ -1,9 +1,13 @@
 #include "App.h"
+#include "ModelCompare.h"
 namespace nr {
 struct Session {
     Gpu gpu;
     std::unique_ptr<FrameGeneration> fg;
     std::unique_ptr<Processor> processor;
+    // A model comparison (Settings::ComparingModels): the same passes with the other model, and the two put together.
+    std::unique_ptr<Processor> comparison;
+    std::unique_ptr<ModelCompare> composer;
     std::unique_ptr<Capture> capture;
     std::unique_ptr<Presentation> display;
 };
@@ -17,8 +21,19 @@ void App::Run(CaptureSource source, Settings initial) {
         auto& g = session->gpu;
         session->processor = std::make_unique<Processor>(g, initial.runtime, initial.frameGeneration > 2);
         if (initial.frameGeneration > 1) session->fg = std::make_unique<FrameGeneration>(g, std::filesystem::path{}, initial.runtime);
-        session->display = std::make_unique<Presentation>(g, source, window, session->fg.get(), initial.frameGeneration);
+        session->display = std::make_unique<Presentation>(g, source, window, session->fg.get(), initial.frameGeneration, initial.presentMode);
         session->capture = std::make_unique<Capture>(g, source, initial.captureBackend, initial.ProcessingFps());
+        session->capture->SetLowLatency(initial.latencyMode == 1);
+        Log(std::format("Presentation: {}; pacing: {}.", session->fg ? "DLSS FG swapchain" : session->display->FlipWindow() ?
+            "flip window (Smooth Motion can take it)" : "overlay surface", initial.latencyMode == 1 ? "low latency" : "standard"));
+        // Diagnostics: NR_FRAME_LOG=<file.csv> writes one line per processed frame (times in ClockMs, i.e. QPC milliseconds).
+        std::FILE* frameLog = nullptr;
+        if (wchar_t path[MAX_PATH]{}; GetEnvironmentVariableW(L"NR_FRAME_LOG", path, MAX_PATH) && *path) {
+            if (_wfopen_s(&frameLog, path, L"w") != 0) frameLog = nullptr;
+            if (frameLog) std::fputs("frame,capture,acquired,started,reacquired,submitted,presentCalled,presentReturned,presentCount,lowLatency,flipWindow,fg\n", frameLog);
+        }
+        struct LogCloser { std::FILE*& file; ~LogCloser() { if (file) std::fclose(file); } } frameLogCloser{frameLog};
+        uint64_t frameIndex = 0; double acquiredAt = 0;
         Say(source.monitor ? L"Screen capture ready. Ctrl+Alt+End stops." :
             L"Capture ready. The filter shows while the selected window or these controls have focus. Ctrl+Alt+End stops.");
         double lastFrame = ClockMs(), reportAt = ClockMs(), latencySum = 0;
@@ -69,6 +84,7 @@ void App::Run(CaptureSource source, Settings initial) {
             const auto captureStart = ClockMs();
             const bool acquired = session->capture->Next();
             timings.capture += ClockMs() - captureStart;
+            if (acquired) acquiredAt = ClockMs();
             pendingCapture |= acquired;
             const bool fresh = pendingCapture;
             calibration.Completed(); // the frame it copied has completed: read it and choose the next values
@@ -90,6 +106,8 @@ void App::Run(CaptureSource source, Settings initial) {
                 if (auto text = calibration.Status(); text != calibrationStatus) { calibrationStatus = text; Say(text); }
             }
             session->capture->SetFrameRate(current.ProcessingFps());
+            const bool lowLatency = current.latencyMode == 1;
+            session->capture->SetLowLatency(lowLatency);
             const bool repaint = calibrating || !processed || current != applied || !IsWindowVisible(session->display->Window());
             RECT bounds{};
             const bool usable = source.Bounds(bounds) && session->capture->Input() &&
@@ -111,7 +129,8 @@ void App::Run(CaptureSource source, Settings initial) {
                 if (!acquired) WaitForSingleObject(stop.value, 20);
                 continue;
             }
-            if (!calibrating && processed && current == applied && !pacer.Due(current.ProcessingFps(), ClockMs())) {
+            // Low latency: the capture producer already keeps the cap, so a fresh frame is processed at once.
+            if (!lowLatency && !calibrating && processed && current == applied && !pacer.Due(current.ProcessingFps(), ClockMs())) {
                 // Pin the newest completed capture while capped. There is no GPU
                 // work to submit until we actually process it.
                 const auto start = ClockMs(); pacer.Wait(stop.value, session->capture->Event());
@@ -130,7 +149,21 @@ void App::Run(CaptureSource source, Settings initial) {
             if (current.estimateMotion && (!processed || !applied.estimateMotion)) {
                 Say(L"Preparing motion estimation..."); Log("Preparing motion estimation.");
             }
-            processor.Resize(capture.width, capture.height, current);
+            // A model comparison runs the passes twice: the picture's own (shown whole) and the other model's.
+            const bool comparing = !calibrating && current.ComparingModels();
+            const Settings pictureSide = comparing ? current.PictureSide() : current;
+            const Settings otherSide = comparing ? current.ComparisonSide() : Settings{};
+            if (comparing && !session->comparison) {
+                session->comparison = std::make_unique<Processor>(g, processor);
+                session->composer = std::make_unique<ModelCompare>(g);
+                Log(std::format("Model comparison: the other side runs model {}.", current.compareModel));
+            } else if (!comparing && session->comparison) {
+                // (Every earlier list has completed: the loop waits for the GPU before a frame is recorded.)
+                session->composer.reset(); session->comparison.reset();
+                Log("Model comparison: off.");
+            }
+            processor.Resize(capture.width, capture.height, pictureSide);
+            if (comparing) session->comparison->Resize(capture.width, capture.height, otherSide);
             session->display->Resize(capture.width, capture.height);
             const bool hdr = session->display->Hdr();
             const float desktopWhite = session->display->WhitePoint(hdr);
@@ -138,7 +171,7 @@ void App::Run(CaptureSource source, Settings initial) {
             // While calibrating the frame is held: history restarts only when the slider values change.
             const bool reset = calibrating ? calibration.ResetHistory() : historyReset || !fresh || capture.timestamp - previousCaptureTime > 250 ||
                 (source.monitor && foreground != previousForeground);
-            const float frameTime = previousCaptureTime > 0 ? (float)std::clamp(capture.timestamp - previousCaptureTime, 1.0, 1000.0) : 16.67f;
+            float frameTime = previousCaptureTime > 0 ? (float)std::clamp(capture.timestamp - previousCaptureTime, 1.0, 1000.0) : 16.67f;
             if (processingStarted - fpsSince >= 500) {
                 const auto presented = session->fg ? session->fg->PresentedFrames() : 0;
                 const auto rate = 1000.0 / (processingStarted - fpsSince);
@@ -149,12 +182,24 @@ void App::Run(CaptureSource source, Settings initial) {
             }
             const auto reflexStart = ClockMs();
             session->display->BeginFrame(current.maxFps); timings.reflex += ClockMs() - reflexStart;
+            // Low latency: a newer frame of the same size may have arrived while the frame was prepared (FG's Reflex
+            // sleep, resizing): take it now, right before recording. (Not while calibrating: its frame is held.)
+            bool reacquired = false;
+            // (Only while the GPU is idle: resizing may have submitted work that reads the current input.)
+            if (lowLatency && !calibrating && !current.holdFrame && g.Complete() && capture.NextOfSize(capture.width, capture.height)) {
+                reacquired = true; acquiredAt = ClockMs();
+                if (previousCaptureTime > 0) frameTime = (float)std::clamp(capture.timestamp - previousCaptureTime, 1.0, 1000.0);
+            }
             const auto nrStart = ClockMs();
             g.lateSplit = true; // (Settings::editLate: the model's list goes to the GPU after the frame is presented)
             g.Begin();
             if (diagnostics && (timingFrame++ % 32) == 0) g.BeginTimings();
             // (No FPS figures are drawn into a picture the calibrator measures.)
-            auto* output = processor.Run(capture.Input(), current, hdr, reset, desktopWhite, frameTime, calibrating ? -1 : displayedFps, calibrating ? -1 : displayedOutputFps);
+            auto* output = processor.Run(capture.Input(), pictureSide, hdr, reset, desktopWhite, frameTime, calibrating ? -1 : displayedFps, calibrating ? -1 : displayedOutputFps);
+            if (comparing) {
+                auto* other = session->comparison->Run(capture.Input(), otherSide, hdr, reset || (processed && current != applied), desktopWhite, frameTime, -1, -1);
+                output = session->composer->Compose(output, other, current);
+            }
             if (calibrating) calibration.Record(g, output);
             timings.nr += ClockMs() - nrStart;
             const auto fgStart = ClockMs();
@@ -165,6 +210,11 @@ void App::Run(CaptureSource source, Settings initial) {
             const auto presentStart = ClockMs(); timings.record += presentStart - processingStarted;
             session->display->Present(); timings.present += ClockMs() - presentStart;
             g.SubmitLate();
+            if (frameLog)
+                std::fprintf(frameLog, "%llu,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.3f,%u,%d,%d,%u\n", (unsigned long long)frameIndex++,
+                    capture.timestamp, acquiredAt, processingStarted, reacquired ? 1 : 0, presentStart,
+                    session->display->presentCalled, session->display->presentReturned, session->display->lastPresentCount,
+                    lowLatency ? 1 : 0, session->display->FlipWindow() ? 1 : 0, session->fg ? current.frameGeneration : 1u);
             pacer.Submitted(current.ProcessingFps(), processingStarted); pendingCapture = false;
             historyReset = false; previousCaptureTime = capture.timestamp; previousForeground = foreground;
             applied = current; processed = true;
@@ -194,6 +244,10 @@ void App::Run(CaptureSource source, Settings initial) {
                     latencySum / frames, memory.CurrentUsage / 1048576.0, current.estimateMotion ? "estimated" : "zero", current.passes,
                     current.referenceWhiteNits > 0 ? current.referenceWhiteNits : desktopWhite * 80);
                 text += current.maxFps ? std::format(" | target {} / {}x = {:.2f} processing cap", current.maxFps, current.frameGeneration, current.ProcessingFps()) : " | uncapped";
+                text += session->fg ? (initial.presentMode == 1 ? " | DLSS FG swapchain (the flip window applies with DLSS FG off)" : "") :
+                    session->display->FlipWindow() ? " | flip window" : " | overlay surface";
+                if (current.presentMode != initial.presentMode) text += " (restart capture to change the presentation)";
+                text += lowLatency ? " | low latency" : " | standard pacing";
                 if (session->fg) {
                     const auto presented = session->fg->PresentedFrames();
                     text += std::format(" | DLSS FG {:.1f} presented fps (synthetic guides)", (presented - reportedPresented) * 1000.0 / (lastFrame - reportAt));
@@ -212,6 +266,8 @@ void App::Run(CaptureSource source, Settings initial) {
                 if ((current.nvfp4Swin || passInOne) && nvfp4Model) text += " | NVFP4 fused blocks " + Nvfp4SwinStatus();
                 if ((current.nvfp4Split || current.nvfp4Vit || current.nvfp4PrePost || passInOne) && nvfp4Model) text += " | NVFP4 network " + Nvfp4NetStatus();
                 if (current.Fp8Pass()) text += " | FP8 model " + Fp8Status();
+                if (current.Int8Pass()) text += " | INT8 model on the own pass host";
+                if (comparing) text += std::format(" | comparing with model {} ({})", current.compareModel, current.compareSwap ? "right" : "left");
                 const auto acquiredFps = (capture.receivedFrames - reportedCaptures) * 1000.0 / (lastFrame - reportAt);
                 text += std::format(" | {} capture {:.1f} fps | GPU wait {:.1f} ms | Present {:.1f} ms",
                     initial.captureBackend ? "DXGI" : "WGC", acquiredFps, timings.gpuWait / frames, timings.present / frames);

@@ -312,71 +312,58 @@ static void DeferredSlider(const char* label, Option* opt, float mn, float mx, f
 
 template <typename Option> static void NrModelCombo(Option* opt, bool allowInherit)
 {
-    // The runtime's presets 0..2, then DlssNr::Nvfp4's choices shown (4, 15, 16): Model A with our 4-bit kernels and
-    // weight sets, and (17..20) NVIDIA's FP8 kernels of Model A with our weights.
-    static const char* names[] = { "Automatic",
-                                   "Original",
-                                   "Optimized",
-                                   "Original - NVFP4 (4-bit kernels)",
-                                   "NVFP4 2xPass-in-one",
-                                   "NVFP4 3xPass-in-one",
-                                   "FP8 2xPass-in-one",
-                                   "FP8 3xPass-in-one",
-                                   "FP8 2xPass-in-one v2",
-                                   "FP8 3xPass-in-one v2" };
-    static const uint32_t values[] = { 0, 1, 2, 4, 16, 15, 17, 18, 19, 20 };
+    // DlssNr::Nvfp4::kModels, sorted by the precision of the weights: FP8 (the runtime's presets 1 and 2 and the FP8
+    // pass-in-one models), INT8, NVFP4 (4-bit).
     const bool inherited = allowInherit && !opt->has_value();
     const uint32_t preset = opt->has_value() ? opt->value() : 0u;
-    const char* preview = inherited ? "Inherit pass 1" : "Unavailable preset";
-    if (!inherited)
-        for (int index = 0; index < IM_ARRAYSIZE(names); ++index)
-            if (values[index] == preset)
-                preview = names[index];
+    const char* preview = inherited ? "Inherit pass 1" : DlssNr::Nvfp4::ModelName(preset);
 
     if (ImGui::BeginCombo("NR model", preview))
     {
         if (allowInherit && ImGui::Selectable("Inherit pass 1", inherited))
             *opt = std::optional<uint32_t> {};
-        for (int index = 0; index < IM_ARRAYSIZE(names); ++index)
+        for (const auto& model : DlssNr::Nvfp4::kModels)
         {
-            const bool selected = !inherited && preset == values[index];
-            if (ImGui::Selectable(names[index], selected))
-                *opt = values[index];
+            const bool selected = !inherited && preset == model.preset;
+            if (ImGui::Selectable(model.name, selected))
+                *opt = (uint32_t) model.preset;
             if (selected)
                 ImGui::SetItemDefaultFocus();
         }
         ImGui::EndCombo();
     }
-    HelpMarker("Automatic: use the installed NR runtime's default model.\n"
-               "Original: use the original model (preset 1).\n"
-               "Optimized: use the smaller FP8 model (preset 2), included in NR 310.9.16.0.\n"
+    HelpMarker("The list is sorted by the precision of the weights: FP8, INT8, NVFP4.\n"
+               "Automatic: use the installed NR runtime's default model.\n"
+               "FP8 Original: the original model (preset 1).\n"
+               "FP8 Optimized: the smaller FP8 model (preset 2), included in NR 310.9.16.0.\n"
                "Older runtimes fall back to their default when a model is unavailable.\n"
-               "Original - NVFP4, NVFP4 2xPass-in-one, NVFP4 3xPass-in-one: 4-bit models for RTX 50 series GPUs\n"
+               "FP8 2xPass-in-one, FP8 3xPass-in-one: the look of two or three passes in one, as FP8 models for\n"
+               "RTX 40 and 50 series GPUs (NVIDIA's own FP8 kernels with weights of ours; files in\n"
+               "OptiScaler/nvfp4/fp8). The v2 models are the same two with other weights.\n"
+               "INT8 Original, INT8 2xPass-in-one: INT8 models for RTX 30, 40 and 50 series GPUs (D3D12 path;\n"
+               "files in OptiScaler/nvfp4/int8). They run wholly on kernels of ours and need no NR runtime.\n"
+               "NVFP4 Original, NVFP4 2xPass-in-one, NVFP4 3xPass-in-one: 4-bit models for RTX 50 series GPUs\n"
                "(D3D12 path; files in OptiScaler/nvfp4). They carry all their own weights and use none of the\n"
                "runtime's, so any NR runtime that offers the original model (preset 1) works, such as 310.8.0\n"
                "or 310.9.16.0.\n"
-               "There is no fallback: if they cannot run, NR is not applied and the reason is shown here in red.\n"
-               "FP8 2xPass-in-one, FP8 3xPass-in-one: the same two looks as FP8 models for RTX 40 and 50 series\n"
-               "GPUs (NVIDIA's own FP8 kernels with weights of ours; files in OptiScaler/nvfp4/fp8). They too\n"
-               "use none of the runtime's weights, and are not applied if they cannot run.\n"
-               "FP8 2xPass-in-one v2, FP8 3xPass-in-one v2: the same two FP8 models with other weights.\n"
-               "2xPass-in-one and 3xPass-in-one give the look of two or three passes in one. Run either as ONE\n"
-               "pass: Cinematic, intensity, tone and structure at 1.\n"
+               "The 4K models (NVFP4 and FP8): the same models with weights made for 4K output.\n"
+               "There is no fallback: if a model of ours cannot run, NR is not applied and the reason is shown\n"
+               "here in red.\n"
+               "Run a pass-in-one model as ONE pass: Cinematic, intensity, tone and structure at 1.\n"
                "Changing the model rebuilds this pass and resets its history.");
     if (!inherited && DlssNr::Nvfp4::IsNvfp4(preset))
     {
+        const char* kind = DlssNr::Nvfp4::IsInt8(preset) ? "INT8" : DlssNr::Nvfp4::IsFp8(preset) ? "FP8" : "4-bit";
         if (const auto problem = DlssNr::Nvfp4::Problem(); !problem.empty())
         {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.35f, 0.3f, 1.0f));
-            ImGui::TextWrapped("%s model is NOT running, NR is not applied: %s",
-                               DlssNr::Nvfp4::IsFp8(preset) ? "FP8" : "4-bit", problem.c_str());
+            ImGui::TextWrapped("%s model is NOT running, NR is not applied: %s", kind, problem.c_str());
             ImGui::PopStyleColor();
         }
         else if (DlssNr::Nvfp4::Running())
-            ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1.0f),
-                               DlssNr::Nvfp4::IsFp8(preset) ? "FP8 model running" : "4-bit kernels running");
+            ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1.0f), "%s model running", kind);
         else
-            ImGui::TextDisabled(DlssNr::Nvfp4::IsFp8(preset) ? "FP8 model starting..." : "4-bit kernels starting...");
+            ImGui::TextDisabled("%s model starting...", kind);
     }
 }
 
@@ -667,10 +654,40 @@ void RenderInspect(Config* config)
     if (ImGui::Combo("Compare", &compare, compareNames, IM_ARRAYSIZE(compareNames)))
         config->DlssNrCompare = (uint32_t) compare;
 
-    HelpMarker("Compare the original and NR output.");
+    HelpMarker("Compare the NR output with the original picture, or with another NR model.");
 
     if (compare != 0)
     {
+        // What lies beside the NR picture: the original picture, or one pass of another model.
+        const uint32_t other = config->DlssNrCompareModel.value_or_default();
+        if (ImGui::BeginCombo("Other side", other == 0 ? "Original picture" : DlssNr::Nvfp4::ModelName(other)))
+        {
+            if (ImGui::Selectable("Original picture", other == 0))
+                config->DlssNrCompareModel = 0u;
+            for (const auto& model : DlssNr::Nvfp4::kModels)
+                if (model.preset != 0 && ImGui::Selectable(model.name, other == model.preset))
+                    config->DlssNrCompareModel = (uint32_t) model.preset;
+            ImGui::EndCombo();
+        }
+        HelpMarker("Compare two models directly: the NR picture on one side, and on the other the same frame\n"
+                   "through ONE pass of the model chosen here, with pass 1's style and strengths.\n"
+                   "Both models are loaded and run every frame, so the frame costs more while this is on.\n"
+                   "Not available with a debug view, peripheral compression, pass borrowing, supersampling or\n"
+                   "DLSS enlargement.");
+        if (other != 0)
+        {
+            if (DlssNr::Nvfp4::ComparisonShown() == other)
+                ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1.0f), "Comparing with %s",
+                                   DlssNr::Nvfp4::ModelName(other));
+            else if (const auto note = DlssNr::Nvfp4::ComparisonNote(); !note.empty())
+            {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.35f, 0.3f, 1.0f));
+                ImGui::TextWrapped("The other model is NOT shown (that side is the original picture): %s",
+                                   note.c_str());
+                ImGui::PopStyleColor();
+            }
+        }
+
         Checkbox("Swap sides", config->DlssNrCompareSwap);
         Checkbox("Label the sides", config->DlssNrCompareTags);
         if (config->DlssNrCompareTags.value_or_default())

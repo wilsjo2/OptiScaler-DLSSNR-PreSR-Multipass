@@ -8,7 +8,7 @@ Motion::Motion(Gpu& g) : gpu(g) {
         {D3D12_DESCRIPTOR_RANGE_TYPE_UAV,2,0,0,3}};
     D3D12_ROOT_PARAMETER parameters[2]{};
     parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE; parameters[0].DescriptorTable = {2,ranges};
-    parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; parameters[1].Constants = {0,0,8};
+    parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; parameters[1].Constants = {0,0,9};
     D3D12_STATIC_SAMPLER_DESC sampler{}; sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP; sampler.MaxLOD = D3D12_FLOAT32_MAX;
     D3D12_ROOT_SIGNATURE_DESC signature{2,parameters,1,&sampler,D3D12_ROOT_SIGNATURE_FLAG_NONE};
@@ -54,12 +54,12 @@ void Motion::Dispatch(UINT slot, UINT shader, const Constants& constants, ID3D12
     gpu.device->CreateUnorderedAccessView(cuts.Get(),nullptr,nullptr,Cpu(offset+4));
     auto* c=gpu.commands.Get(); ID3D12DescriptorHeap* heaps[]{heap.Get()}; c->SetDescriptorHeaps(1,heaps);
     c->SetComputeRootSignature(root.Get()); c->SetPipelineState(shaders[shader].Get());
-    c->SetComputeRootDescriptorTable(0,GpuHandle(offset)); c->SetComputeRoot32BitConstants(1,8,&constants,0);
+    c->SetComputeRootDescriptorTable(0,GpuHandle(offset)); c->SetComputeRoot32BitConstants(1,9,&constants,0);
     Barrier(c,output,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     c->Dispatch((constants.width+7)/8,(constants.height+7)/8,1);
     Barrier(c,output,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 }
-bool Motion::Estimate(ID3D12Resource* input, bool reset) {
+bool Motion::Estimate(ID3D12Resource* input, bool reset, float zeroBias) {
     if (pendingCut) {
         // The previous frame's list has completed: the host opens a new list only after that.
         void* data=nullptr; D3D12_RANGE range{0,sizeof(UINT)}; Check(readback->Map(0,&range,&data),"Read scene-cut flag");
@@ -91,7 +91,7 @@ bool Motion::Estimate(ID3D12Resource* input, bool reset) {
     }
     for (int i=Levels-1; i>=0; --i) {
         auto size=flow[i]->GetDesc(); auto* coarser=i+1<int(Levels) ? flow[i+1].Get() : current[i].Get();
-        Constants p{UINT(size.Width),size.Height,0,0,UINT(reset),UINT(i+1<int(Levels)),0,cutLimit};
+        Constants p{UINT(size.Width),size.Height,0,0,UINT(reset),UINT(i+1<int(Levels)),0,cutLimit, i == 0 ? zeroBias : 0.f};
         Dispatch(Levels+UINT(i),1,p,current[i].Get(),previous[i].Get(),coarser,flow[i].Get());
     }
     gpu.commands->ResourceBarrier(1,&order);

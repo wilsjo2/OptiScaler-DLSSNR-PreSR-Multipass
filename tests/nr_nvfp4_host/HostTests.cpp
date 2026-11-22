@@ -6,6 +6,7 @@
 #include "../../OptiScaler/dlssnr/NrNvfp4.h"
 #include "../../standalone/NrCapture/nvfp4/NrFfnV2.h"
 #include "../../standalone/NrCapture/nvfp4/NrFp8.h"
+#include "../../standalone/NrCapture/nvfp4/NrHost.h"
 #include "../../standalone/NrCapture/nvfp4/NrNet4.h"
 #include "../../standalone/NrCapture/nvfp4/NrSwin4.h"
 
@@ -168,6 +169,55 @@ void ReleaseDevice(ID3D12Device*) { ++Mock::fp8.released; }
 std::string Status(bool) { return "active"; }
 } // namespace NrFp8
 
+// The own pass host (the INT8 models), as counters.
+namespace Mock
+{
+struct HostMock
+{
+    bool failCreate = false, failRun = false;
+    unsigned created = 0, evaluated = 0, released = 0, set = 0;
+    std::filesystem::path folder;
+    std::string recordsName;
+    void* query = nullptr;
+} host;
+} // namespace Mock
+namespace NrHost
+{
+struct Host::Impl
+{
+    unsigned width, height, set;
+};
+Host::Host(std::unique_ptr<Impl> made) : impl(std::move(made)) {}
+Host::~Host() = default;
+std::unique_ptr<Host> Host::Create(ID3D12Device*, const Options& options, unsigned width, unsigned height, unsigned set)
+{
+    if (Mock::host.failCreate)
+        throw std::runtime_error("int8_set" + std::to_string(set) + ".bin is missing. Nothing was shown.");
+    ++Mock::host.created;
+    Mock::host.set = set;
+    Mock::host.folder = options.records;
+    Mock::host.recordsName = options.recordsName;
+    return std::unique_ptr<Host>(new Host(std::make_unique<Impl>(Impl { width, height, set })));
+}
+void Host::Evaluate(ID3D12GraphicsCommandList*, ID3D12Resource*, ID3D12Resource*, ID3D12Resource*, const Settings&, bool)
+{
+    if (Mock::host.failRun)
+        throw std::runtime_error("a kernel could not be launched. Nothing was shown.");
+    ++Mock::host.evaluated;
+}
+Options Int8Options(const std::filesystem::path& folder)
+{
+    Options options;
+    options.enabled = true;
+    options.records = folder;
+    options.recordsName = "int8_set";
+    return options;
+}
+void ReleaseDevice(ID3D12Device*) { ++Mock::host.released; }
+void SetLog(void (*)(const char*)) {}
+void SetDriverQuery(void* query) { Mock::host.query = query; }
+} // namespace NrHost
+
 namespace
 {
 using namespace DlssNr::Nvfp4;
@@ -200,6 +250,9 @@ int main()
     CHECK(Mock::swin.set == ~0u && Mock::net.set == ~0u && Mock::ffn.set == ~0u && AllPaused());
     CHECK(Pass(ModelTwoDouble) && Mock::swin.set == 13 && Mock::net.set == 13 && Mock::ffn.set == 13);
     CHECK(Pass(ModelTwoTriple) && Mock::swin.set == 12 && Mock::net.set == 12 && Mock::ffn.set == 12);
+    CHECK(Pass(ModelTwoDouble4k) && Mock::swin.set == 10 && Mock::net.set == 10 && Mock::ffn.set == 10);
+    CHECK(Pass(ModelTwoTriple4k) && Mock::swin.set == 11 && Mock::net.set == 11 && Mock::ffn.set == 11);
+    CHECK(Pass(ModelTwoDouble) && Mock::swin.set == 13);
     // A pass of the runtime's own model in between leaves our kernels out of it.
     {
         const auto work = Mock::swin.work + Mock::net.work + Mock::ffn.work;
@@ -265,11 +318,15 @@ int main()
         CHECK(Pass(ModelFp8Double) && Mock::fp8.used == 1 && Running() && Problem().empty());
         CHECK(Pass(ModelFp8Triple) && Mock::fp8.used == 2);
         CHECK(Pass(ModelFp8Double2) && Mock::fp8.used == 3);
+        CHECK(Pass(ModelFp8Double4k) && Mock::fp8.used == 5);
+        CHECK(Pass(ModelFp8Triple4k) && Mock::fp8.used == 6);
         CHECK(Pass(ModelFp8Triple2) && Mock::fp8.used == 4);
         CHECK(Mock::swin.work + Mock::net.work + Mock::ffn.work == work && AllPaused() && Mock::fp8.set == 0);
     }
     // ... and a 4-bit pass after them runs its kernels without the FP8 records.
     CHECK(Pass(ModelTwoDouble) && Mock::fp8.used == 4 && Mock::swin.set == 13);
+    // Numbers between and beyond the models are refused, never run as another model.
+    CHECK(!Pass(14) && !Pass(27) && IsKnown(24) && !IsKnown(27));
     // An FP8 evaluation that did not run wholly on our records is refused at once, with its reason.
     Mock::fp8.faultNext = true;
     CHECK(!Pass(ModelFp8Double) && !Running() && Contains(Problem(), "launch 57"));
@@ -302,6 +359,65 @@ int main()
     Configure(true, L"other-assets");
     CHECK(!Pass(ModelFp8Double) && Contains(Problem(), "FP8 models"));
     CHECK(Pass(ModelTwoTriple));
+
+    // The INT8 models run on the own pass host: no layer takes part, and the pass is judged by whether the host ran.
+    {
+        CHECK(IsKnown(ModelInt8) && IsNvfp4(ModelInt8Double) && !IsInt8(24) && !IsInt8(27));
+        CHECK(Int8Set(ModelInt8) == 1 && Int8Set(ModelInt8Double) == 2);
+        SetDriverQuery(device);
+        CHECK(Mock::host.query == device);
+        const auto host = CreateInt8(device, ModelInt8Double, 1920, 1080, L"assets");
+        CHECK(host && Mock::host.created == 1 && Mock::host.set == 2 && Mock::host.recordsName == "int8_set");
+        CHECK(Mock::host.folder == std::filesystem::path(L"assets") / L"int8");
+        const Int8Pass pass;
+        const auto work = Mock::swin.work + Mock::net.work + Mock::ffn.work;
+        BeginEvaluation(ModelInt8Double);
+        CHECK(AllPaused() && Mock::fp8.set == 0);
+        CHECK(RunInt8(host, nullptr, pass) && Mock::host.evaluated == 1);
+        EndEvaluation(nullptr);
+        CHECK(OursRan(true) && Running() && Problem().empty());
+        CHECK(Mock::swin.work + Mock::net.work + Mock::ffn.work == work);
+        // A pass of the host that did not run is refused at once, with the reason; the next one that runs is shown.
+        Mock::host.failRun = true;
+        BeginEvaluation(ModelInt8Double);
+        CHECK(!RunInt8(host, nullptr, pass));
+        EndEvaluation(nullptr);
+        CHECK(!OursRan(true) && !Running() && Contains(Problem(), "INT8") && Contains(Problem(), "launched"));
+        Mock::host.failRun = false;
+        BeginEvaluation(ModelInt8Double);
+        CHECK(RunInt8(host, nullptr, pass));
+        EndEvaluation(nullptr);
+        CHECK(OursRan(true) && Problem().empty());
+        // A host that cannot be made: the pass is recorded without it and refused, and the reason names the file.
+        Mock::host.failCreate = true;
+        const auto none = CreateInt8(device, ModelInt8, 1920, 1080, L"assets");
+        CHECK(!none);
+        BeginEvaluation(ModelInt8);
+        CHECK(!RunInt8(none, nullptr, pass));
+        EndEvaluation(nullptr);
+        CHECK(!OursRan(true) && Contains(Problem(), "int8_set1"));
+        Mock::host.failCreate = false;
+        // An INT8 pass leaves the other models as they were.
+        CHECK(Pass(ModelTwoTriple) && Pass(1));
+        // The comparison's status is what the frame last said.
+        SetComparison(ModelInt8, "");
+        CHECK(ComparisonShown() == ModelInt8 && ComparisonNote().empty());
+        SetComparison(0, "the other model is being set up");
+        CHECK(ComparisonShown() == 0 && Contains(ComparisonNote(), "set up"));
+        // The menu's list: every model once, sorted by precision (FP8, INT8, NVFP4).
+        int rank = 0;
+        for (const auto& model : kModels)
+        {
+            const std::string name = model.name;
+            const int now = name.rfind("FP8", 0) == 0 ? 1 : name.rfind("INT8", 0) == 0 ? 2 : name.rfind("NVFP4", 0) == 0 ? 3 : 0;
+            CHECK(now >= rank && (model.preset <= 2 || IsKnown(model.preset)));
+            CHECK(std::string(ModelName(model.preset)) == name);
+            rank = now;
+        }
+        CHECK(rank == 3 && std::string(ModelName(9)) == "Unavailable preset");
+        Release(device);
+        CHECK(Mock::host.released >= 2);
+    }
 
     bool failed = false, running = false;
     for (const auto& line : Mock::log)

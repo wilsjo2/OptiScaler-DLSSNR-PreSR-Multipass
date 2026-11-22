@@ -13,7 +13,8 @@ public:
     // zeroes the vectors of a scene-cut frame itself; the four-byte cut count
     // is read when the next frame is estimated, so the returned history reset
     // follows a detected cut by one frame. Call once per submitted list.
-    bool Estimate(ID3D12Resource* input, bool reset);
+    // zeroBias: Settings::motionZeroBias (0 = the original search).
+    bool Estimate(ID3D12Resource* input, bool reset, float zeroBias = 0);
     ID3D12Resource* Vectors() const { return vectors.Get(); }
     // The cut counter of the frame just estimated (one R32_UINT texel, UNORDERED_ACCESS): coarse cells without a match.
     ID3D12Resource* Cuts() const { return cuts.Get(); }
@@ -31,7 +32,7 @@ private:
     ComPtr<ID3D12RootSignature> root;
     ComPtr<ID3D12DescriptorHeap> heap;
     std::array<ComPtr<ID3D12PipelineState>, 3> shaders;
-    struct Constants { UINT width, height, inputWidth, inputHeight, reset, coarse, step, cutLimit; };
+    struct Constants { UINT width, height, inputWidth, inputHeight, reset, coarse, step, cutLimit; float zeroBias = 0; };
     D3D12_CPU_DESCRIPTOR_HANDLE Cpu(UINT index) const;
     D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle(UINT index) const;
     void Dispatch(UINT slot, UINT shader, const Constants& constants,

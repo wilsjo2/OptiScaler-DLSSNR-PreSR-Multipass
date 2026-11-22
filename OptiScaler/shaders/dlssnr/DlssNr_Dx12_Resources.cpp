@@ -29,7 +29,8 @@ auto DlssNr_Dx12::State::ReleaseSurfacesIfFormatChanged(DXGI_FORMAT modelFormat,
     modelRunning = false;
 
     for (ID3D12Resource** r : { &nr.output, &nr.passScratch, &nr.passClamp, &nr.colorCopy, &nr.hdrCopy, &nr.colorSmall,
-                                &nr.depthSmall, &nr.motionSmall, &nr.outputNative, &nr.activeColor })
+                                &nr.depthSmall, &nr.motionSmall, &nr.outputNative, &nr.activeColor, &nr.compareAnswer,
+                                &nr.compareColor })
         ParkNrResource(*r);
 
     nr.passScratchFailed = false;
@@ -244,7 +245,7 @@ auto DlssNr_Dx12::State::ReleaseResources() -> void
     modelRunning = false;
 
     for (auto** resource : { &nr.output, &nr.passScratch, &nr.passClamp, &nr.colorCopy, &nr.hdrCopy, &nr.activeColor,
-                             &nr.colorSmall, &nr.depthSmall, &nr.motionSmall })
+                             &nr.colorSmall, &nr.depthSmall, &nr.motionSmall, &nr.compareAnswer, &nr.compareColor })
         ParkNrResource(*resource);
     ReleaseSpatialResources();
     nr.spatialSignatureValid = false;

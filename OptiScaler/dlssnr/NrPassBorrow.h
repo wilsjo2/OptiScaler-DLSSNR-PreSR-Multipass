@@ -59,6 +59,9 @@ bool InstallQueryInterfaceHook(const char** error = nullptr);
 // Set it before the NR runtime resolves its NvAPI functions.
 using InnerLayerFn = void* (*)(unsigned id, void* original);
 void SetInnerLayer(InnerLayerFn layer);
+// Standalone only: the driver's own nvapi_QueryInterface (the Detours trampoline) once the hook is installed, else
+// null. A caller's own launches through it pass no layer (the own NR pass host uses it).
+void* DriverQueryInterface();
 
 // OptiScaler: call from its existing nvapi_QueryInterface hook with the function pointer the real QueryInterface
 // returned. Returns this module's wrapper for CreateCuFunction, DestroyCuFunction, DestroyCuModule and

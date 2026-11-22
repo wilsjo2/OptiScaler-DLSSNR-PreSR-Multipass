@@ -11,7 +11,8 @@ struct ModelStateDx12
 {
     unsigned long long successfulDispatches = 0;
     // Each model pass owns its NGX feature, parameters and temporal history.
-    DlssNr::Proxy::Context models[DlssNr::MaxPassCount];
+    // (The last one is the model comparison's: one pass of the other model.)
+    DlssNr::Proxy::Context models[DlssNr::MaxPassCount + 1];
     bool passCreateFailed[DlssNr::MaxPassCount] = {};
 
     // The model cannot read and write one resource, so the frame is staged through these.
@@ -37,6 +38,10 @@ struct ModelStateDx12
     // Compact origin-zero pre-SR image, only needed when Color has allocation padding. All codec,
     // hold and capture paths then see the real raster. UAV at rest, retired with the scratch set.
     ID3D12Resource* activeColor = nullptr;
+
+    // A model comparison: the other model's answer (the model's format and size) and the picture resolved from it.
+    ID3D12Resource* compareAnswer = nullptr;
+    ID3D12Resource* compareColor = nullptr;
 
     // The frame shrunk for the model, when it is working below full resolution.
     ID3D12Resource* colorSmall = nullptr;

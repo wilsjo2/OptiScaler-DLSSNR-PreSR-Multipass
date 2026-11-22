@@ -361,6 +361,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrCompareSplit.set_from_config(readFloat("DlssNr", "CompareSplit"));
             DlssNrCompareZoom.set_from_config(readFloat("DlssNr", "CompareZoom"));
             DlssNrCompareSwap.set_from_config(readBool("DlssNr", "CompareSwap"));
+            DlssNrCompareModel.set_from_config(readUInt("DlssNr", "CompareModel"));
             DlssNrCompareTags.set_from_config(readBool("DlssNr", "CompareTags"));
             DlssNrTagScale.set_from_config(readFloat("DlssNr", "TagScale"));
             DlssNrWorkingScale.set_from_config(readFloat("DlssNr", "WorkingScale"));
@@ -1348,6 +1349,7 @@ bool Config::SaveIni(std::filesystem::path destination)
                      GetFloatValue(Instance()->DlssNrCompareSplit.value_for_config()).c_str());
         ini.SetValue("DlssNr", "CompareZoom", GetFloatValue(Instance()->DlssNrCompareZoom.value_for_config()).c_str());
         ini.SetValue("DlssNr", "CompareSwap", GetBoolValue(Instance()->DlssNrCompareSwap.value_for_config()).c_str());
+        ini.SetValue("DlssNr", "CompareModel", GetIntValue(Instance()->DlssNrCompareModel.value_for_config()).c_str());
         ini.SetValue("DlssNr", "CompareTags", GetBoolValue(Instance()->DlssNrCompareTags.value_for_config()).c_str());
         ini.SetValue("DlssNr", "TagScale", GetFloatValue(Instance()->DlssNrTagScale.value_for_config()).c_str());
         ini.SetValue("DlssNr", "WorkingScale",

@@ -373,6 +373,10 @@ class Config
 
     CustomOptional<bool> DlssNrCompareSwap { false };
 
+    // What a comparison puts beside the NR picture: 0 the original picture, otherwise an NR model (a Preset value):
+    // one pass of that model with pass 1's settings.
+    CustomOptional<uint32_t> DlssNrCompareModel { 0 };
+
     CustomOptional<bool> DlssNrCompareTags { false };
     CustomOptional<float> DlssNrTagScale { 1.5f };
 

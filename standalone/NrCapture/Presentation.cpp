@@ -10,8 +10,10 @@ LRESULT CALLBACK WindowProcedure(HWND w, UINT m, WPARAM p, LPARAM l) {
     return DefWindowProcW(w, m, p, l);
 }
 }
-Presentation::Presentation(Gpu& g, CaptureSource captureSource, HWND controlWindow, FrameGeneration* frameGeneration, unsigned factor)
+Presentation::Presentation(Gpu& g, CaptureSource captureSource, HWND controlWindow, FrameGeneration* frameGeneration, unsigned factor,
+                           unsigned presentMode)
     : gpu(g), source(captureSource), controls(controlWindow), fg(frameGeneration), multiplier(factor) {
+    flipWindow = !fg && presentMode == 1;
     WNDCLASSW wc{}; wc.lpfnWndProc = WindowProcedure; wc.hInstance = GetModuleHandleW(nullptr);
     wc.lpszClassName = L"OptiScalerNR.Output";
     if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
@@ -26,6 +28,7 @@ Presentation::Presentation(Gpu& g, CaptureSource captureSource, HWND controlWind
     }
     Check(SetLayeredWindowAttributes(window, 0, 255, LWA_ALPHA) ? S_OK : HRESULT_FROM_WIN32(GetLastError()), "Click-through output");
     if (fg) { fgOutput = std::make_unique<FrameGenerationOutput>(g); return; }
+    if (flipWindow) return; // (its swapchain is made by Resize, for the window itself)
     Check(DCompositionCreateDevice(nullptr, IID_PPV_ARGS(&composition)), "Composition device");
     Check(composition->CreateTargetForHwnd(window, TRUE, &target), "Composition target");
     Check(composition->CreateVisual(&visual), "Composition visual");
@@ -63,8 +66,8 @@ void Presentation::Order() {
         after = source.window ? GetWindow(source.window, GW_HWNDPREV) : controls;
         if (source.window ? after == window : GetWindow(controls, GW_HWNDNEXT) == window) return;
         if (!after) after = HWND_TOP;
-    } else if (fg && (GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOPMOST)) return;
-    // Without FG the output is raised every frame, as before. FG leaves the HWND alone unless it must move.
+    } else if ((fg || flipWindow) && (GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOPMOST)) return;
+    // The overlay surface is raised every frame, as before. FG and the flip window leave the HWND alone unless it must move.
     if (fg) fg->Quiesce(swapchain.Get());
     SetWindowPos(window, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
@@ -117,7 +120,21 @@ void Presentation::Resize(UINT w, UINT h) {
     }
     if (swapchain) Check(swapchain->ResizeBuffers(2, w, h, DXGI_FORMAT_R16G16B16A16_FLOAT,
         DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT), "Resize output");
-    else {
+    else if (flipWindow) {
+        // Settings::presentMode 1: a flip-model swapchain on the output window itself, as a game has, so that the
+        // driver's Smooth Motion can take its presents. scRGB like the overlay surface; at most one frame queued.
+        DXGI_SWAP_CHAIN_DESC1 d{}; d.Width = w; d.Height = h; d.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        d.SampleDesc.Count = 1; d.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT; d.BufferCount = 2;
+        d.Scaling = DXGI_SCALING_STRETCH; d.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        d.AlphaMode = DXGI_ALPHA_MODE_IGNORE; d.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+        ComPtr<IDXGISwapChain1> chain;
+        Check(gpu.factory->CreateSwapChainForHwnd(gpu.queue.Get(), window, &d, nullptr, nullptr, &chain), "Flip window swapchain");
+        gpu.factory->MakeWindowAssociation(window, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
+        Check(chain.As(&swapchain), "Flip window swapchain3");
+        ComPtr<IDXGISwapChain2> pacing; Check(chain.As(&pacing), "Flip window pacing");
+        Check(pacing->SetMaximumFrameLatency(1), "Bound flip window latency");
+        latencyWait = pacing->GetFrameLatencyWaitableObject();
+    } else {
         DXGI_SWAP_CHAIN_DESC1 d{}; d.Width = w; d.Height = h; d.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
         d.SampleDesc.Count = 1; d.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT; d.BufferCount = 2;
         d.Scaling = DXGI_SCALING_STRETCH; d.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
@@ -137,15 +154,20 @@ void Presentation::Resize(UINT w, UINT h) {
     width = w; height = h;
 }
 void Presentation::BeginFrame(unsigned targetFps) {
-    if (fg) {
+    // The flip window keeps one frame queued at most. Waiting here, before the frame is recorded (rather than before
+    // Present), lets low latency take the newest capture after the wait.
+    if (flipWindow && latencyWait) WaitForSingleObjectEx(latencyWait, 100, TRUE);
+    if (fg || flipWindow) {
         RECT bounds{}, previous{}; GetWindowRect(window, &previous);
         if (!source.Bounds(bounds)) throw std::runtime_error("Output bounds are unavailable.");
         if (!EqualRect(&bounds, &previous)) {
-            fg->Quiesce(swapchain.Get());
+            if (fg) fg->Quiesce(swapchain.Get());
             Check(SetWindowPos(window, nullptr, bounds.left, bounds.top,
                 bounds.right - bounds.left, bounds.bottom - bounds.top, SWP_NOZORDER | SWP_NOACTIVATE) ? S_OK :
-                HRESULT_FROM_WIN32(GetLastError()), "Position FG output");
+                HRESULT_FROM_WIN32(GetLastError()), "Position output window");
         }
+    }
+    if (fg) {
         // Resume with one ordinary present, then show the populated window while
         // FG is still off. Enable interpolation on the following, stable frame.
         if (!fg->Enabled()) fg->Configure(width, height, fgOutput->Format(), multiplier, IsWindowVisible(window) != FALSE);
@@ -168,17 +190,20 @@ void Presentation::Copy(ID3D12Resource* output, bool reset, ID3D12Resource* scen
 }
 void Presentation::Present() {
     if (fg) fg->BeforePresent();
-    Check(swapchain->Present(0, fg && (swapFlags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) ? DXGI_PRESENT_ALLOW_TEARING : 0), "Present output");
+    presentCalled = ClockMs();
+    Check(swapchain->Present(flipWindow ? 1 : 0, fg && (swapFlags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) ? DXGI_PRESENT_ALLOW_TEARING : 0), "Present output");
+    presentReturned = ClockMs();
+    swapchain->GetLastPresentCount(&lastPresentCount);
     if (fg) fg->AfterPresent();
     if (!Active()) { Hide(); return; }
     RECT bounds{};
     if (!source.Bounds(bounds) || (UINT)(bounds.right - bounds.left) != width ||
         (UINT)(bounds.bottom - bounds.top) != height) { Hide(); return; }
-    if (!fg) {
+    if (!fg && !flipWindow) {
         Order();
         SetWindowPos(window, nullptr, bounds.left, bounds.top, (int)width, (int)height, SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
     } else if (!IsWindowVisible(window)) {
-        fg->Quiesce(swapchain.Get());
+        if (fg) fg->Quiesce(swapchain.Get());
         Order();
         SetWindowPos(window, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
     }

@@ -4,6 +4,7 @@
 #include "CheckCrash.h"
 #include "Colour.h"
 #include "FramePacer.h"
+#include "CapturePacer.h"
 #include "FeatureChecks.h"
 #include "DepthCheck.h"
 #include "PassResolutionCheck.h"
@@ -12,6 +13,7 @@
 #include <fstream>
 #include <vector>
 #include <numeric>
+#include <thread>
 #include <iostream>
 #include <d3d12sdklayers.h>
 #include <winrt/base.h>
@@ -28,6 +30,11 @@ void WindowCheck(Settings settings, const std::wstring& title, unsigned frames);
 void PerformanceCheck(Gpu& gpu, Processor& processor, ID3D12Resource* input, Settings settings, unsigned frames, unsigned modeMask, bool moving);
 void QualityCheck(Gpu& gpu, Processor& processor, ID3D12Resource* input, Settings settings);
 void ReapplyCheck();
+void PacingSimulation(double seconds);
+void StabilityCheck(Settings settings, const std::filesystem::path& folder, UINT sourceWidth, UINT sourceHeight, UINT width, UINT height,
+                    unsigned frames, unsigned still, const std::vector<std::pair<float, float>>& variants, const std::filesystem::path& csv);
+void CompareModelsCheck(const std::filesystem::path& fixture, UINT width, UINT height, unsigned model, unsigned otherModel,
+    const std::filesystem::path& runtime, unsigned frames);
 void BorrowCheck(const std::filesystem::path& fixture, UINT width, UINT height, const std::filesystem::path& report,
     unsigned preset, const std::filesystem::path& runtime, unsigned frames, bool sameTuning, unsigned style = 0, bool nvfp4 = false, unsigned swin = 0, const std::string& net = {});
 }
@@ -450,6 +457,68 @@ void PacingCheck() {
     SetEvent(stop.value); const auto start = ClockMs(); pacer.Wait(stop.value, capture.value);
     if (ClockMs() - start > 50) throw std::runtime_error("Stop did not interrupt frame pacing.");
     std::cout << "PASS uncapped, new capture wake and stop interrupt\n";
+    // Settings::latencyMode: the capture pacer's low-latency mode. A frame that arrives late (after the cap's period) is
+    // taken at once, not on the next grid slot; frames are still kept CapturePacer::MinimumSpacing apart.
+    for (const bool low : {false, true}) {
+        CapturePacer capturePacer(60); capturePacer.SetLowLatency(low); std::stop_source source;
+        double worstWait = 0, leastSpacing = 1e9, previous = 0;
+        for (unsigned frame = 0; frame < 12; ++frame) {
+            if (frame && frame % 3 == 0) Sleep(frame % 2 ? 23 : 5); // (a source frame that arrives late, or early)
+            const double asked = ClockMs();
+            if (!capturePacer.Wait(source.get_token())) throw std::runtime_error("Capture pacer stopped by itself.");
+            const double now = ClockMs();
+            // (Only frames already due when asked count as late: a normal wait that the timer ends a little late is not a held frame.)
+            if (frame) { leastSpacing = std::min(leastSpacing, now - previous); if (asked - previous > 1000.0 / 60) worstWait = std::max(worstWait, now - asked); }
+            capturePacer.Submitted(now); previous = now;
+        }
+        if (low && leastSpacing < CapturePacer::MinimumSpacing(60) - 0.05)
+            throw std::runtime_error(std::format("Low-latency capture took frames {:.2f} ms apart (cap 60).", leastSpacing));
+        if (low && worstWait > 1.0)
+            throw std::runtime_error(std::format("Low-latency capture held a late frame {:.2f} ms.", worstWait));
+        std::cout << std::format("PASS capture pacer {} at 60: least spacing {:.2f} ms, longest wait for a frame already late {:.2f} ms\n",
+            low ? "low latency" : "standard", leastSpacing, worstWait);
+    }
+    {
+        // (A 2 fps cap: the 450 ms spacing cannot run out before the stop, even if this thread is held up a while.)
+        CapturePacer capturePacer(2); capturePacer.SetLowLatency(true); std::stop_source source;
+        capturePacer.Submitted(ClockMs()); const double waitStart = ClockMs();
+        std::jthread stopper([&] { Sleep(3); source.request_stop(); });
+        if (capturePacer.Wait(source.get_token()) || ClockMs() - waitStart > 50) throw std::runtime_error("Stop did not interrupt low-latency capture pacing.");
+        std::cout << "PASS low-latency capture pacer stop interrupt\n";
+    }
+    {
+        // Frames arriving unevenly at the cap's rate (a 60 fps game on a 164 Hz screen reaches the capture 18.3, 18.3 and
+        // 12.2 ms apart) are not held back; asking without pause, the average stays within the cap's 10 % room.
+        Handle timer{CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS)};
+        const auto until = [&](double deadline) {
+            if (const double wait = deadline - ClockMs() - 1.0; wait > 0) {
+                LARGE_INTEGER due{}; due.QuadPart = -LONGLONG(wait * 10000);
+                SetWaitableTimer(timer.value, &due, 0, nullptr, nullptr, FALSE); WaitForSingleObject(timer.value, 1000);
+            }
+            while (ClockMs() < deadline) YieldProcessor();
+        };
+        CapturePacer capturePacer(60); capturePacer.SetLowLatency(true); std::stop_source source;
+        const double gaps[]{18.29, 18.29, 12.20}; double arrival = ClockMs() + 2, worstWait = 0;
+        for (unsigned frame = 0; frame < 30; ++frame) {
+            arrival += gaps[frame % 3]; until(arrival);
+            const double asked = ClockMs();
+            if (!capturePacer.Wait(source.get_token())) throw std::runtime_error("Capture pacer stopped by itself.");
+            const double now = ClockMs(); if (frame >= 3) worstWait = std::max(worstWait, now - asked);
+            capturePacer.Submitted(now);
+        }
+        if (worstWait > 1.0)
+            throw std::runtime_error(std::format("Low-latency capture held a frame {:.2f} ms when frames came 18.3, 18.3, 12.2 ms apart (cap 60).", worstWait));
+        CapturePacer fast(120); fast.SetLowLatency(true);
+        const double begun = ClockMs(); unsigned frames = 0;
+        while (ClockMs() - begun < 600) {
+            if (!fast.Wait(source.get_token())) throw std::runtime_error("Capture pacer stopped by itself.");
+            fast.Submitted(ClockMs()); ++frames;
+        }
+        const double rate = frames * 1000.0 / (ClockMs() - begun);
+        if (rate > 120 * CapturePacer::Room + 3 || rate < 100)
+            throw std::runtime_error(std::format("Low-latency capture asked without pause ran at {:.1f} fps (cap 120).", rate));
+        std::cout << std::format("PASS low-latency capture pacer: uneven arrival held at most {:.2f} ms; without pause {:.1f} fps at cap 120\n", worstWait, rate);
+    }
 }
 }
 void GpuWaitCheck();
@@ -467,9 +536,24 @@ int wmain(int argc, wchar_t** argv) {
         unsigned performanceModes = 15;
         bool capture = false, monitor = false, lifecycle = false, motion = false, displayInfo = false, appearance = false, alignment = false, history = false, pacing = false, quality = false, features = false, performance = false, captureQueue = false, residual = false, logging = false, resizeCheck = false;
         bool reapplyCheck = false, settingsCheck = false;
+        // --stability-check <folder> [--source-width 3840 --source-height 2160 --still 95 --variants "0:0,0.5:0,0.5:0.2" --stability-output file.csv]
+        std::filesystem::path stabilityFolder, stabilityOutput; UINT sourceWidth = 3840, sourceHeight = 2160; unsigned stillFrame = 0;
+        std::vector<std::pair<float, float>> stabilityVariants{{0.f, 0.f}, {.5f, 0.f}, {.8f, 0.f}, {0.f, .2f}, {.5f, .2f}};
 #ifdef NR_LAB_COMMANDS
         if (nr::LabCommand(argc, argv)) return 0;      // further commands of a local build
 #endif
+        if (argc >= 7 && std::wstring(argv[1]) == L"--compare-models-check") {
+            // --compare-models-check <fixture.rgba16f> <width> <height> <model> <other model> [--runtime dll] [--frames N]
+            std::filesystem::path runtime; unsigned count = 3;
+            for (int i = 7; i < argc; i += 2) {
+                const std::wstring key = argv[i]; if (i + 1 >= argc) throw std::runtime_error("Missing argument value.");
+                if (key == L"--runtime") runtime = argv[i + 1];
+                else if (key == L"--frames") count = std::stoul(argv[i + 1]);
+                else throw std::runtime_error("Unknown compare-models-check argument.");
+            }
+            nr::CompareModelsCheck(argv[2], std::stoul(argv[3]), std::stoul(argv[4]), std::stoul(argv[5]), std::stoul(argv[6]), runtime, count);
+            return 0;
+        }
         if (argc >= 6 && std::wstring(argv[1]) == L"--borrow-check") {
             // GPU/NR harness for manual runs: --borrow-check <fixture.rgba16f> <width> <height> <out.json> [--preset N] [--runtime dll] [--frames N] [--same-tuning 1] [--style 0|1|2]
             unsigned preset = 0, count = 8, style = 0, swin = 0; bool sameTuning = false, nvfp4 = false; std::filesystem::path runtime; std::string net;
@@ -525,6 +609,7 @@ int wmain(int argc, wchar_t** argv) {
             else if (key == L"--settings-check") settingsCheck = std::stoul(argv[++i]) != 0;
             else if (key == L"--feature-check") features = std::stoul(argv[++i]) != 0;
             else if (key == L"--pacing-check") pacing = std::stoul(argv[++i]) != 0;
+            else if (key == L"--pacing-simulation") { nr::PacingSimulation(std::clamp(std::stod(argv[++i]), 1.0, 120.0)); return 0; }
             else if (key == L"--input-colour") settings.inputColour = std::stoul(argv[++i]);
             else if (key == L"--codec") settings.tone = std::stoul(argv[++i]);
             else if (key == L"--intensity") settings.model.intensity = std::stof(argv[++i]);
@@ -532,6 +617,24 @@ int wmain(int argc, wchar_t** argv) {
             else if (key == L"--transfer") settings.transfer = std::stoul(argv[++i]);
             else if (key == L"--display-info") displayInfo = std::stoul(argv[++i]) != 0;
             else if (key == L"--window") window = argv[++i];
+            else if (key == L"--stability-check") stabilityFolder = argv[++i];
+            else if (key == L"--stability-output") stabilityOutput = argv[++i];
+            else if (key == L"--source-width") sourceWidth = std::stoul(argv[++i]);
+            else if (key == L"--source-height") sourceHeight = std::stoul(argv[++i]);
+            else if (key == L"--still") stillFrame = std::stoul(argv[++i]);
+            else if (key == L"--pan") _wputenv_s(L"NR_STABILITY_PAN", argv[++i]);          // (StabilityCheck reads these three)
+            else if (key == L"--grain") _wputenv_s(L"NR_STABILITY_GRAIN", argv[++i]);
+            else if (key == L"--stability-images") _wputenv_s(L"NR_STABILITY_IMAGES", argv[++i]);
+            else if (key == L"--variants") {
+                // steady:zero pairs separated by commas; the first is the reference for the "moving" figure.
+                stabilityVariants.clear(); std::wstring list = argv[++i];
+                for (size_t start = 0; start < list.size();) {
+                    const size_t end = std::min(list.find(L',', start), list.size()); const auto item = list.substr(start, end - start);
+                    const size_t colon = item.find(L':');
+                    stabilityVariants.emplace_back(std::stof(item.substr(0, colon)), colon == std::wstring::npos ? 0.f : std::stof(item.substr(colon + 1)));
+                    start = end + 1;
+                }
+            }
             else throw std::runtime_error("Unknown argument.");
         }
         if (logging) { nr::LoggingCheck(); return 0; }
@@ -556,6 +659,10 @@ int wmain(int argc, wchar_t** argv) {
         if (captureQueue) { nr::CaptureQueueCheck(); return 0; }
         if (pacing) { PacingCheck(); GpuWaitCheck(); return 0; }
         if (!frames || frames > 10000 || settings.runtime.empty()) throw std::runtime_error("Use --runtime <NR DLL> [--width N --height N --frames N --image fixture.png].");
+        if (!stabilityFolder.empty()) {
+            nr::StabilityCheck(settings, stabilityFolder, sourceWidth, sourceHeight, width, height, frames, stillFrame, stabilityVariants, stabilityOutput);
+            return 0;
+        }
         if (residual) { nr::ResidualCheck(settings.runtime); return 0; }
         if (!window.empty()) nr::WindowCheck(settings,window,frames);
         else if (motion) nr::MotionCheck();

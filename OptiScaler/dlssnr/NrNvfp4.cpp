@@ -8,9 +8,11 @@
 
 #include "../../standalone/NrCapture/nvfp4/NrFfnV2.h"
 #include "../../standalone/NrCapture/nvfp4/NrFp8.h"
+#include "../../standalone/NrCapture/nvfp4/NrHost.h"
 #include "../../standalone/NrCapture/nvfp4/NrNet4.h"
 #include "../../standalone/NrCapture/nvfp4/NrSwin4.h"
 
+#include <atomic>
 #include <cctype>
 #include <cstring>
 #include <exception>
@@ -49,6 +51,13 @@ bool gRunning = false, gToldFailed = false;
 std::string gFp8Problem;    // the FP8 sets could not be loaded
 bool gFp8 = false;          // the evaluation in progress asked for an FP8 model
 unsigned long long gFp8Faults = 0, gFp8Completed = 0;
+// The INT8 models (NrHost): the whole pass is ours, on the own pass host.
+bool gInt8 = false;       // the evaluation in progress asked for an INT8 model
+bool gInt8Ran = false;    // ... and the host recorded it
+bool gLastInt8 = false;   // the last evaluation judged (OursRan) asked for an INT8 model
+std::string gInt8Problem; // why the host could not be made or could not run
+std::atomic<unsigned> gComparisonShown { 0 };
+std::string gComparisonNote;
 
 void Say(const std::string& line)
 {
@@ -141,6 +150,69 @@ void SetLog(void (*log)(const char* line))
     NrSwin4::SetLog(log);
     NrNet4::SetLog(log);
     NrFp8::SetLog(log);
+    NrHost::SetLog(log);
+}
+
+void SetDriverQuery(void* query) { NrHost::SetDriverQuery(query); }
+
+std::shared_ptr<void> CreateInt8(ID3D12Device* device, unsigned preset, unsigned width, unsigned height,
+                                 const std::filesystem::path& assets)
+{
+    try
+    {
+        std::shared_ptr<NrHost::Host> host =
+            NrHost::Host::Create(device, NrHost::Int8Options(assets / L"int8"), width, height, Int8Set(preset));
+        return host;
+    }
+    catch (const std::exception& e)
+    {
+        std::lock_guard guard(gMutex);
+        gInt8Problem = std::string("INT8 model: ") + e.what();
+        Say("FAILED to set up the INT8 model, so a pass that asks for it is not applied: " + std::string(e.what()));
+        return {};
+    }
+}
+
+bool RunInt8(const std::shared_ptr<void>& host, ID3D12GraphicsCommandList* list, const Int8Pass& pass)
+{
+    if (!host)
+        return false;
+    try
+    {
+        NrHost::Settings settings;
+        settings.style = pass.style;
+        settings.intensity = pass.intensity;
+        settings.structure = pass.structure;
+        settings.tone = pass.tone;
+        settings.skin = pass.skin;
+        settings.autoMask = pass.autoMask;
+        settings.mvScaleX = pass.mvScaleX;
+        settings.mvScaleY = pass.mvScaleY;
+        static_cast<NrHost::Host*>(host.get())->Evaluate(list, pass.colour, pass.motion, pass.output, settings,
+                                                         pass.reset || !pass.motion);
+        std::lock_guard guard(gMutex);
+        gInt8Ran = true;
+        return true;
+    }
+    catch (const std::exception& e)
+    {
+        std::lock_guard guard(gMutex);
+        gInt8Problem = std::string("INT8 model: ") + e.what();
+        return false;
+    }
+}
+
+void SetComparison(unsigned shownModel, const char* note)
+{
+    gComparisonShown = shownModel;
+    std::lock_guard guard(gMutex);
+    gComparisonNote = note ? note : "";
+}
+unsigned ComparisonShown() { return gComparisonShown; }
+std::string ComparisonNote()
+{
+    std::lock_guard guard(gMutex);
+    return gComparisonNote;
 }
 
 void* WrapNvapi(unsigned id, void* original)
@@ -246,6 +318,16 @@ void BeginEvaluation(unsigned requestedPreset)
     gOurs = IsNvfp4(requestedPreset);
     gPassInOne = IsPassInOne(requestedPreset);
     gFp8 = IsFp8(requestedPreset);
+    gInt8 = IsInt8(requestedPreset);
+    gInt8Ran = false;
+    if (gInt8)
+    {
+        // The whole pass runs on the own pass host: none of the layers has anything to do.
+        PauseAll(true);
+        NrFp8::UseSet(0);
+        gSetMissing.clear();
+        return;
+    }
     if (gFp8)
     {
         // NVIDIA's kernels with our records: no 4-bit kernel runs.
@@ -299,8 +381,14 @@ bool OursRan(bool whole)
     if (!gOurs)
         return true;
     gRefused.clear();
+    gLastInt8 = gInt8;
     std::string why;
-    if (gFp8)
+    if (gInt8)
+    {
+        if (!gInt8Ran)
+            why = gInt8Problem.empty() ? "the INT8 model's pass was not run" : gInt8Problem;
+    }
+    else if (gFp8)
     {
         if (!gOn)
             why = "the FP8 models were not loaded";
@@ -344,8 +432,9 @@ bool OursRan(bool whole)
     if (why.empty())
     {
         if (!gRunning)
-            Say(gFp8 ? "running: this pass is an FP8 model of ours (NVIDIA's kernels with our weights) | " + NrFp8::Status(false)
-                     : "running: this pass is our 4-bit kernels | " + NrSwin4::Status(false) + " | " + NrNet4::Status(false));
+            Say(gInt8 ? std::string("running: this pass is an INT8 model of ours on the own pass host")
+                : gFp8 ? "running: this pass is an FP8 model of ours (NVIDIA's kernels with our weights) | " + NrFp8::Status(false)
+                       : "running: this pass is our 4-bit kernels | " + NrSwin4::Status(false) + " | " + NrNet4::Status(false));
         gRunning = true;
         gToldFailed = false;
         gMissed = 0;
@@ -355,13 +444,13 @@ bool OursRan(bool whole)
     gRunning = false;
     gWhy = std::move(why);
     // (An FP8 model knows from its first evaluation whether it ran: no time to recognise the model.)
-    const bool certain = gFp8 || !gEnableProblem.empty() || !gSetMissing.empty();
+    const bool certain = gFp8 || gInt8 || !gEnableProblem.empty() || !gSetMissing.empty();
     if (gMissed < kStarting || certain)
         gMissed = certain ? kStarting : gMissed + 1;
     if (gMissed >= kStarting && !gToldFailed)
     {
         gToldFailed = true;
-        Say(std::string("FAILED: the pass asked for ") + (gFp8 ? "an FP8" : "a 4-bit") +
+        Say(std::string("FAILED: the pass asked for ") + (gInt8 ? "an INT8" : gFp8 ? "an FP8" : "a 4-bit") +
             " model and it did not run, so the pass is not applied (no fallback to the original model): " + gWhy);
     }
     return false;
@@ -382,7 +471,8 @@ std::string Problem()
     std::lock_guard guard(gMutex);
     if (!gRefused.empty())
         return gRefused;
-    if (!gEnableProblem.empty())
+    // (An INT8 pass uses none of the layers: a layer that could not be switched on is not its problem.)
+    if (!gEnableProblem.empty() && !gLastInt8)
         return gEnableProblem;
     return gMissed >= kStarting ? gWhy : std::string();
 }
@@ -404,6 +494,7 @@ void FreeRetired(ID3D12Device* device, unsigned long long ticket) { NrFfnV2::Fre
 
 void Release(ID3D12Device* device)
 {
+    NrHost::ReleaseDevice(device);
     {
         std::lock_guard guard(gMutex);
         if (!gOn)

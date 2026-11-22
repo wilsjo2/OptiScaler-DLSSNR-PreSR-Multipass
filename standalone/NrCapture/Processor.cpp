@@ -3,6 +3,8 @@
 #include "nvfp4/NrSwin4.h"
 #include "nvfp4/NrNet4.h"
 #include "nvfp4/NrFp8.h"
+#include "nvfp4/NrAmpere.h"
+#include "nvfp4/NrHost.h"
 #include <atomic>
 #include <mutex>
 #include <shaders/dlssnr/precompile/DlssNr_Shader.h>
@@ -11,6 +13,9 @@
 namespace nr {
 Processor::Processor(Gpu& g, const std::filesystem::path& path, bool unlockAdaMfg) : Processor(g) {
     runtime = std::make_shared<Runtime>(g.device.Get(), path, unlockAdaMfg);
+}
+Processor::Processor(Gpu& g, const Processor& sharing) : Processor(g) {
+    runtime = std::make_shared<Runtime>(sharing.runtime);
 }
 Processor::Processor(Gpu& g) : gpu(g) {
     D3D12_DESCRIPTOR_RANGE ranges[2]{};
@@ -50,6 +55,7 @@ Processor::~Processor() {
         spatial = std::move(spatialShader), packed = std::move(packedProxy), packedResult = std::move(packedAnswer),
         packedZ = std::move(packedDepth), packedMv = std::move(packedMotion), packedNext = std::move(packedPassInput),
         grid = std::move(gridOutput), chain = std::move(chainInput),
+        steady = std::move(steadyAnswer), keptA = std::move(keptEdit[0]), keptB = std::move(keptEdit[1]),
         extended = std::move(reapplied), packedExtended = std::move(packedReapplied), chainExtended = std::move(chainReapplied),
         cb = std::move(constants), descriptors = std::move(heap), rs = std::move(root), pso = std::move(shader)] {});
     gpu.lifetime.Collect();
@@ -115,12 +121,14 @@ void Processor::ResizeLegacy(UINT w, UINT h, const Settings& s) {
     resizeInput.Reset(); enlarged.Reset(); boundedDlss.Reset(); exposure.Reset();
     if (mw < w || mh < h || fullField) resizeInput = gpu.Texture(mw, mh, DXGI_FORMAT_R16G16B16A16_FLOAT);
     fieldValid = false; fieldAge = 0; activeFullField = fullField;
+    keptValid = false; // (Settings::editSmoothing: the kept edit belonged to the features just released)
     if (s.passes == 1) passInput.Reset();
     else if (!passInput || resized) passInput = gpu.Texture(mw, mh, DXGI_FORMAT_R16G16B16A16_FLOAT);
     if (resized) {
         packedProxy.Reset(); packedAnswer.Reset(); packedDepth.Reset(); packedMotion.Reset(); packedPassInput.Reset();
         gridOutput.Reset(); gridReadable = false;
         filteredAnswer.Reset(); reapplied.Reset(); packedReapplied.Reset();
+        steadyAnswer.Reset(); keptEdit[0].Reset(); keptEdit[1].Reset(); keptValid = false;
         labelled.Reset(); labelsReadable = false;
         nativeAnswer.Reset();
         if (mw != w || mh != h) nativeAnswer = gpu.Texture(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT);
@@ -196,8 +204,9 @@ void Processor::ResizeLegacy(UINT w, UINT h, const Settings& s) {
     }
 }
 void Processor::Dispatch(UINT offset, const DlssNrConstants& s, ID3D12Resource* source,
-    ID3D12Resource* model, ID3D12Resource* clean, ID3D12Resource* target, ID3D12Resource* keep, ID3D12Resource* fifth) {
-    ID3D12Resource* inputs[]{source, model ? model : source, clean ? clean : source, source, fifth ? fifth : source};
+    ID3D12Resource* model, ID3D12Resource* clean, ID3D12Resource* target, ID3D12Resource* keep, ID3D12Resource* fifth,
+    ID3D12Resource* fourth) {
+    ID3D12Resource* inputs[]{source, model ? model : source, clean ? clean : source, fourth ? fourth : source, fifth ? fifth : source};
     for (UINT i = 0; i < 5; ++i) {
         D3D12_SHADER_RESOURCE_VIEW_DESC view{}; view.Format = inputs[i]->GetDesc().Format;
         view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
@@ -211,7 +220,7 @@ void Processor::Dispatch(UINT offset, const DlssNrConstants& s, ID3D12Resource* 
     memcpy(static_cast<char*>(data) + cbOffset, &s, sizeof(s)); constants->Unmap(0, nullptr);
     auto* c = gpu.commands.Get(); ID3D12DescriptorHeap* heaps[]{heap.Get()};
     c->SetDescriptorHeaps(1, heaps); c->SetComputeRootSignature(root.Get());
-    c->SetPipelineState(s.Mode >= 11 && s.Mode <= 22 ? captureColour.Get() : shader.Get());
+    c->SetPipelineState(s.Mode >= 11 && s.Mode <= 23 ? captureColour.Get() : shader.Get());
     c->SetComputeRootDescriptorTable(0, GpuHandle(offset));
     c->SetComputeRootConstantBufferView(1, constants->GetGPUVirtualAddress() + cbOffset);
     c->Dispatch((s.Width + 7) / 8, (s.Height + 7) / 8, 1);
@@ -226,13 +235,17 @@ bool InstallPassBorrow() {
     NrSwin4::SetLog([](const char* line) { try { Log(line); } catch (...) { /* As above. */ } });
     NrNet4::SetLog([](const char* line) { try { Log(line); } catch (...) { /* As above. */ } });
     NrFp8::SetLog([](const char* line) { try { Log(line); } catch (...) { /* As above. */ } });
+    NrAmpere::SetLog([](const char* line) { try { Log(line); } catch (...) { /* As above. */ } });
+    NrHost::SetLog([](const char* line) { try { Log(line); } catch (...) { /* As above. */ } });
     // The FP8 models outermost (they count the runtime's own launches of an evaluation and give its kernels our
     // records; the 4-bit layers are paused in their passes), then the rest-of-the-network layer (it recognises Model A
     // by the runtime's own sequence of launches), then the fused blocks: each of their launches replaces one of the
     // runtime's, so the feed-forward layer below still counts the launches of an evaluation as the runtime made them.
-    NrPassBorrow::SetInnerLayer([](unsigned id, void* original) { return NrFp8::WrapNvapi(id, NrNet4::WrapNvapi(id, NrSwin4::WrapNvapi(id, NrFfnV2::WrapNvapi(id, original)))); });
+    // The Ampere set (NrAmpere, development: NR_AMP=1) outside them all: it replaces every weighted launch's kernel.
+    NrPassBorrow::SetInnerLayer([](unsigned id, void* original) { return NrAmpere::WrapNvapi(id, NrFp8::WrapNvapi(id, NrNet4::WrapNvapi(id, NrSwin4::WrapNvapi(id, NrFfnV2::WrapNvapi(id, NrHost::WrapNvapi(id, original)))))); });
     const char* error = nullptr;
     if (NrPassBorrow::InstallQueryInterfaceHook(&error)) {
+        NrHost::SetDriverQuery(NrPassBorrow::DriverQueryInterface()); // the own pass host launches past every layer
         // The runtime asks NvAPI for an entry point when it first needs it. Ask for the two destroy calls now, through
         // the hook, so the NVFP4 layer can destroy its own kernels even before the runtime has destroyed anything.
         if (const HMODULE nvapi = GetModuleHandleW(L"nvapi64.dll"))
@@ -262,8 +275,26 @@ void ApplyNvfp4(bool wanted, bool trained, bool everySize) {
     catch (const std::exception& e) { Log(std::string("NVFP4 feed-forward unavailable: ") + e.what()); }
 }
 std::string Nvfp4Status() { return NrFfnV2::Status(); }
-void ReleaseNvfp4(ID3D12Device* device) { NrFfnV2::ReleaseDevice(device); NrSwin4::ReleaseDevice(device); NrNet4::ReleaseDevice(device); NrFp8::ReleaseDevice(device); }
+void ReleaseNvfp4(ID3D12Device* device) { NrFfnV2::ReleaseDevice(device); NrSwin4::ReleaseDevice(device); NrNet4::ReleaseDevice(device); NrFp8::ReleaseDevice(device); NrAmpere::ReleaseDevice(device); NrHost::ReleaseDevice(device); }
+namespace {
+// NR_AMP=1 (development, no preset yet): the FP8 presets' record sets run on the Ampere set's kernels (NrAmpere).
+bool AmpereRequested() { const wchar_t* text = _wgetenv(L"NR_AMP"); return text && *text && *text != L'0'; }
+void ApplyAmpere(bool wanted) {
+    if (!wanted) { if (NrAmpere::Enabled()) { NrAmpere::Disable(); Log("Ampere set: off"); } return; }
+    if (NrAmpere::Enabled()) return;
+    NrAmpere::Options options;
+    const wchar_t* records = _wgetenv(L"NR_FP8_ASSETS"); // The FP8 models' record sets, used unchanged.
+    options.records = records && *records ? std::filesystem::path(records) : ExecutableDirectory() / L"nvfp4" / L"fp8";
+    const wchar_t* folder = _wgetenv(L"NR_AMP_ASSETS"); // Development override: the cubins.
+    options.assets = folder && *folder ? std::filesystem::path(folder) : ExecutableDirectory() / L"nvfp4" / L"amp";
+    const wchar_t* manifests = _wgetenv(L"NR_AMP_MANIFESTS"); // Development override: amp_*_manifest.txt (default: the cubins' folder).
+    if (manifests && *manifests) options.manifests = manifests;
+    try { NrAmpere::FromEnvironment(options); NrAmpere::Enable(options); }
+    catch (const std::exception& e) { throw std::runtime_error(std::string("The Ampere set (NR_AMP=1) cannot be loaded: ") + e.what()); }
+}
+}
 void ApplyFp8(bool wanted) {
+    ApplyAmpere(wanted && AmpereRequested());
     if (!wanted) { if (NrFp8::Enabled()) { NrFp8::Disable(); Log("FP8 models: off"); } return; }
     if (NrFp8::Enabled()) return;
     NrFp8::Options options;
@@ -341,7 +372,7 @@ void Processor::Evaluate(ID3D12Resource* colour, ID3D12Resource* depthGuide, ID3
     ID3D12Resource* result, UINT w, UINT h, bool reset, unsigned pass) {
     auto* c = gpu.commands.Get();
     // Tell the NVFP4 layer where the evaluation ends, whatever way this function is left.
-    struct Boundary { ID3D12GraphicsCommandList* list; ~Boundary() { NrFfnV2::EndEvaluation(list); NrSwin4::EndEvaluation(list); NrNet4::EndEvaluation(list); NrFp8::EndEvaluation(list); } } boundary{c};
+    struct Boundary { ID3D12GraphicsCommandList* list; ~Boundary() { NrFfnV2::EndEvaluation(list); NrSwin4::EndEvaluation(list); NrNet4::EndEvaluation(list); NrFp8::EndEvaluation(list); NrAmpere::EndEvaluation(list); } } boundary{c};
     // The 4-bit kernels run where the pass's model is "Model A - NVFP4"; "Model A (Original)" and the others keep
     // NVIDIA's. Model B has only the feed-forward as 4-bit, and that still follows its box alone.
     const unsigned chosen = runtime->RequestedModel(pass);
@@ -353,12 +384,60 @@ void Processor::Evaluate(ID3D12Resource* colour, ID3D12Resource* depthGuide, ID3
     NrNet4::UseSet(selectedSet);
     NrFfnV2::UseSet(selectedSet);
     // An FP8 pass-in-one model: NVIDIA's kernels with our records. It must run wholly or not be shown at all.
-    const unsigned fp8Set = Settings::Fp8Set(chosen);
+    // With NR_AMP=1 the FP8 model's records run on the Ampere set's kernels instead (NrFp8 is set 0 for it): every
+    // weighted launch must be ours (or explicitly left to NVIDIA by the development switches), or nothing is shown.
+    const unsigned modelFp8Set = Settings::Fp8Set(chosen);
+    // An INT8 model runs on the own pass host: INT8 kernels and weights of ours, no NVIDIA runtime launch at all.
+    // NR_HOST=1 (development; by itself on RTX 30 and 40): an FP8 model runs there too.
+    const unsigned modelInt8Set = Settings::Int8Set(chosen);
+    if (modelInt8Set || (modelFp8Set && NrHost::Requested(gpu.device.Get()))) {
+        if (borrowEvaluation >= 0) throw std::runtime_error(std::format("NR pass {}: pass borrowing does not work with {}. Nothing was shown.", pass + 1, modelInt8Set ? "an INT8 model" : "the own pass host (NR_HOST=1)"));
+        NrAmpere::UseSet(0); NrFp8::UseSet(0);
+        const size_t slot = std::min<size_t>(pass, hosts.size() - 1);
+        auto& host = hosts[slot];
+        const unsigned hostSet = modelInt8Set ? modelInt8Set : modelFp8Set;
+        if (!host || host->Width() != w || host->Height() != h || host->Set() != hostSet || hostModels[slot] != chosen) {
+            host.reset();
+            try {
+                const wchar_t* folder = _wgetenv(L"NR_INT8_ASSETS"); // Development override.
+                const auto options = modelInt8Set ? NrHost::Int8Options(folder && *folder ? std::filesystem::path(folder) : ExecutableDirectory() / L"nvfp4" / L"int8")
+                                                  : NrHost::FromEnvironment(ExecutableDirectory());
+                host = std::shared_ptr<NrHost::Host>(NrHost::Host::Create(gpu.device.Get(), options, w, h, hostSet));
+                hostModels[slot] = chosen;
+            }
+            catch (const std::exception& e) { throw std::runtime_error(std::format("NR pass {}: {}", pass + 1, e.what())); }
+        }
+        const auto& tuning = runtime->PassSettings(pass);
+        NrHost::Settings hs;
+        hs.style = tuning.style; hs.intensity = tuning.intensity; hs.structure = tuning.localStructure; hs.tone = tuning.localTone;
+        hs.skin = tuning.skinStructure; hs.autoMask = tuning.autoMask; hs.mvScaleX = hs.mvScaleY = runtime->motionScale;
+        try { host->Evaluate(c, colour, motionGuide, result, hs, reset); }
+        catch (const std::exception& e) { throw std::runtime_error(std::format("NR pass {}: {}", pass + 1, e.what())); }
+        return;
+    }
+    const unsigned ampereSet = modelFp8Set && AmpereRequested() ? modelFp8Set : 0;
+    if (ampereSet) {
+        std::string missing;
+        if (!NrAmpere::SetComplete(ampereSet, &missing))
+            throw std::runtime_error(std::format("NR pass {}: the Ampere set cannot run fp8 set {} ({}).", pass + 1, ampereSet, missing));
+        if (const std::string refused = NrAmpere::CheckArchitecture(gpu.device.Get()); !refused.empty())
+            throw std::runtime_error(std::format("NR pass {}: {}. Nothing was shown.", pass + 1, refused));
+    }
+    NrAmpere::UseSet(ampereSet);
+    const auto ampereFaults = NrAmpere::Faults(), ampereRan = NrAmpere::Completed() + NrAmpere::Partial();
+    const unsigned fp8Set = ampereSet ? 0 : modelFp8Set;
     if (fp8Set && !NrFp8::SetComplete(fp8Set))
         throw std::runtime_error(std::format("NR pass {}: the FP8 model's files (nvfp4/fp8/fp8_set{}.*) are not loaded.", pass + 1, fp8Set));
     NrFp8::UseSet(fp8Set);
     const auto fp8Faults = NrFp8::Faults();
     const auto checkFp8 = [&] {
+        if (ampereSet) {
+            NrAmpere::EndEvaluation(c);
+            if (NrAmpere::Faults() != ampereFaults)
+                throw std::runtime_error(std::format("NR pass {}: the Ampere set could not run ({}). Nothing was shown.", pass + 1, NrAmpere::Problem()));
+            if (NrAmpere::Completed() + NrAmpere::Partial() == ampereRan)
+                throw std::runtime_error(std::format("NR pass {}: the Ampere set saw no evaluation of the model. Nothing was shown.", pass + 1));
+        }
         if (!fp8Set) return;
         NrFp8::EndEvaluation(c);
         if (NrFp8::Faults() != fp8Faults)
@@ -379,6 +458,8 @@ ID3D12Resource* Processor::RunLegacy(ID3D12Resource* input, const Settings& s, b
     lastTransfer = s.transfer;
     sceneMotion = nullptr;
     usedMotionVectors = nullptr;
+    steadyApplied = false;
+    if (s.editSmoothing <= 0) keptValid = false;
     if (!s.holdFrame) { resetHistory |= heldValid; heldValid = false; }
     else {
         if (!heldInput) heldInput = gpu.Texture(width, height, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_STATE_COMMON);
@@ -419,7 +500,8 @@ ID3D12Resource* Processor::RunLegacy(ID3D12Resource* input, const Settings& s, b
             }
             // Estimate in model pixels so both passes receive correctly scaled vectors.
             reset = opticalFlow->Estimate(flowInput ? flowInput.Get() : motionInput,
-                resetHistory || lastTone != s.tone || lastHdr != hdr || lastSdr != sdr || lastWhitePoint != whitePoint);
+                resetHistory || lastTone != s.tone || lastHdr != hdr || lastSdr != sdr || lastWhitePoint != whitePoint,
+                s.motionZeroBias);
             if (flowInput) Barrier(gpu.commands.Get(), flowInput.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             Barrier(gpu.commands.Get(), motionInput, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
             vectors = opticalFlow->Vectors(); ownFlow = true;
@@ -538,7 +620,42 @@ ID3D12Resource* Processor::RunLegacy(ID3D12Resource* input, const Settings& s, b
             return std::pair{current, written};
         };
         ID3D12Resource* evaluatedAnswer = answer.Get();
-        bool reappliedWritten = false;
+        bool reappliedWritten = false, steadyUsed = false;
+        // Settings::editSmoothing ("Steady edit"): the edit of all passes together (answer - input) blended with the
+        // previous frame's, moved along this frame's estimated vectors. Needs real vectors at the model's size; not in
+        // a chain of stages. With Picture first it runs on the late evaluation (each frame's, so only with an edit
+        // interval of 1: the vectors span one frame).
+        // kSteadyTolerance: the difference between the two edits (per colour channel, in the model's encoded
+        // values, 0..1) at which the kept edit is no longer used: a real change (motion the vectors missed,
+        // light, an animation) takes the new edit at once; flicker smaller than that is smoothed.
+        // kSteadyInputTolerance: the change of the input's brightness (moved along the motion) at which it is no
+        // longer used: there the input itself changed (film grain, noise) and so may the edit. Without it, film
+        // grain flickered more than with no steady edit (the kept edit carried the last frame's grain); 0.001..0.03
+        // measured with --stability-check (WoW sequence, pan, grain 1.5 % and 4 %): 0.002 was best overall.
+        // NR_STEADY_TOLERANCE and NR_STEADY_INPUT_TOLERANCE override them (checks).
+        static const float kSteadyTolerance = [] { const wchar_t* v = _wgetenv(L"NR_STEADY_TOLERANCE"); return v && *v ? std::clamp(float(_wtof(v)), 1e-3f, 1.f) : .04f; }();
+        static const float kSteadyInputTolerance = [] { const wchar_t* v = _wgetenv(L"NR_STEADY_INPUT_TOLERANCE"); return v && *v ? std::clamp(float(_wtof(v)), 1e-4f, 10.f) : .002f; }();
+        const bool steadyPossible = s.editSmoothing > 0 && usedMotionVectors && usedMotionVectors != motion.Get() && !modelStage &&
+            !preparedProxy && (!lateEdit || editInterval == 1);
+        // The evaluated answer (non-pixel-shader readable) in, the steady answer (readable) out. Uses c and p as they are.
+        const auto applySteady = [&](ID3D12Resource* evaluated) -> ID3D12Resource* {
+            if (!steadyAnswer) {
+                steadyAnswer = gpu.Texture(modelWidth, modelHeight, DXGI_FORMAT_R16G16B16A16_FLOAT);
+                for (auto& kept : keptEdit) kept = gpu.Texture(modelWidth, modelHeight, DXGI_FORMAT_R16G16B16A16_FLOAT);
+                keptValid = false;
+            }
+            auto steady = p; steady.Mode = 23; steady.Width = modelWidth; steady.Height = modelHeight;
+            // A history reset (cut, start, setting change) takes the new edit only, and keeps it for the next frame.
+            steady.TransferStrength = reset || !keptValid ? 0.f : std::clamp(s.editSmoothing, 0.f, .9f);
+            steady.ColourStrength = kSteadyTolerance; steady.MaxRatio = kSteadyInputTolerance;
+            ID3D12Resource* previous = keptEdit[keptIndex].Get(); ID3D12Resource* next = keptEdit[1 - keptIndex].Get();
+            Barrier(c, previous, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            Dispatch(SteadySlot, steady, proxy.Get(), evaluated, previous, steadyAnswer.Get(), next, nullptr, vectors);
+            Barrier(c, previous, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            Barrier(c, steadyAnswer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            keptIndex = 1 - keptIndex; keptValid = true;
+            return steadyAnswer.Get();
+        };
         if (!externalAnswer && spatialLayout.active) {
             DlssNr::GuideRegions regions{};
             regions.depth = {0, 0, modelWidth, modelHeight};
@@ -565,6 +682,9 @@ ID3D12Resource* Processor::RunLegacy(ID3D12Resource* input, const Settings& s, b
             // No model on this frame. (The answer's state as an evaluation leaves it, for the barriers below.)
             Barrier(c, answer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             ++fieldAge;
+            // (the steady edit's kept edit would be older than the vectors say; Picture first on every frame keeps it:
+            // its evaluation at the end of this function is this frame's and takes it further)
+            if (!lateDue || editInterval != 1) keptValid = false;
         } else if (!externalAnswer) {
             // The vectors are this frame's against the one before; the history is fieldAge + 1 frames old.
             runtime->motionScale = fieldPass && fieldValid && !cut ? float(fieldAge + 1) : 1.0f;
@@ -572,6 +692,8 @@ ID3D12Resource* Processor::RunLegacy(ID3D12Resource* input, const Settings& s, b
                 reapplied, depth.Get(), vectors, modelWidth, modelHeight);
             runtime->motionScale = 1.0f;
             fieldAge = 0; fieldValid = fieldPass;
+            if (steadyPossible) { evaluatedAnswer = applySteady(evaluatedAnswer); steadyUsed = true; }
+            else keptValid = false;
         }
         gpu.Time(GpuStage::NR, true);
         ID3D12Resource* modelAnswer = externalAnswer ? externalAnswer : evaluatedAnswer;
@@ -672,6 +794,8 @@ ID3D12Resource* Processor::RunLegacy(ID3D12Resource* input, const Settings& s, b
         Barrier(c, original.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         if (!externalAnswer) Barrier(c, answer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         if (reappliedWritten) Barrier(c, reapplied.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        if (steadyUsed) Barrier(c, steadyAnswer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        steadyApplied = steadyUsed;
         if (halo) Barrier(c, filteredAnswer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         Barrier(c, output.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
         gpu.Time(GpuStage::Resolve, true);
@@ -688,8 +812,11 @@ ID3D12Resource* Processor::RunLegacy(ID3D12Resource* input, const Settings& s, b
             const auto [lateAnswer, lateWritten] = runPasses(proxy.Get(), passInput.Get(), answer.Get(),
                 reapplied, depth.Get(), vectors, modelWidth, modelHeight);
             runtime->motionScale = 1.0f;
+            // Steady edit on this frame's late evaluation (steadyPossible: an edit interval of 1 here).
+            const bool lateSteady = steadyPossible;
+            ID3D12Resource* lateModel = lateSteady ? applySteady(lateAnswer) : lateAnswer;
+            if (!lateSteady) keptValid = false;
             gpu.Time(GpuStage::NR, true);
-            ID3D12Resource* lateModel = lateAnswer;
             const bool lateHalo = s.haloSuppression > 0 || s.haloBrightSuppression > 0;
             if (lateHalo) {
                 if (!filteredAnswer) filteredAnswer = gpu.Texture(modelWidth, modelHeight, DXGI_FORMAT_R16G16B16A16_FLOAT);
@@ -709,6 +836,7 @@ ID3D12Resource* Processor::RunLegacy(ID3D12Resource* input, const Settings& s, b
             Barrier(c, answer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             if (lateWritten) Barrier(c, reapplied.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             if (lateHalo) Barrier(c, filteredAnswer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            if (lateSteady) { Barrier(c, steadyAnswer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS); steadyApplied = true; }
             fieldAge = 0; // (counted from the frame the edit was made for)
             if (split) { gpu.EndLate(); c = gpu.commands.Get(); }
         }
