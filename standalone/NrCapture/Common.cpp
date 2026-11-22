@@ -133,7 +133,7 @@ Settings LoadSettings(const std::filesystem::path& settingsFile) {
     s.compareLabels = number(L"CompareLabels", 1, 0, 1) != 0;
     s.labelScale = number(L"LabelScale", 1, .5f, 5);
     s.model.style = (unsigned)number(L"Style", 0, 0, 2);
-    s.model.preset = (unsigned)number(L"Preset", 0, 0, Settings::ModelLast);
+    s.model.preset = Settings::CurrentModel((unsigned)number(L"Preset", 0, 0, Settings::ModelLast));
     s.model.autoMask = number(L"AutoMask", 1, 0, 1) != 0;
     s.transfer = (unsigned)number(L"Transfer", 1, 0, 3);
     s.upscaler = (unsigned)number(L"Upscaler", 0, 0, 1);
@@ -208,7 +208,7 @@ Settings LoadSettings(const std::filesystem::path& settingsFile) {
         model.localTone = number(key(L"LocalTone").c_str(), 0, 0, 2);
         model.skinStructure = number(key(L"SkinStructure").c_str(), model.skinStructure, -1, 2);
         model.style = (unsigned)number(key(L"Style").c_str(), (float)model.style, 0, 2);
-        model.preset = (unsigned)number(key(L"Preset").c_str(), (float)model.preset, 0, Settings::ModelLast);
+        model.preset = Settings::CurrentModel((unsigned)number(key(L"Preset").c_str(), (float)model.preset, 0, Settings::ModelLast));
         model.autoMask = number(key(L"AutoMask").c_str(), model.autoMask ? 1.f : 0.f, 0, 1) != 0;
         s.passOverrides[pass - 1] = model;
     }

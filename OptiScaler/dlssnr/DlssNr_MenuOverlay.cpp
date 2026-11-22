@@ -71,6 +71,8 @@ void RenderNrCompareTags()
     if (const unsigned other = DlssNr::Nvfp4::ComparisonShown())
     {
         onText = DlssNr::Nvfp4::ModelName(config->DlssNrPreset.value_or_default());
+        if (config->DlssNrDebugView.value_or_default() == 3)
+            return; // the difference of the two models fills the picture: there are no sides to name
         offText = DlssNr::Nvfp4::ModelName(other);
     }
     const char* leftText = swap ? onText : offText;

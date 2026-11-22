@@ -15,15 +15,17 @@ inline unsigned int RequestedPreset(const Config& cfg, unsigned int pass)
     unsigned int preset = cfg.DlssNrPreset.value_or_default();
     if (pass > 0 && pass <= 2 && pass <= std::size(cfg.DlssNrPassOverrides))
         preset = cfg.DlssNrPassOverrides[pass - 1].preset.value_or(preset);
-    return preset;
+    return Nvfp4::Current(preset);
 }
 
 // The model a comparison puts beside the picture (the Compare control's "Other side"); 0: the original picture.
 inline unsigned int CompareModel(const Config& cfg)
 {
-    const unsigned int model = cfg.DlssNrCompareModel.value_or_default();
+    // With Compare on it is the other side; with the Difference debug view the difference is taken against it.
+    const unsigned int model = Nvfp4::Current(cfg.DlssNrCompareModel.value_or_default());
     const bool known = (model >= 1 && model <= 2) || Nvfp4::IsKnown(model);
-    return cfg.DlssNrCompare.value_or_default() != 0 && known ? model : 0u;
+    const bool wanted = cfg.DlssNrCompare.value_or_default() != 0 || cfg.DlssNrDebugView.value_or_default() == 3;
+    return wanted && known ? model : 0u;
 }
 
 // Whether any of the passes (or the comparison) asks for one of DlssNr::Nvfp4's models that run as layers over the NR
@@ -51,6 +53,11 @@ inline ModelSettings PassSettings(const Config& cfg, unsigned int pass)
         const auto& extra = cfg.DlssNrPassOverrides[pass - 1];
         if (pass <= 2) // Only the legacy pass 2/3 keys have a preset override.
             result.preset = extra.preset.value_or(result.preset);
+    }
+    result.preset = Nvfp4::Current(result.preset);
+    if (pass > 0 && pass <= std::size(cfg.DlssNrPassOverrides))
+    {
+        const auto& extra = cfg.DlssNrPassOverrides[pass - 1];
         result.style = extra.style.value_or(result.style);
         result.intensity = extra.intensity.value_or(result.intensity);
         result.localStructure = extra.structure.value_or(result.localStructure);

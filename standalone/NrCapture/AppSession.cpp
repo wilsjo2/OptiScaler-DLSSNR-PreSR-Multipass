@@ -150,7 +150,8 @@ void App::Run(CaptureSource source, Settings initial) {
                 Say(L"Preparing motion estimation..."); Log("Preparing motion estimation.");
             }
             // A model comparison runs the passes twice: the picture's own (shown whole) and the other model's.
-            const bool comparing = !calibrating && current.ComparingModels();
+            const bool differing = !calibrating && current.DifferenceOfModels();
+            const bool comparing = !calibrating && (current.ComparingModels() || differing);
             const Settings pictureSide = comparing ? current.PictureSide() : current;
             const Settings otherSide = comparing ? current.ComparisonSide() : Settings{};
             if (comparing && !session->comparison) {
@@ -195,8 +196,14 @@ void App::Run(CaptureSource source, Settings initial) {
             g.Begin();
             if (diagnostics && (timingFrame++ % 32) == 0) g.BeginTimings();
             // (No FPS figures are drawn into a picture the calibrator measures.)
+            // The difference of two models: the other model runs first, and the picture's own resolve subtracts its answer.
+            processor.differenceAgainst = nullptr;
+            if (differing) {
+                session->comparison->Run(capture.Input(), otherSide, hdr, reset || (processed && current != applied), desktopWhite, frameTime, -1, -1);
+                processor.differenceAgainst = session->comparison->LastAnswer();
+            }
             auto* output = processor.Run(capture.Input(), pictureSide, hdr, reset, desktopWhite, frameTime, calibrating ? -1 : displayedFps, calibrating ? -1 : displayedOutputFps);
-            if (comparing) {
+            if (comparing && !differing) {
                 auto* other = session->comparison->Run(capture.Input(), otherSide, hdr, reset || (processed && current != applied), desktopWhite, frameTime, -1, -1);
                 output = session->composer->Compose(output, other, current);
             }

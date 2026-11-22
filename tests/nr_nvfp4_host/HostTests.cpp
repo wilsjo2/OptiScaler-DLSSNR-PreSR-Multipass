@@ -415,6 +415,10 @@ int main()
             rank = now;
         }
         CHECK(rank == 3 && std::string(ModelName(9)) == "Unavailable preset");
+        // One version of each pass-in-one model: an earlier number means the model as it is now.
+        CHECK(Current(ModelTwoDouble) == ModelTwoDouble4k && Current(ModelTwoTriple) == ModelTwoTriple4k);
+        CHECK(Current(ModelFp8Double) == ModelFp8Double4k && Current(ModelFp8Triple2) == ModelFp8Triple4k);
+        CHECK(Current(ModelInt8Double) == ModelInt8Double && std::string(ModelName(ModelFp8Double)) == "FP8 2xPass-in-one");
         Release(device);
         CHECK(Mock::host.released >= 2);
     }

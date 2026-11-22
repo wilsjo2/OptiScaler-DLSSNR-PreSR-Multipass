@@ -97,6 +97,46 @@ void CompareModelsCheck(const std::filesystem::path& fixture, UINT w, UINT h, un
             mode == 3 ? "side by side" : "wipe", swap ? "swapped" : "as set", model, otherModel, wrong, 100.0 * differing / (double(w) * h));
         failed |= wrong != 0 || (model != otherModel && differing == 0);
     }
+    // The Difference debug view between two models (Settings::DifferenceOfModels): against the same model the picture
+    // is one grey; against the other model it is not, and it is not the ordinary difference view either.
+    {
+        const auto difference = [&](int against) {
+            Settings s; s.runtime = runtime; s.model.preset = model; s.inputColour = 1; s.estimateMotion = false;
+            s.debugView = 3; s.compareModel = against;
+            const bool two = s.DifferenceOfModels();
+            if (two != (against >= 0)) throw std::runtime_error("The settings do not ask for the difference of two models.");
+            const auto pictureSide = two ? s.PictureSide() : s; const auto otherSide = two ? s.ComparisonSide() : Settings{};
+            processor.Resize(w, h, pictureSide); if (two) comparison.Resize(w, h, otherSide);
+            for (unsigned frame = 0; frame < frames; ++frame) {
+                gpu.Begin();
+                processor.differenceAgainst = nullptr;
+                if (two) { comparison.Run(input.Get(), otherSide, false, frame == 0, 1); processor.differenceAgainst = comparison.LastAnswer(); }
+                auto* picture = processor.Run(input.Get(), pictureSide, false, frame == 0, 1);
+                if (two && !processor.differenceAgainst) throw std::runtime_error("The other model left no answer to subtract.");
+                if (frame + 1 == frames) {
+                    from = {}; from.pResource = picture; from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                    to = {}; to.pResource = readback[0].Get(); to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; to.PlacedFootprint = footprint;
+                    gpu.commands->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+                }
+                gpu.Submit();
+                if (!gpu.Drain(60000)) throw std::runtime_error("Compare-models check frame timeout.");
+            }
+            processor.differenceAgainst = nullptr;
+            return read(readback[0].Get());
+        };
+        const auto grey = [&](const std::vector<HALF>& picture) { // share of pixels equal to the most common one
+            const HALF* first = &picture[(size_t(h / 2) * w + w / 2) * 4]; size_t same = 0;
+            for (size_t i = 0; i < size_t(w) * h; ++i) same += picture[i * 4] == first[0] && picture[i * 4 + 1] == first[1] && picture[i * 4 + 2] == first[2];
+            return 100.0 * same / (double(w) * h);
+        };
+        const auto ordinary = difference(-1), same = difference(int(model)), other = difference(int(otherModel));
+        size_t unlike = 0;
+        for (size_t i = 0; i < size_t(w) * h; ++i) unlike += other[i * 4] != ordinary[i * 4] || other[i * 4 + 1] != ordinary[i * 4 + 1] || other[i * 4 + 2] != ordinary[i * 4 + 2];
+        const double sameGrey = grey(same), otherGrey = grey(other), unlikeShare = 100.0 * unlike / (double(w) * h);
+        std::cout << std::format("difference view: model {} against itself {:.2f} % one grey; against {} {:.2f} % grey; unlike the ordinary difference view in {:.1f} % of the picture\n",
+            model, sameGrey, otherModel, otherGrey, unlikeShare);
+        failed |= sameGrey < 99.0 || (model != otherModel && (otherGrey > 90.0 || unlikeShare < 10.0));
+    }
     if (!gpu.Drain(30000)) throw std::runtime_error("Compare-models check: final drain timeout.");
     ReleaseNvfp4(gpu.device.Get());
     if (failed) throw std::runtime_error("Compare-models check FAILED.");

@@ -1195,12 +1195,26 @@ auto DlssNr_Dx12::State::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
 
         // The comparison's picture: the same resolve from the other model's answer with the sides exchanged, so the
         // other model's picture lies where the main resolve shows the original one. That part is copied over below.
-        bool compareResolved = false;
-        if (compareAnswer != nullptr)
+        bool compareResolved = false, compareDifference = false;
+        if (compareAnswer != nullptr && resolveParams.DebugView == 3)
+        {
+            // The Difference view between the two models: the view shows (answer - model input) x 20 around grey, so
+            // with the other model's answer in the input's place it shows this model's answer minus the other's.
+            if (!enlargementReady || superDownOk || resolveProxy != ordinaryProxy || resolveAnswer != ordinaryAnswer)
+                compareNote = "not with supersampling or DLSS enlargement";
+            else
+            {
+                resolveProxy = compareAnswer;
+                resolveParams.CompareMode = 0;
+                resolveParams.Transfer = 1;
+                compareDifference = true;
+            }
+        }
+        else if (compareAnswer != nullptr)
         {
             if (!enlargementReady || superDownOk || resolveProxy != ordinaryProxy || resolveAnswer != ordinaryAnswer ||
                 resolveParams.DebugView != 0 || resolveParams.CompareMode == 0)
-                compareNote = "not with a debug view, supersampling or DLSS enlargement";
+                compareNote = "not with this debug view, supersampling or DLSS enlargement";
             else
             {
                 if (nr.compareColor == nullptr)
@@ -1220,6 +1234,8 @@ auto DlssNr_Dx12::State::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
             enlargementReady && shader.DispatchPass(cmdList, resolveParams, resolveProxy, resolveAnswer,
                                                     resolveOriginal, encoded.exposure, nullptr, resolveTarget, nullptr);
         compositionSucceeded = resolved;
+        if (compareDifference && resolved)
+            compareShown = compareModel;
         if (resizeFieldReadable)
             Barrier(cmdList, enlarger->input.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS);

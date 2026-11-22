@@ -62,6 +62,11 @@ public:
     // Current-to-previous scene motion used by NR, valid through frame completion: the whole picture at the
     // first pass's model size, in that size's pixel units. Null when NR estimated none this frame.
     ID3D12Resource* SceneMotion() const { return sceneMotion; }
+    // Settings::DifferenceOfModels. LastAnswer: the model answer the last Run resolved (model space, model size,
+    // UNORDERED_ACCESS after Run; null when none). differenceAgainst: another Processor's LastAnswer of the same
+    // frame; the Difference debug view then shows this answer minus that one. It is read and left as it arrived.
+    ID3D12Resource* LastAnswer() const { return lastAnswer; }
+    ID3D12Resource* differenceAgainst = nullptr;
     ID3D12Resource* ModelInput() const { return advanced ? chainInput.Get() : proxy.Get(); } // Diagnostic readback; UAV after Run completes.
     std::pair<UINT, UINT> PassModelSize(unsigned pass) const;
     // Diagnostic: NrPassBorrow outcome of each network evaluation of the last frame; 0 evaluations when it did not borrow.
@@ -81,6 +86,7 @@ private:
     std::vector<std::shared_ptr<Processor>> stages;
     std::vector<Settings> stageSettings;
     ID3D12Resource* externalAnswer = nullptr;
+    ID3D12Resource* lastAnswer = nullptr;
     ID3D12Resource* preparedProxy = nullptr;
     ID3D12Resource* chainMotionInput = nullptr;
     ID3D12Resource* sharedMotionVectors = nullptr;

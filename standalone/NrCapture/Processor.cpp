@@ -456,7 +456,7 @@ ID3D12Resource* Processor::RunLegacy(ID3D12Resource* input, const Settings& s, b
     // Colour and signed edits are different DLSS inputs; never reuse one history for the other.
     resetHistory |= privateDlss && lastTransfer != s.transfer;
     lastTransfer = s.transfer;
-    sceneMotion = nullptr;
+    sceneMotion = nullptr; lastAnswer = nullptr;
     usedMotionVectors = nullptr;
     steadyApplied = false;
     if (s.editSmoothing <= 0) keptValid = false;
@@ -774,7 +774,20 @@ ID3D12Resource* Processor::RunLegacy(ID3D12Resource* input, const Settings& s, b
         p.CompareSplit = s.compareSplit; p.CompareZoom = s.compareZoom; p.CompareSwap = s.compareSwap;
         if (s.debugView != 0) { modelAnswer = externalAnswer ? externalAnswer : evaluatedAnswer; resolveProxy = preparedProxy ? preparedProxy : proxy.Get(); p.Transfer = 1; }
         if (modelStage && !edgeAware) p.Mode = 20;
+        lastAnswer = externalAnswer ? nullptr : evaluatedAnswer;
+        // The difference of two models: the view shows (answer - model input) x 20, so the other model's answer
+        // takes the input's place.
+        ID3D12Resource* against = nullptr;
+        if (s.debugView == 3 && differenceAgainst && differenceAgainst != modelAnswer) {
+            const auto mine = modelAnswer->GetDesc(), theirs = differenceAgainst->GetDesc();
+            if (mine.Width == theirs.Width && mine.Height == theirs.Height) against = differenceAgainst;
+        }
+        if (against) {
+            Barrier(c, against, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            resolveProxy = against; p.CompareMode = 0;
+        }
         Dispatch(7, p, resolveProxy, modelAnswer, original.Get(), sdr ? sdrOutput.Get() : output.Get(), nullptr);
+        if (against) Barrier(c, against, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         if (sdr) {
             Barrier(c, sdrOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             p.Mode = 12;

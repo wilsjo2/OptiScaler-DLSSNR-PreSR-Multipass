@@ -266,7 +266,7 @@ void App::CreateControls() {
     box(L"Apply model edit (uncheck to keep NR running hidden)", ApplyModel, true, 36, 278);
     combo(L"Comparison", Compare, {L"Processed", L"Original", L"Wipe", L"Side by side"}, 0, 36, 330);
     // What a wipe or side by side puts beside the picture: the original, or the same passes run with another model.
-    combo(L"Other side of a wipe or side by side", CompareModelBox, {L"Original picture"}, 0, 36, 400);
+    combo(L"Other model (wipe, side by side, Difference view)", CompareModelBox, {L"Original picture"}, 0, 36, 400);
     for (auto name : ModelNames) SendMessageW(Control(CompareModelBox), CB_ADDSTRING, 0, (LPARAM)name);
     combo(L"Debug view", DebugView, {L"Off", L"Proxy (model input)", L"Raw model output", L"Difference (20x)"}, 0, 36, 470);
     Add(L"STATIC", L"A model on the other side: every pass runs with it instead of its own model, on the left (swap: right). Side by side then shows the middle of both pictures at full size, without labels.", 0, 36, 540, 410, 80, 0);

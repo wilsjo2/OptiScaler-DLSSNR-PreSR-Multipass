@@ -315,7 +315,7 @@ template <typename Option> static void NrModelCombo(Option* opt, bool allowInher
     // DlssNr::Nvfp4::kModels, sorted by the precision of the weights: FP8 (the runtime's presets 1 and 2 and the FP8
     // pass-in-one models), INT8, NVFP4 (4-bit).
     const bool inherited = allowInherit && !opt->has_value();
-    const uint32_t preset = opt->has_value() ? opt->value() : 0u;
+    const uint32_t preset = DlssNr::Nvfp4::Current(opt->has_value() ? opt->value() : 0u);
     const char* preview = inherited ? "Inherit pass 1" : DlssNr::Nvfp4::ModelName(preset);
 
     if (ImGui::BeginCombo("NR model", preview))
@@ -339,14 +339,13 @@ template <typename Option> static void NrModelCombo(Option* opt, bool allowInher
                "Older runtimes fall back to their default when a model is unavailable.\n"
                "FP8 2xPass-in-one, FP8 3xPass-in-one: the look of two or three passes in one, as FP8 models for\n"
                "RTX 40 and 50 series GPUs (NVIDIA's own FP8 kernels with weights of ours; files in\n"
-               "OptiScaler/nvfp4/fp8). The v2 models are the same two with other weights.\n"
+               "OptiScaler/nvfp4/fp8).\n"
                "INT8 Original, INT8 2xPass-in-one: INT8 models for RTX 30, 40 and 50 series GPUs (D3D12 path;\n"
                "files in OptiScaler/nvfp4/int8). They run wholly on kernels of ours and need no NR runtime.\n"
                "NVFP4 Original, NVFP4 2xPass-in-one, NVFP4 3xPass-in-one: 4-bit models for RTX 50 series GPUs\n"
                "(D3D12 path; files in OptiScaler/nvfp4). They carry all their own weights and use none of the\n"
                "runtime's, so any NR runtime that offers the original model (preset 1) works, such as 310.8.0\n"
                "or 310.9.16.0.\n"
-               "The 4K models (NVFP4 and FP8): the same models with weights made for 4K output.\n"
                "There is no fallback: if a model of ours cannot run, NR is not applied and the reason is shown\n"
                "here in red.\n"
                "Run a pass-in-one model as ONE pass: Cinematic, intensity, tone and structure at 1.\n"
@@ -656,11 +655,14 @@ void RenderInspect(Config* config)
 
     HelpMarker("Compare the NR output with the original picture, or with another NR model.");
 
-    if (compare != 0)
+    const bool differenceView = config->DlssNrDebugView.value_or_default() == 3;
+    if (compare != 0 || differenceView)
     {
-        // What lies beside the NR picture: the original picture, or one pass of another model.
-        const uint32_t other = config->DlssNrCompareModel.value_or_default();
-        if (ImGui::BeginCombo("Other side", other == 0 ? "Original picture" : DlssNr::Nvfp4::ModelName(other)))
+        // What lies beside the NR picture (or what the Difference view subtracts): the original picture, or one pass
+        // of another model.
+        const uint32_t other = DlssNr::Nvfp4::Current(config->DlssNrCompareModel.value_or_default());
+        if (ImGui::BeginCombo(compare != 0 ? "Other side" : "Difference against",
+                              other == 0 ? "Original picture" : DlssNr::Nvfp4::ModelName(other)))
         {
             if (ImGui::Selectable("Original picture", other == 0))
                 config->DlssNrCompareModel = 0u;
@@ -672,8 +674,10 @@ void RenderInspect(Config* config)
         HelpMarker("Compare two models directly: the NR picture on one side, and on the other the same frame\n"
                    "through ONE pass of the model chosen here, with pass 1's style and strengths.\n"
                    "Both models are loaded and run every frame, so the frame costs more while this is on.\n"
-                   "Not available with a debug view, peripheral compression, pass borrowing, supersampling or\n"
-                   "DLSS enlargement.");
+                   "With the debug view \"Difference (amplified)\" the whole picture shows the difference between\n"
+                   "the two models' answers (this model minus the other, 20x, grey = the same).\n"
+                   "Not available with another debug view, peripheral compression, pass borrowing, supersampling\n"
+                   "or DLSS enlargement.");
         if (other != 0)
         {
             if (DlssNr::Nvfp4::ComparisonShown() == other)
@@ -682,12 +686,15 @@ void RenderInspect(Config* config)
             else if (const auto note = DlssNr::Nvfp4::ComparisonNote(); !note.empty())
             {
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.35f, 0.3f, 1.0f));
-                ImGui::TextWrapped("The other model is NOT shown (that side is the original picture): %s",
+                ImGui::TextWrapped("The other model is NOT shown (the original picture is used instead): %s",
                                    note.c_str());
                 ImGui::PopStyleColor();
             }
         }
 
+    }
+    if (compare != 0)
+    {
         Checkbox("Swap sides", config->DlssNrCompareSwap);
         Checkbox("Label the sides", config->DlssNrCompareTags);
         if (config->DlssNrCompareTags.value_or_default())
@@ -712,7 +719,9 @@ void RenderInspect(Config* config)
     if (ImGui::Combo("Debug view", &debugView, debugNames, IM_ARRAYSIZE(debugNames)))
         config->DlssNrDebugView = (uint32_t) debugView;
 
-    HelpMarker("Difference is amplified 20x. Grey means unchanged. Proxy and raw model output use unpacked geometry. "
+    HelpMarker("Difference is amplified 20x. Grey means unchanged. With a model chosen under \"Difference against\" "
+               "(or Compare's \"Other side\") it is the difference between the two models. "
+               "Proxy and raw model output use unpacked geometry. "
                "Compressed model input shows the input before unpacking, scaled to fill the screen.");
 }
 } // namespace DlssNr::MenuSections

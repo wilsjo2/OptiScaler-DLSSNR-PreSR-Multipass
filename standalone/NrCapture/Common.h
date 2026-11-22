@@ -74,6 +74,14 @@ struct Settings {
     // Model A. INT8 2xPass-in-one (set 2): one Cinematic pass at intensity, tone and structure 1 with the look of
     // two. Files: nvfp4/int8.
     static constexpr unsigned ModelAInt8 = 25, ModelAInt8TwoDouble = 26, ModelLast = 26;
+    // One version of each model. The numbers 15..20 were earlier weights of the four pass-in-one models: a saved one
+    // means the model as it is now (21..24).
+    static constexpr unsigned CurrentModel(unsigned preset)
+    {
+        return preset == ModelANvfp4TwoDouble ? ModelANvfp4TwoDouble4k : preset == ModelANvfp4TwoTriple ? ModelANvfp4TwoTriple4k
+            : preset == ModelAFp8TwoDouble || preset == ModelAFp8TwoDouble2 ? ModelAFp8TwoDouble4k
+            : preset == ModelAFp8TwoTriple || preset == ModelAFp8TwoTriple2 ? ModelAFp8TwoTriple4k : preset;
+    }
     static constexpr bool IsPassInOne(unsigned preset)
     {
         return preset == ModelANvfp4TwoTriple || preset == ModelANvfp4TwoDouble || preset == ModelANvfp4TwoDouble4k ||
@@ -242,14 +250,17 @@ struct Settings {
         return false;
     }
     // Wipe or side by side with a model on the other side (not while the edit is hidden or the original is shown).
-    bool ComparingModels() const { return compareModel >= 0 && IsModel(unsigned(compareModel)) && (compare == 2 || compare == 3) && applyModel && enabled; }
+    bool ComparingModels() const { return compareModel >= 0 && IsModel(unsigned(compareModel)) && (compare == 2 || compare == 3) && applyModel && enabled && !DifferenceOfModels(); }
+    // The "Difference (20x)" debug view with a model chosen as the other side: the whole picture shows this model's
+    // answer minus the other model's (same passes), in place of the answer minus the model's input.
+    bool DifferenceOfModels() const { return compareModel >= 0 && IsModel(unsigned(compareModel)) && debugView == 3 && applyModel && enabled; }
     // The other side of a model comparison: these settings with every pass's model replaced, shown whole.
     Settings ComparisonSide() const {
         Settings side = *this;
         side.keepLayers = (Nvfp4Pass() ? 1u : 0u) | (Nvfp4PassInOne() ? 2u : 0u) | (Fp8Pass() ? 4u : 0u);
         side.model.preset = unsigned(compareModel);
         for (auto& pass : side.passOverrides) if (pass) pass->preset = unsigned(compareModel);
-        side.compare = 0; side.compareModel = -1; side.showFoveation = false;
+        side.compare = 0; side.compareModel = -1; side.showFoveation = false; side.debugView = 0;
         return side;
     }
     // The picture's own side of a model comparison: shown whole; the two are put together afterwards.

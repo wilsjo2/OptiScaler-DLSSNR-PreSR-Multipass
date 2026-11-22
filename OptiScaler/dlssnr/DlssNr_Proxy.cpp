@@ -32,6 +32,9 @@ struct ProxyState
     // the pass then reports through DlssNr::Nvfp4::OursRan and nothing is shown.
     std::shared_ptr<void> host;
     bool hostModel = false, hostFailed = false, hostMotionTold = false;
+    // The game's motion vectors when they are a region of a larger texture: the host samples whole textures, so the
+    // region is copied into this one each frame.
+    std::shared_ptr<ID3D12Resource> hostMotion;
 };
 
 void DestroyState(ProxyState& state)
@@ -124,7 +127,7 @@ struct Context::Impl
 
 void Context::Impl::RetireState()
 {
-    if (state.feature != nullptr || state.params != nullptr || state.host)
+    if (state.feature != nullptr || state.params != nullptr || state.host || state.hostMotion)
         lifetime.Retire([retired = state]() mutable { DestroyState(retired); });
     state = {};
     lifetime.BeginGeneration();
@@ -285,19 +288,89 @@ unsigned int Context::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Device* devi
 
     if (state.hostModel)
     {
-        // The host samples the whole motion texture: a region of a larger one cannot be given to it, and the frame is
-        // then run without history.
+        // The host samples the whole motion texture. When the game's vectors are a region of a larger one (dynamic
+        // resolution, an atlas), that region is copied into a texture of its own first.
         ID3D12Resource* motion = frame.motion;
         const auto motionDesc = motion->GetDesc();
         const auto& region = frame.guides.motion;
         if (region.x != 0 || region.y != 0 || region.width != motionDesc.Width || region.height != motionDesc.Height)
         {
-            motion = nullptr;
-            if (!state.hostMotionTold)
-                LOG_WARN("DLSS-NR INT8 model: the motion vectors are a {}x{} region at {},{} of a {}x{} texture, which "
-                         "the own pass host cannot read; every frame runs without history",
-                         region.width, region.height, region.x, region.y, (unsigned) motionDesc.Width,
-                         motionDesc.Height);
+            const bool inside = region.width != 0 && region.height != 0 &&
+                                uint64_t(region.x) + region.width <= motionDesc.Width &&
+                                uint64_t(region.y) + region.height <= motionDesc.Height &&
+                                motionDesc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
+                                motionDesc.SampleDesc.Count == 1;
+            if (inside && state.hostMotion)
+            {
+                const auto held = state.hostMotion->GetDesc();
+                if (held.Width != region.width || held.Height != region.height || held.Format != motionDesc.Format)
+                {
+                    // Earlier command lists may still read it: freed once the GPU has finished them.
+                    lifetime.Retire([retired = std::move(state.hostMotion)]() mutable { retired.reset(); });
+                    state.hostMotion.reset();
+                }
+            }
+            if (inside && !state.hostMotion)
+            {
+                D3D12_HEAP_PROPERTIES heap {};
+                heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+                D3D12_RESOURCE_DESC desc {};
+                desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+                desc.Width = region.width;
+                desc.Height = region.height;
+                desc.DepthOrArraySize = 1;
+                desc.MipLevels = 1;
+                desc.Format = motionDesc.Format;
+                desc.SampleDesc.Count = 1;
+                ID3D12Resource* made = nullptr;
+                if (SUCCEEDED(state.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                                                    nullptr, IID_PPV_ARGS(&made))))
+                    state.hostMotion.reset(made, [](ID3D12Resource* resource) { resource->Release(); });
+            }
+            if (inside && state.hostMotion)
+            {
+                const auto transition = [&](ID3D12Resource* resource, D3D12_RESOURCE_STATES from,
+                                            D3D12_RESOURCE_STATES to)
+                {
+                    D3D12_RESOURCE_BARRIER barrier {};
+                    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                    barrier.Transition.pResource = resource;
+                    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                    barrier.Transition.StateBefore = from;
+                    barrier.Transition.StateAfter = to;
+                    cmdList->ResourceBarrier(1, &barrier);
+                };
+                // (The model's guides arrive readable: NON_PIXEL_SHADER_RESOURCE.)
+                transition(motion, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                transition(state.hostMotion.get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                           D3D12_RESOURCE_STATE_COPY_DEST);
+                D3D12_TEXTURE_COPY_LOCATION to {}, from {};
+                to.pResource = state.hostMotion.get();
+                to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                from.pResource = motion;
+                from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                const D3D12_BOX box { region.x, region.y, 0, region.x + region.width, region.y + region.height, 1 };
+                cmdList->CopyTextureRegion(&to, 0, 0, 0, &from, &box);
+                transition(state.hostMotion.get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                           D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                transition(motion, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                motion = state.hostMotion.get();
+                if (!state.hostMotionTold)
+                    LOG_INFO("DLSS-NR INT8 model: the motion vectors are a {}x{} region at {},{} of a {}x{} texture; "
+                             "the region is copied for the own pass host each frame",
+                             region.width, region.height, region.x, region.y, (unsigned) motionDesc.Width,
+                             motionDesc.Height);
+            }
+            else
+            {
+                motion = nullptr;
+                if (!state.hostMotionTold)
+                    LOG_WARN("DLSS-NR INT8 model: the motion vectors' {}x{} region at {},{} of a {}x{} texture could "
+                             "not be copied; every frame runs without history",
+                             region.width, region.height, region.x, region.y, (unsigned) motionDesc.Width,
+                             motionDesc.Height);
+            }
             state.hostMotionTold = true;
         }
         DlssNr::Nvfp4::Int8Pass pass;

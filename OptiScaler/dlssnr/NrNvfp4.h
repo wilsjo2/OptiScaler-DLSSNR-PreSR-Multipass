@@ -61,6 +61,16 @@ constexpr unsigned Fp8Set(unsigned preset) // fp8/fp8_set<n>
 {
     return preset == ModelFp8Double4k ? 5 : preset == ModelFp8Triple4k ? 6 : IsFp8(preset) ? preset - 16 : 0;
 }
+// One version of each model. The numbers 15..20 were earlier weights of the four pass-in-one models: a saved one
+// means the model as it is now.
+constexpr unsigned Current(unsigned preset)
+{
+    return preset == ModelTwoDouble ? ModelTwoDouble4k
+           : preset == ModelTwoTriple ? ModelTwoTriple4k
+           : preset == ModelFp8Double || preset == ModelFp8Double2 ? ModelFp8Double4k
+           : preset == ModelFp8Triple || preset == ModelFp8Triple2 ? ModelFp8Triple4k
+           : preset;
+}
 constexpr bool IsKnown(unsigned preset)
 {
     return preset == ModelANvfp4 || IsPassInOne(preset) || IsFp8(preset) || IsInt8(preset);
@@ -78,24 +88,18 @@ inline constexpr ModelEntry kModels[] = {
     { 0, "Automatic" },
     { 1, "FP8 Original" },
     { 2, "FP8 Optimized" },
-    { ModelFp8Double, "FP8 2xPass-in-one" },
-    { ModelFp8Triple, "FP8 3xPass-in-one" },
-    { ModelFp8Double2, "FP8 2xPass-in-one v2" },
-    { ModelFp8Triple2, "FP8 3xPass-in-one v2" },
-    { ModelFp8Double4k, "FP8 2xPass-in-one 4K" },
-    { ModelFp8Triple4k, "FP8 3xPass-in-one 4K" },
+    { ModelFp8Double4k, "FP8 2xPass-in-one" },
+    { ModelFp8Triple4k, "FP8 3xPass-in-one" },
     { ModelInt8, "INT8 Original" },
     { ModelInt8Double, "INT8 2xPass-in-one" },
     { ModelANvfp4, "NVFP4 Original (4-bit kernels)" },
-    { ModelTwoDouble, "NVFP4 2xPass-in-one" },
-    { ModelTwoTriple, "NVFP4 3xPass-in-one" },
-    { ModelTwoDouble4k, "NVFP4 2xPass-in-one 4K" },
-    { ModelTwoTriple4k, "NVFP4 3xPass-in-one 4K" },
+    { ModelTwoDouble4k, "NVFP4 2xPass-in-one" },
+    { ModelTwoTriple4k, "NVFP4 3xPass-in-one" },
 };
 constexpr const char* ModelName(unsigned preset)
 {
     for (const auto& model : kModels)
-        if (model.preset == preset)
+        if (model.preset == Current(preset))
             return model.name;
     return "Unavailable preset";
 }
