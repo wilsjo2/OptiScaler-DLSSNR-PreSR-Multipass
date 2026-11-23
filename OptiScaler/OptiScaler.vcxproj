@@ -933,7 +933,9 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="shaders\rcas\RCAS_Dx12.cpp" />
     <ClCompile Include="upscalers\xess\XeSSFeature_Vk.cpp" />
     <ClCompile Include="Util.cpp" />
-    <ClCompile Include="version_check.cpp" />
+    <ClCompile Include="version_check.cpp">
+      <PreprocessorDefinitions Condition="'$(OptiScalerNrPackageTag)'!=''">OPTISCALER_NR_PACKAGE_TAG=$(OptiScalerNrPackageTag);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
     <ClCompile Include="inputs\XeSS_Debug.cpp" />
     <ClCompile Include="inputs\XeSS_Dx12.cpp" />
   </ItemGroup>

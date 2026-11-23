@@ -22,11 +22,41 @@ struct LatestReleaseInfo
 {
     std::string tag;
     std::string url;
+    std::string publishedAt;
+    feature_version version;
 };
 
-feature_version CurrentVersion() { return { VER_MAJOR_VERSION, VER_MINOR_VERSION, VER_HOTFIX_VERSION }; }
+#ifdef OPTISCALER_NR_PACKAGE_TAG
+constexpr std::string_view packageTag = STRINGIZE(OPTISCALER_NR_PACKAGE_TAG);
+constexpr auto packageMarker = "OptiScaler NR package: " STRINGIZE(OPTISCALER_NR_PACKAGE_TAG);
+#else
+constexpr std::string_view packageTag;
+constexpr auto packageMarker = "OptiScaler NR package: untagged";
+#endif
 
-std::optional<LatestReleaseInfo> FetchLatestRelease()
+std::optional<feature_version> ParseReleaseTag(std::string_view tag)
+{
+    if (!tag.starts_with('v'))
+        return std::nullopt;
+
+    tag.remove_prefix(1);
+    feature_version version;
+    for (auto* part : { &version.major, &version.minor, &version.patch })
+    {
+        const char* end = tag.data() + tag.size();
+        const auto [next, error] = std::from_chars(tag.data(), end, *part);
+        if (error != std::errc {})
+            return std::nullopt;
+        if (part == &version.patch)
+            return next == end ? std::optional(version) : std::nullopt;
+        if (next == end || *next != '.')
+            return std::nullopt;
+        tag.remove_prefix(next - tag.data() + 1);
+    }
+    return std::nullopt;
+}
+
+std::optional<LatestReleaseInfo> FetchLatestRelease(std::string& installedPublishedAt)
 {
     HINTERNET session = nullptr;
     HINTERNET connection = nullptr;
@@ -73,8 +103,10 @@ std::optional<LatestReleaseInfo> FetchLatestRelease()
         return std::nullopt;
     }
 
-    request = WinHttpOpenRequest(connection, L"GET", L"/repos/optiscaler/optiscaler/releases/latest", nullptr,
-                                 WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+    // The fork also publishes OptiScaler releases as prereleases.
+    constexpr auto releasePath = L"/repos/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass/releases?per_page=30";
+    request = WinHttpOpenRequest(connection, L"GET", releasePath, nullptr, WINHTTP_NO_REFERER,
+                                 WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
     if (request == nullptr)
     {
         LOG_WARN("Version check failed to open request: {}", GetLastError());
@@ -145,15 +177,29 @@ std::optional<LatestReleaseInfo> FetchLatestRelease()
 
     try
     {
-        auto json = nlohmann::json::parse(response);
-        LatestReleaseInfo info;
-        info.tag = json.value("tag_name", std::string {});
-        info.url = json.value("html_url", std::string {});
-
-        if (info.tag.empty())
+        const auto releases = nlohmann::json::parse(response);
+        if (!releases.is_array())
             return std::nullopt;
 
-        return info;
+        std::optional<LatestReleaseInfo> latest;
+        for (const auto& release : releases)
+        {
+            if (!release.is_object() || release.value("draft", true))
+                continue;
+
+            auto tag = release.value("tag_name", std::string {});
+            const auto version = ParseReleaseTag(tag);
+            if (!version)
+                continue;
+
+            auto publishedAt = release.value("published_at", std::string {});
+            if (tag == packageTag)
+                installedPublishedAt = publishedAt;
+            if (!publishedAt.empty() && (!latest || publishedAt > latest->publishedAt))
+                latest = LatestReleaseInfo { std::move(tag), release.value("html_url", std::string {}),
+                                             std::move(publishedAt), *version };
+        }
+        return latest;
     }
     catch (const std::exception& ex)
     {
@@ -170,14 +216,15 @@ void FinishVersionCheck()
     state.versionCheckCompleted = true;
 }
 
-void RunVersionCheck()
+void RunVersionCheck(feature_version localVersion)
 {
     struct Finalizer
     {
         ~Finalizer() { FinishVersionCheck(); }
     } finalize;
 
-    auto release = FetchLatestRelease();
+    std::string installedPublishedAt;
+    auto release = FetchLatestRelease(installedPublishedAt);
     if (!release.has_value())
     {
         auto& state = State::Instance();
@@ -187,55 +234,41 @@ void RunVersionCheck()
         return;
     }
 
-    const feature_version remoteVersion(release->tag.c_str());
-
     auto& state = State::Instance();
+    // Release v0.8.10 was published after v0.8.91. Use publication order when both releases are known.
+    const bool updateAvailable =
+        installedPublishedAt.empty() ? release->version > localVersion : release->publishedAt > installedPublishedAt;
+
     {
         std::scoped_lock lock(state.versionCheckMutex);
         state.latestVersionTag = release->tag;
         state.latestVersionUrl = release->url;
-    }
-
-    if (remoteVersion == feature_version { 0, 0, 0 })
-    {
-        LOG_WARN("Version check received unrecognized tag format: {}", release->tag);
-        std::scoped_lock lock(state.versionCheckMutex);
-        state.versionCheckError = "Received an unknown version format from update server.";
-        state.updateAvailable = false;
-        return;
-    }
-
-    const auto localVersion = CurrentVersion();
-    const bool updateAvailable = remoteVersion > localVersion;
-
-    {
-        std::scoped_lock lock(state.versionCheckMutex);
         state.updateAvailable = updateAvailable;
         state.versionCheckError.clear();
     }
 
     if (updateAvailable)
-    {
-        LOG_WARN("New OptiScaler release available: {} (current {}.{}.{}).", release->tag, VER_MAJOR_VERSION,
-                 VER_MINOR_VERSION, VER_HOTFIX_VERSION);
-    }
+        LOG_WARN("New OptiScaler release available: {} (current {}).", release->tag, packageTag);
     else
-    {
-        LOG_INFO("OptiScaler is up to date (current {}.{}.{})", VER_MAJOR_VERSION, VER_MINOR_VERSION,
-                 VER_HOTFIX_VERSION);
-    }
+        LOG_INFO("OptiScaler is up to date (current {})", packageTag);
 }
 } // namespace
 
 const std::string& VersionCheck::CurrentVersionString()
 {
     static const std::string version =
-        std::format("{}.{}.{}", VER_MAJOR_VERSION, VER_MINOR_VERSION, VER_HOTFIX_VERSION);
+        packageTag.empty() ? std::format("{}.{}.{}", VER_MAJOR_VERSION, VER_MINOR_VERSION, VER_HOTFIX_VERSION)
+                           : std::string(packageTag.substr(1));
     return version;
 }
 
 void VersionCheck::Start()
 {
+    LOG_DEBUG("{}", packageMarker);
+    const auto localVersion = ParseReleaseTag(packageTag);
+    if (!localVersion)
+        return;
+
     auto& state = State::Instance();
     {
         std::scoped_lock lock(state.versionCheckMutex);
@@ -251,11 +284,11 @@ void VersionCheck::Start()
     }
 
     std::thread(
-        []()
+        [localVersion = *localVersion]()
         {
             try
             {
-                RunVersionCheck();
+                RunVersionCheck(localVersion);
             }
             catch (const std::exception& ex)
             {

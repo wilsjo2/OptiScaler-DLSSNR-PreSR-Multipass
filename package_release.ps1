@@ -17,6 +17,8 @@ if ((Test-Path -LiteralPath $stage) -or (Test-Path -LiteralPath $zip)) {
     throw 'Release output already exists. Choose a new -Version; existing packages are not overwritten.'
 }
 
+# Keep custom package labels usable without treating them as public update versions.
+$updateTag = if ($Version -cmatch '^(v[0-9]+\.[0-9]+\.[0-9]+)(?:-rtx40-mfg)?$') { $Matches[1] } else { '' }
 if (-not $SkipBuild) {
     $msbuild = (Get-Command MSBuild.exe -ErrorAction SilentlyContinue).Source
     if (-not $msbuild) {
@@ -26,7 +28,7 @@ if (-not $SkipBuild) {
         }
     }
     if (-not $msbuild) { throw 'MSBuild.exe was not found. Use a Visual Studio developer PowerShell.' }
-    & $msbuild (Join-Path $root 'OptiScaler.sln') /p:Configuration=Release /p:Platform=x64 /p:PostBuildEventUseInBuild=false "/p:OptiScalerRtx40Mfg=$($EnableRtx40Mfg.IsPresent.ToString().ToLowerInvariant())" /v:minimal /m
+    & $msbuild (Join-Path $root 'OptiScaler.sln') /p:Configuration=Release /p:Platform=x64 /p:PostBuildEventUseInBuild=false "/p:OptiScalerRtx40Mfg=$($EnableRtx40Mfg.IsPresent.ToString().ToLowerInvariant())" "/p:OptiScalerNrPackageTag=$updateTag" /v:minimal /m
     if ($LASTEXITCODE -ne 0) { throw 'OptiScaler build failed.' }
 }
 
@@ -36,6 +38,9 @@ $buildRoot = Join-Path $root $buildFolder
 $dllText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes((Join-Path $buildRoot 'OptiScaler.dll')))
 $hasUnlock = $dllText.Contains('RTX 40 MFG unlock (restart)')
 if ($hasUnlock -ne $EnableRtx40Mfg.IsPresent) { throw 'DLL RTX 40 MFG feature does not match the requested package.' }
+if ($updateTag -and !$dllText.Contains("OptiScaler NR package: $updateTag`0")) {
+    throw 'DLL update tag does not match the requested version. Package without -SkipBuild, or build with the matching OptiScalerNrPackageTag first.'
+}
 # Validate every source before creating the staging tree. An explicit manifest prevents stale
 # Streamline/MFG, removed NR helpers or discarded experiment files entering this package.
 $files = @{}
