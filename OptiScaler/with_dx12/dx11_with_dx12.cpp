@@ -23,14 +23,6 @@ bool TextureDescEquals(const Dx11WithDx12::D3D11_TEXTURE2D_DESC_C& a, const Dx11
            a.CPUAccessFlags == b.CPUAccessFlags && a.MiscFlags == b.MiscFlags;
 }
 
-bool D3D11DescEquals(const D3D11_TEXTURE2D_DESC& a, const D3D11_TEXTURE2D_DESC& b)
-{
-    return a.Width == b.Width && a.Height == b.Height && a.MipLevels == b.MipLevels && a.ArraySize == b.ArraySize &&
-           a.Format == b.Format && a.SampleDesc.Count == b.SampleDesc.Count &&
-           a.SampleDesc.Quality == b.SampleDesc.Quality && a.Usage == b.Usage && a.BindFlags == b.BindFlags &&
-           a.CPUAccessFlags == b.CPUAccessFlags && a.MiscFlags == b.MiscFlags;
-}
-
 Dx11WithDx12::D3D11_TEXTURE2D_DESC_C CaptureDesc(const D3D11_TEXTURE2D_DESC& desc)
 {
     Dx11WithDx12::D3D11_TEXTURE2D_DESC_C result = {};
@@ -361,9 +353,6 @@ void Dx11WithDx12::Init(ID3D11Device* dx11Device, ID3D11DeviceContext* dx11Conte
         if (DT != nullptr || DT.get() != nullptr)
             DT.reset();
 
-        DepthTransferSourceDesc = {};
-        DepthTransferSourceDescValid = false;
-
         DT = std::make_unique<DepthTransfer_Dx11>("DT", newDx11Device);
     }
 
@@ -393,7 +382,60 @@ bool Dx11WithDx12::CopyTextureFrom11To12(ID3D11Resource* InResource, D3D11_TEXTU
     const bool sourceHasLegacyShared = (sourceDesc.MiscFlags & D3D11_RESOURCE_MISC_SHARED) != 0;
     const bool sourceHasNTShared = (sourceDesc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE) != 0;
 
-    if (!sourceHasLegacyShared && !sourceHasNTShared && !InDontUseNTShared)
+    // Packed depth/stencil copies cannot use NT sharing directly. Convert the depth to R32_FLOAT first.
+    const bool copyPackedDepth =
+        InDepth && !sourceHasLegacyShared && (!sourceHasNTShared || InDontUseNTShared) &&
+        (sourceDesc.Format == DXGI_FORMAT_R24G8_TYPELESS || sourceDesc.Format == DXGI_FORMAT_R32G8X24_TYPELESS);
+    if (copyPackedDepth)
+    {
+        const bool useNTHandle = !InDontUseNTShared;
+        const bool sharedTextureMatches =
+            OutResource->SharedTexture != nullptr && OutResource->OwnsSharedTexture &&
+            OutResource->Dx11Handle != nullptr && OutResource->Desc.Format == DXGI_FORMAT_R32_FLOAT &&
+            OutResource->UsesNTHandle == useNTHandle && TextureDescEquals(OutResource->SourceDesc, sourceDescCache);
+
+        if (!sharedTextureMatches)
+        {
+            ReleaseSharedResource(OutResource);
+            if (!DT->CreateBufferResource(Dx11Device, InResource, OutResource->SharedTexture, useNTHandle))
+            {
+                LOG_ERROR("DepthTransfer_Dx11 buffer creation failed");
+                originalTexture->Release();
+                return false;
+            }
+
+            OutResource->OwnsSharedTexture = true;
+            OutResource->UsesNTHandle = useNTHandle;
+
+            Microsoft::WRL::ComPtr<IDXGIResource1> resource;
+            result = OutResource->SharedTexture->QueryInterface(IID_PPV_ARGS(&resource));
+            if (SUCCEEDED(result))
+            {
+                result = useNTHandle ? resource->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ, nullptr,
+                                                                    &OutResource->Dx11Handle)
+                                     : resource->GetSharedHandle(&OutResource->Dx11Handle);
+            }
+            if (FAILED(result) || OutResource->Dx11Handle == nullptr)
+            {
+                LOG_ERROR("DepthTransfer_Dx11 shared handle creation failed: {:X}", (UINT) result);
+                ReleaseSharedResource(OutResource);
+                originalTexture->Release();
+                return false;
+            }
+
+            D3D11_TEXTURE2D_DESC transferDesc = {};
+            OutResource->SharedTexture->GetDesc(&transferDesc);
+            OutResource->Desc = CaptureDesc(transferDesc);
+        }
+
+        if (!DT->Dispatch(Dx11Device, Dx11DeviceContext, originalTexture, OutResource->SharedTexture))
+        {
+            LOG_ERROR("DepthTransfer_Dx11 dispatch failed");
+            originalTexture->Release();
+            return false;
+        }
+    }
+    else if (!sourceHasLegacyShared && !sourceHasNTShared && !InDontUseNTShared)
     {
         D3D11_TEXTURE2D_DESC sharedDesc = sourceDesc;
         sharedDesc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
@@ -455,132 +497,61 @@ bool Dx11WithDx12::CopyTextureFrom11To12(ID3D11Resource* InResource, D3D11_TEXTU
     }
     else if (!sourceHasLegacyShared && InDontUseNTShared)
     {
-        if (InDepth &&
-            (sourceDesc.Format == DXGI_FORMAT_R24G8_TYPELESS || sourceDesc.Format == DXGI_FORMAT_R32G8X24_TYPELESS))
+        D3D11_TEXTURE2D_DESC sharedDesc = sourceDesc;
+
+        if (sharedDesc.Format == DXGI_FORMAT_R24G8_TYPELESS)
+            sharedDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+        sharedDesc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
+        sharedDesc.Usage = D3D11_USAGE_DEFAULT;
+        sharedDesc.CPUAccessFlags = 0;
+
+        const auto sharedDescCache = CaptureDesc(sharedDesc);
+        const bool sharedTextureMatches = TextureDescEquals(OutResource->Desc, sharedDescCache) &&
+                                          OutResource->SharedTexture != nullptr && OutResource->Dx11Handle != NULL &&
+                                          OutResource->LastPreparedCopy == InCopy &&
+                                          OutResource->LastPreparedDepth == InDepth &&
+                                          (OutResource->Desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE) == 0;
+
+        if (!sharedTextureMatches)
         {
-            const bool depthTransferDescChanged =
-                !DepthTransferSourceDescValid || !D3D11DescEquals(DepthTransferSourceDesc, sourceDesc);
+            ReleaseSharedResource(OutResource);
+            OutResource->Desc = sharedDescCache;
 
-            if (depthTransferDescChanged)
+            result = Dx11Device->CreateTexture2D(&sharedDesc, nullptr, &OutResource->SharedTexture);
+            if (result != S_OK || OutResource->SharedTexture == nullptr)
             {
-                if (DT != nullptr && OutResource->SharedTexture == DT->Buffer())
-                    ReleaseSharedResource(OutResource);
-
-                DT.reset();
-                DepthTransferSourceDesc = sourceDesc;
-                DepthTransferSourceDescValid = true;
-            }
-
-            if (DT == nullptr || DT.get() == nullptr)
-                DT = std::make_unique<DepthTransfer_Dx11>("DT", Dx11Device);
-
-            if (DT->Buffer() == nullptr)
-                DT->CreateBufferResource(Dx11Device, InResource);
-
-            if (DT->Buffer() == nullptr)
-            {
-                LOG_ERROR("DepthTransfer_Dx11 buffer creation failed");
+                LOG_ERROR("CreateTexture2D error: {0:x}", result);
                 originalTexture->Release();
                 return false;
             }
 
-            if (DT->Dispatch(Dx11Device, Dx11DeviceContext, originalTexture, DT->Buffer()))
+            OutResource->OwnsSharedTexture = true;
+            OutResource->UsesNTHandle = false;
+
+            IDXGIResource1* resource = nullptr;
+            result = OutResource->SharedTexture->QueryInterface(IID_PPV_ARGS(&resource));
+
+            if (result != S_OK || resource == nullptr)
             {
-                if (OutResource->SharedTexture != DT->Buffer())
-                    ReleaseSharedResource(OutResource);
-
-                IDXGIResource1* resource = nullptr;
-                result = DT->Buffer()->QueryInterface(IID_PPV_ARGS(&resource));
-
-                if (result != S_OK || resource == nullptr)
-                {
-                    LOG_ERROR("QueryInterface(resource) error: {0:x}", result);
-                    originalTexture->Release();
-                    return false;
-                }
-
-                D3D11_TEXTURE2D_DESC transferDesc = {};
-                DT->Buffer()->GetDesc(&transferDesc);
-                ASSIGN_DESC(OutResource->Desc, transferDesc);
-                OutResource->SharedTexture = DT->Buffer();
-                OutResource->OwnsSharedTexture = false;
-                OutResource->UsesNTHandle = false;
-
-                result = resource->GetSharedHandle(&OutResource->Dx11Handle);
-                resource->Release();
-
-                if (result != S_OK || OutResource->Dx11Handle == NULL)
-                {
-                    LOG_ERROR("GetSharedHandle error: {0:x}", result);
-                    originalTexture->Release();
-                    return false;
-                }
+                LOG_ERROR("QueryInterface(resource) error: {0:x}", result);
+                originalTexture->Release();
+                return false;
             }
-            else
+
+            result = resource->GetSharedHandle(&OutResource->Dx11Handle);
+            resource->Release();
+
+            if (result != S_OK || OutResource->Dx11Handle == NULL)
             {
-                LOG_ERROR("DepthTransfer_Dx11 dispatch failed");
+                LOG_ERROR("GetSharedHandle error: {0:x}", result);
                 originalTexture->Release();
                 return false;
             }
         }
-        else
-        {
-            D3D11_TEXTURE2D_DESC sharedDesc = sourceDesc;
 
-            if (sharedDesc.Format == DXGI_FORMAT_R24G8_TYPELESS)
-                sharedDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-
-            sharedDesc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
-            sharedDesc.Usage = D3D11_USAGE_DEFAULT;
-            sharedDesc.CPUAccessFlags = 0;
-
-            const auto sharedDescCache = CaptureDesc(sharedDesc);
-            const bool sharedTextureMatches =
-                TextureDescEquals(OutResource->Desc, sharedDescCache) && OutResource->SharedTexture != nullptr &&
-                OutResource->Dx11Handle != NULL && OutResource->LastPreparedCopy == InCopy &&
-                OutResource->LastPreparedDepth == InDepth &&
-                (OutResource->Desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE) == 0;
-
-            if (!sharedTextureMatches)
-            {
-                ReleaseSharedResource(OutResource);
-                OutResource->Desc = sharedDescCache;
-
-                result = Dx11Device->CreateTexture2D(&sharedDesc, nullptr, &OutResource->SharedTexture);
-                if (result != S_OK || OutResource->SharedTexture == nullptr)
-                {
-                    LOG_ERROR("CreateTexture2D error: {0:x}", result);
-                    originalTexture->Release();
-                    return false;
-                }
-
-                OutResource->OwnsSharedTexture = true;
-                OutResource->UsesNTHandle = false;
-
-                IDXGIResource1* resource = nullptr;
-                result = OutResource->SharedTexture->QueryInterface(IID_PPV_ARGS(&resource));
-
-                if (result != S_OK || resource == nullptr)
-                {
-                    LOG_ERROR("QueryInterface(resource) error: {0:x}", result);
-                    originalTexture->Release();
-                    return false;
-                }
-
-                result = resource->GetSharedHandle(&OutResource->Dx11Handle);
-                resource->Release();
-
-                if (result != S_OK || OutResource->Dx11Handle == NULL)
-                {
-                    LOG_ERROR("GetSharedHandle error: {0:x}", result);
-                    originalTexture->Release();
-                    return false;
-                }
-            }
-
-            if (InCopy && OutResource->SharedTexture != nullptr)
-                Dx11DeviceContext->CopyResource(OutResource->SharedTexture, InResource);
-        }
+        if (InCopy && OutResource->SharedTexture != nullptr)
+            Dx11DeviceContext->CopyResource(OutResource->SharedTexture, InResource);
     }
     else
     {

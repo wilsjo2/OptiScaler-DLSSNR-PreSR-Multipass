@@ -13,7 +13,8 @@ class DepthTransfer_Dx11 : public Shader_Dx11
     bool InitializeViews(ID3D11Texture2D* InResource, ID3D11Texture2D* OutResource);
 
   public:
-    bool CreateBufferResource(ID3D11Device* InDevice, ID3D11Resource* InSource);
+    bool CreateBufferResource(ID3D11Device* InDevice, ID3D11Resource* InSource, ID3D11Texture2D*& OutResource,
+                              bool UseNTHandle);
     bool Dispatch(ID3D11Device* InDevice, ID3D11DeviceContext* InContext, ID3D11Texture2D* InResource,
                   ID3D11Texture2D* OutResource);
 

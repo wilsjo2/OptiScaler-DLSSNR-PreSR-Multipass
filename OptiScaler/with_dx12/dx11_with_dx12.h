@@ -39,9 +39,6 @@ class Dx11WithDx12
     inline static ID3D12Device* SyncDx12Device = nullptr;
     inline static ID3D12CommandQueue* SyncDx12CommandQueue = nullptr;
 
-    inline static D3D11_TEXTURE2D_DESC DepthTransferSourceDesc = {};
-    inline static bool DepthTransferSourceDescValid = false;
-
     static void ReleaseSyncResources();
     static void ReleaseSyncResourcesLocked();
     static bool EnsureSyncResourcesLocked();

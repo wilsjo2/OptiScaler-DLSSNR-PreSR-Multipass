@@ -7,14 +7,17 @@
 
 #include <Config.h>
 
-bool DepthTransfer_Dx11::CreateBufferResource(ID3D11Device* InDevice, ID3D11Resource* InResource)
+bool DepthTransfer_Dx11::CreateBufferResource(ID3D11Device* InDevice, ID3D11Resource* InResource,
+                                              ID3D11Texture2D*& OutResource, bool UseNTHandle)
 {
-    return CreateBufferResourceCommon(InDevice, InResource, _buffer,
-                                      [](D3D11_TEXTURE2D_DESC& desc)
+    return CreateBufferResourceCommon(InDevice, InResource, OutResource,
+                                      [UseNTHandle](D3D11_TEXTURE2D_DESC& desc)
                                       {
                                           desc.Format = DXGI_FORMAT_R32_FLOAT;
                                           desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
                                           desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
+                                          if (UseNTHandle)
+                                              desc.MiscFlags |= D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
                                       });
 }
 
@@ -41,6 +44,15 @@ bool DepthTransfer_Dx11::Dispatch(ID3D11Device* InDevice, ID3D11DeviceContext* I
     if (!InitializeViews(InResource, OutResource))
         return false;
 
+    Microsoft::WRL::ComPtr<ID3D11ComputeShader> previousShader;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> previousSRV;
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> previousUAV;
+    ID3D11ClassInstance* previousClasses[D3D11_SHADER_MAX_INTERFACES] = {};
+    UINT previousClassCount = static_cast<UINT>(std::size(previousClasses));
+    InContext->CSGetShader(previousShader.GetAddressOf(), previousClasses, &previousClassCount);
+    InContext->CSGetShaderResources(0, 1, previousSRV.GetAddressOf());
+    InContext->CSGetUnorderedAccessViews(0, 1, previousUAV.GetAddressOf());
+
     // Set the compute shader and resources
     InContext->CSSetShader(_computeShader, nullptr, 0);
     InContext->CSSetShaderResources(0, 1, &_srvInput);
@@ -57,11 +69,11 @@ bool DepthTransfer_Dx11::Dispatch(ID3D11Device* InDevice, ID3D11DeviceContext* I
 
     InContext->Dispatch(dispatchWidth, dispatchHeight, 1);
 
-    // Unbind resources
-    ID3D11UnorderedAccessView* nullUAV = nullptr;
-    InContext->CSSetUnorderedAccessViews(0, 1, &nullUAV, nullptr);
-    ID3D11ShaderResourceView* nullSRV = nullptr;
-    InContext->CSSetShaderResources(0, 1, &nullSRV);
+    InContext->CSSetUnorderedAccessViews(0, 1, previousUAV.GetAddressOf(), nullptr);
+    InContext->CSSetShaderResources(0, 1, previousSRV.GetAddressOf());
+    InContext->CSSetShader(previousShader.Get(), previousClasses, previousClassCount);
+    for (UINT i = 0; i < previousClassCount; ++i)
+        SAFE_RELEASE(previousClasses[i]);
 
     return true;
 }
