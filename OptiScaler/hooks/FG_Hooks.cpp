@@ -1133,12 +1133,11 @@ HRESULT FGHooks::hkFGPresent1(IDXGISwapChain1* This, UINT SyncInterval, UINT Fla
 HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
                            const DXGI_PRESENT_PARAMETERS* pPresentParameters)
 {
-    _lastPresentFlags = Flags;
-
     auto& state = State::Instance();
-    auto config = Config::Instance();
 
-    if (state.isShuttingDown)
+    // An old XeFG proxy can share this hook with the registered swapchain.
+    const bool foreignXeFgPresent = state.activeFgOutput == FGOutput::XeFG && This != state.currentFGSwapchain;
+    if (state.isShuttingDown || foreignXeFgPresent)
     {
         if (pPresentParameters == nullptr)
             return o_FGSCPresent(This, SyncInterval, Flags);
@@ -1146,6 +1145,8 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
             return o_FGSCPresent1((IDXGISwapChain1*) This, SyncInterval, Flags, pPresentParameters);
     }
 
+    _lastPresentFlags = Flags;
+    auto config = Config::Instance();
     auto willPresent = (Flags & DXGI_PRESENT_TEST) == 0;
 
     if (willPresent)
