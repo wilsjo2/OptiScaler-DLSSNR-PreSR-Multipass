@@ -12,7 +12,12 @@ typedef struct Scale
     float y;
 } scale;
 
-extern std::unordered_map<xess_context_handle_t, NVSDK_NGX_Parameter*> _nvParams;
+struct XeSSParameters
+{
+    NVSDK_NGX_Parameter* value;
+    NVSDK_NGX_Result(NVSDK_CONV* destroy)(NVSDK_NGX_Parameter*);
+};
+extern std::unordered_map<xess_context_handle_t, XeSSParameters> _nvParams;
 extern std::unordered_map<xess_context_handle_t, NVSDK_NGX_Handle*> _contexts;
 extern std::unordered_map<xess_context_handle_t, Scale> _motionScales;
 extern std::unordered_map<xess_context_handle_t, Scale> _jitterScales;

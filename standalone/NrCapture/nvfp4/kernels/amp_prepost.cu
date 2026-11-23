@@ -1,4 +1,5 @@
 // amp_prepost.cu: Ampere-legal (sm_86) FP16 replacements of the DLSS-NR Model A input and output blocks (Phase A).
+// sm_120 NVFP4 uses NR_NATIVE_FP8=1 to select native E4M3 conversion and matrix instructions.
 //
 //   variant pre     amp_pre       for cc_tinlayout_fused_pre_block_swin_1h_32_1_ds_fp8, runtime 310.9.16 (272-byte block,
 //                                 weight record pointer at +232)
@@ -33,9 +34,8 @@
 // kernels (prepost_lab.py amp --exact: 1080p / 1440p / 4K, both runtimes, with and without history, conditioning
 // branches); the plain variants are the f16-accumulate target (one more f16 rounding per k32 step). F32ACC bits pick
 // the product groups (1 MLP, 2 QKV, 4 attention logits, 8 context, 16 output projection).
-// Lab-only switch AMP_HW_K32=1 (sm_120 only, NOT Ampere-legal, never shipped): NVIDIA's e4m3 k32 instruction instead
-// of the k16 pair; everything else unchanged. It isolates layout / order bugs: it should equal NVIDIA's kernel bit for
-// bit (it does: prepost_lab.py amp --hw). NORM_FUSE picks which square ptxas folded into the first addition of each
+// AMP_HW_K32 selects the native e4m3 k32 instruction on sm_120. The NVFP4 host enables it through NR_NATIVE_FP8.
+// Its layout and arithmetic match the reference in prepost_lab.py amp --hw. NORM_FUSE picks which square ptxas folded into the first addition of each
 // norm (1: the first operand, 2: the second, 0: none); the default is the one the lab measured. Lab-only switches that
 // change no bit: Q8_FORM (0: the first q8 form), Y_KEEP, MLP_ROLL; AMP_TIME_NOCODEC=1 is timing only (wrong numbers).
 //
@@ -59,7 +59,7 @@
 #define BLOCK 1
 #endif
 #ifndef AMP_HW_K32
-#define AMP_HW_K32 0
+#define AMP_HW_K32 NR_NATIVE_FP8
 #endif
 #ifndef NORM_FUSE
 #define NORM_FUSE 1
@@ -144,9 +144,14 @@ NR_INLINE u32 ldw32(const u8* p) { return *(const u32*)p; }
 // f16 pair whose two halves are f16(f(x.lo)), f16(f(x.hi)) for an approx f32 function f
 NR_INLINE u32 h2_rsqrt(u32 x)
 {
+#if NR_NATIVE_FP8
+    const float inv = amp_rsqrt_approx(amp_h_to_f32(u16(x)));
+    return amp_h2_pack(inv, inv);
+#else
     float lo, hi;
     amp_h2_unpack(x, lo, hi);
     return amp_h2_pack(amp_rsqrt_approx(lo), amp_rsqrt_approx(hi));
+#endif
 }
 NR_INLINE u32 swap_halves(u32 x) { return amp_prmt(x, x, 0x1032u); }
 NR_INLINE u32 low_twice(u32 x) { return amp_prmt(x, x, 0x5410u); }
@@ -580,9 +585,14 @@ NR_INLINE void body(const u8* __restrict__ rec, u32 lane, const u32 (&x)[4][2][4
             const u32 sum = h2_add(h2_add(h2_add(a72, a73), a75), a78);
             const u32 tot = low_twice(h2_add(low_twice(sum), high_twice(sum)));
             const u32 m = h2_max(tot, 0x04100410u);
+#if NR_NATIVE_FP8
+            const float inv = rcp_approx(amp_h_to_f32(u16(m)));
+            recip = amp_h2_pack(inv, inv);
+#else
             float lo, hi;
             amp_h2_unpack(m, lo, hi);
             recip = amp_h2_pack(rcp_approx(lo), rcp_approx(hi));
+#endif
         }
 #pragma unroll
         for (u32 d = 0; d < 2; ++d) {
@@ -660,12 +670,18 @@ NR_INLINE u16 centred(float c, u16 scale)                   // f16(f16(f16(c) - 
 }
 #endif
 
-#if BLOCK == 1
-extern "C" __global__ void __launch_bounds__(32) amp_pre(Params P)
-#elif BLOCK == 3
-extern "C" __global__ void __launch_bounds__(32) amp_pre_3108(Params P)
+// The narrow Blackwell kernels are built with a 128-register cap.
+#if NR_NATIVE_FP8
+#define AMP_EDGE_BOUNDS
 #else
-extern "C" __global__ void __launch_bounds__(32) amp_post(Params P)
+#define AMP_EDGE_BOUNDS __launch_bounds__(32)
+#endif
+#if BLOCK == 1
+extern "C" __global__ void AMP_EDGE_BOUNDS amp_pre(Params P)
+#elif BLOCK == 3
+extern "C" __global__ void AMP_EDGE_BOUNDS amp_pre_3108(Params P)
+#else
+extern "C" __global__ void AMP_EDGE_BOUNDS amp_post(Params P)
 #endif
 {
     const u32 lane = threadIdx.x & 31u, g = lane >> 2, t = lane & 3u;

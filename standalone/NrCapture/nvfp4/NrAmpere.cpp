@@ -1,5 +1,6 @@
 // The Ampere set: all 152 weighted launches of Model A on kernels of ours, inside NVIDIA's runtime; see NrAmpere.h.
 // Launch counting, the fp8_set<n> records and their upload follow NrFp8.cpp; our kernels are loaded like NrNet4.cpp's.
+#include "NrWeightUpload.h"
 #include <windows.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -318,7 +319,6 @@ struct Module { NVDX_ObjectHandle handle = nullptr; std::string failure; };
 struct Kernel { NVDX_ObjectHandle handle = nullptr; std::string failure; };
 struct Device {
     std::array<Weights, kMaxSets> sets;
-    std::vector<ComPtr<IUnknown>> parked;
     std::map<std::string, Module> modules;                                  // by cubin file name
     std::map<std::pair<std::string, std::string>, Kernel> kernels;          // by (cubin file name, entry)
 };
@@ -420,46 +420,7 @@ Weights& LoadWeights(State& s, Device& d, ID3D12Device* device, unsigned n) {
         memcpy(mapped, blob.data(), blob.size());
         memcpy(static_cast<unsigned char*>(mapped) + w.blendAt, &kBlendWeight, 2);
         upload->Unmap(0, nullptr);
-        D3D12_COMMAND_QUEUE_DESC queueDesc{};
-        queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-        ComPtr<ID3D12CommandQueue> queue; ComPtr<ID3D12CommandAllocator> allocator; ComPtr<ID3D12GraphicsCommandList> commands; ComPtr<ID3D12Fence> fence;
-        struct Park {
-            Device& d; Weights& w; ComPtr<ID3D12Resource>& upload; ComPtr<ID3D12CommandQueue>& queue; ComPtr<ID3D12CommandAllocator>& allocator;
-            ComPtr<ID3D12GraphicsCommandList>& commands; bool armed = false;
-            ~Park() {
-                if (!armed) return;
-                try {
-                    for (IUnknown* object : {static_cast<IUnknown*>(w.buffer.Get()), static_cast<IUnknown*>(upload.Get()), static_cast<IUnknown*>(queue.Get()),
-                                             static_cast<IUnknown*>(allocator.Get()), static_cast<IUnknown*>(commands.Get())})
-                        if (object) d.parked.emplace_back(object);
-                } catch (...) {
-                }
-            }
-        } park{d, w, upload, queue, allocator, commands};
-        Check(device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&queue)), "Ampere-set upload queue");
-        Check(device->CreateCommandAllocator(queueDesc.Type, IID_PPV_ARGS(&allocator)), "Ampere-set upload allocator");
-        Check(device->CreateCommandList(0, queueDesc.Type, allocator.Get(), nullptr, IID_PPV_ARGS(&commands)), "Ampere-set upload list");
-        Check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)), "Ampere-set upload fence");
-        D3D12_RESOURCE_BARRIER transition{};
-        transition.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        transition.Transition = {w.buffer.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST};
-        commands->ResourceBarrier(1, &transition);
-        commands->CopyBufferRegion(w.buffer.Get(), 0, upload.Get(), 0, bytes);
-        std::swap(transition.Transition.StateBefore, transition.Transition.StateAfter);
-        commands->ResourceBarrier(1, &transition);
-        Check(commands->Close(), "Ampere-set upload close");
-        ID3D12CommandList* lists[] = {commands.Get()};
-        queue->ExecuteCommandLists(1, lists);
-        park.armed = true;
-        Check(queue->Signal(fence.Get(), 1), "Ampere-set upload signal");
-        HANDLE done = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        if (!done) throw std::runtime_error("Ampere-set upload event failed");
-        const HRESULT armed = fence->SetEventOnCompletion(1, done);
-        const DWORD waited = SUCCEEDED(armed) ? WaitForSingleObject(done, 20000) : WAIT_FAILED;
-        CloseHandle(done);
-        Check(armed, "Ampere-set upload wait");
-        if (waited != WAIT_OBJECT_0) throw std::runtime_error("the Ampere-set record upload did not complete");
-        park.armed = false;
+        NrWeightUpload::Copy(device, w.buffer.Get(), upload.Get(), bytes);
         w.ready = true;
         Report(s, "records of fp8 set " + std::to_string(n) + " loaded (" + std::to_string(blob.size() >> 20) + " MB)");
         return w;
@@ -956,7 +917,7 @@ void ReleaseDevice(ID3D12Device* device) {
     }
     s.architecture.erase(device);
     for (auto i = s.functions.begin(); i != s.functions.end();) i = i->second.device == device ? s.functions.erase(i) : std::next(i);
-    s.lists.clear();
+    std::erase_if(s.lists, [device](const auto& entry) { return entry.second.device == device; });
 }
 
 std::string Status(bool counters) {

@@ -74,6 +74,7 @@ bool SetComplete(unsigned set, std::string* missing = nullptr);
 // for a model of ours compares the value before and after an evaluation: any increase means the evaluation is not
 // wholly that model.
 unsigned long long Faults();
+unsigned long long CompletedWork(bool& active);
 // Optional harness override for successive UseSet calls (one per Processor evaluation). kDefaultSet entries keep
 // that call's preset selection. Clear with (nullptr, 0) after the frame. Existing hosts need not call this.
 void UseSetsForNextEvaluations(const unsigned* sets, unsigned count);

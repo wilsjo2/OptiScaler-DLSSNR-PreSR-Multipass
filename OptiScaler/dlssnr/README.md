@@ -1,6 +1,6 @@
 # Neural Rendering implementation
 
-NR calls NVIDIA feature 18 through the installed driver's NGX core. Users supply `nvngx_dlssnr.dll`; there is no NR helper DLL. See [installation](../../INSTALL-DLSSNR.md) and [credits](../../docs/CREDITS.md).
+D3D12 INT8 and NVFP4 use the shared pass host and bundled kernels and weights. NVIDIA models and in-game FP8 use NVIDIA feature 18 through NGX and a user-supplied `nvngx_dlssnr.dll`. See [installation](../../INSTALL-DLSSNR.md) and [credits](../../docs/CREDITS.md).
 
 ## Ownership and dispatch
 

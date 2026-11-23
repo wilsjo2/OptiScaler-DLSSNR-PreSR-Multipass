@@ -325,7 +325,8 @@ static FfxErrorCode ffxFsr2ContextDestroy_Dx11(FfxFsr2Context* context)
         NVSDK_NGX_D3D11_ReleaseFeature(_contexts[context]);
 
     _contexts.erase(context);
-    _nvParams.erase(context);
+    if (auto params = _nvParams.extract(context); !params.empty() && params.mapped())
+        NVSDK_NGX_D3D11_DestroyParameters(params.mapped());
     _initParams.erase(context);
 
     _skipDestroy = true;

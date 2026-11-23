@@ -1057,7 +1057,8 @@ void FSRFG_Dx12::CreateContext(ID3D12Device* device, FG_Constants& fgConstants)
 {
     LOG_DEBUG("");
 
-    CreateObjects(device);
+    if (!CreateObjects(device))
+        return;
 
     _constants = fgConstants;
 
@@ -1592,24 +1593,22 @@ bool FSRFG_Dx12::SetResource(Dx12Resource* inputResource)
 
 void FSRFG_Dx12::SetCommandQueue(FG_ResourceType type, ID3D12CommandQueue* queue) { _gameCommandQueue = queue; }
 
-void FSRFG_Dx12::CreateObjects(ID3D12Device* InDevice)
+bool FSRFG_Dx12::CreateObjects(ID3D12Device* InDevice)
 {
     _device = InDevice;
 
     if (_fgCommandAllocator[0] != nullptr)
-        return;
+        return true;
 
     LOG_DEBUG("");
 
     do
     {
         HRESULT result;
-        ID3D12CommandAllocator* allocator = nullptr;
-        ID3D12GraphicsCommandList* cmdList = nullptr;
-        ID3D12CommandQueue* cmdQueue = nullptr;
 
         // FG
-        for (size_t i = 0; i < BUFFER_COUNT; i++)
+        size_t i = 0;
+        for (; i < BUFFER_COUNT; ++i)
         {
             // Reset command list state
             _scCommandListResetted[i] = false;
@@ -1627,8 +1626,7 @@ void FSRFG_Dx12::CreateObjects(ID3D12Device* InDevice)
             }
 
             _fgCommandAllocator[i]->SetName(std::format(L"_fgCommandAllocator[{}]", i).c_str());
-            if (CheckForRealObject(__FUNCTION__, _fgCommandAllocator[i], (IUnknown**) &allocator))
-                _fgCommandAllocator[i] = allocator;
+            UnwrapOwned(__FUNCTION__, _fgCommandAllocator[i]);
 
             result = InDevice->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, _fgCommandAllocator[i], NULL,
                                                  IID_PPV_ARGS(&_fgCommandList[i]));
@@ -1638,8 +1636,7 @@ void FSRFG_Dx12::CreateObjects(ID3D12Device* InDevice)
                 break;
             }
             _fgCommandList[i]->SetName(std::format(L"_fgCommandList[{}]", i).c_str());
-            if (CheckForRealObject(__FUNCTION__, _fgCommandList[i], (IUnknown**) &cmdList))
-                _fgCommandList[i] = cmdList;
+            UnwrapOwned(__FUNCTION__, _fgCommandList[i]);
 
             result = _fgCommandList[i]->Close();
             if (result != S_OK)
@@ -1657,8 +1654,7 @@ void FSRFG_Dx12::CreateObjects(ID3D12Device* InDevice)
             }
 
             _uiCommandAllocator[i]->SetName(std::format(L"_uiCommandAllocator[{}]", i).c_str());
-            if (CheckForRealObject(__FUNCTION__, _uiCommandAllocator[i], (IUnknown**) &allocator))
-                _uiCommandAllocator[i] = allocator;
+            UnwrapOwned(__FUNCTION__, _uiCommandAllocator[i]);
 
             result = InDevice->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, _uiCommandAllocator[i], NULL,
                                                  IID_PPV_ARGS(&_uiCommandList[i]));
@@ -1668,8 +1664,7 @@ void FSRFG_Dx12::CreateObjects(ID3D12Device* InDevice)
                 break;
             }
             _uiCommandList[i]->SetName(std::format(L"_uiCommandList[{}]", i).c_str());
-            if (CheckForRealObject(__FUNCTION__, _uiCommandList[i], (IUnknown**) &cmdList))
-                _uiCommandList[i] = cmdList;
+            UnwrapOwned(__FUNCTION__, _uiCommandList[i]);
 
             result = _uiCommandList[i]->Close();
             if (result != S_OK)
@@ -1707,8 +1702,7 @@ void FSRFG_Dx12::CreateObjects(ID3D12Device* InDevice)
             }
 
             _scCommandAllocator[i]->SetName(std::format(L"_scCommandAllocator[{}]", i).c_str());
-            if (CheckForRealObject(__FUNCTION__, _scCommandAllocator[i], (IUnknown**) &allocator))
-                _scCommandAllocator[i] = allocator;
+            UnwrapOwned(__FUNCTION__, _scCommandAllocator[i]);
 
             result = InDevice->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, _scCommandAllocator[i], NULL,
                                                  IID_PPV_ARGS(&_scCommandList[i]));
@@ -1718,8 +1712,7 @@ void FSRFG_Dx12::CreateObjects(ID3D12Device* InDevice)
                 break;
             }
             _scCommandList[i]->SetName(std::format(L"_scCommandList[{}]", i).c_str());
-            if (CheckForRealObject(__FUNCTION__, _scCommandList[i], (IUnknown**) &cmdList))
-                _scCommandList[i] = cmdList;
+            UnwrapOwned(__FUNCTION__, _scCommandList[i]);
 
             result = _scCommandList[i]->Close();
             if (result != S_OK)
@@ -1749,7 +1742,13 @@ void FSRFG_Dx12::CreateObjects(ID3D12Device* InDevice)
             }
         }
 
+        if (i < BUFFER_COUNT)
+        {
+            ReleaseObjects();
+            return false;
+        }
     } while (false);
+    return true;
 }
 
 bool FSRFG_Dx12::Present()

@@ -20,7 +20,10 @@ void App::Run(CaptureSource source, Settings initial) {
         session = std::make_unique<Session>();
         auto& g = session->gpu;
         session->processor = std::make_unique<Processor>(g, initial.runtime, initial.frameGeneration > 2);
-        if (initial.frameGeneration > 1) session->fg = std::make_unique<FrameGeneration>(g, std::filesystem::path{}, initial.runtime);
+        if (initial.frameGeneration > 1) {
+            session->processor->PrepareFrameGeneration();
+            session->fg = std::make_unique<FrameGeneration>(g, std::filesystem::path{}, initial.runtime);
+        }
         session->display = std::make_unique<Presentation>(g, source, window, session->fg.get(), initial.frameGeneration, initial.presentMode);
         session->capture = std::make_unique<Capture>(g, source, initial.captureBackend, initial.ProcessingFps());
         session->capture->SetLowLatency(initial.latencyMode == 1);

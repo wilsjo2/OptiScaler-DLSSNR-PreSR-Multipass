@@ -6,6 +6,8 @@
 // We launch nr_swin4 instead, with the same grid and block shape, the runtime's own buffers and flags, and our weight
 // record. The runtime's neighbours wait for a block's flags without a time limit, so a kernel of ours must publish
 // every window's flag exactly as the runtime's does; it does so unconditionally at its end.
+#include "NrWeightUpload.h"
+#include "NrFourBitPlan.h"
 #include <windows.h>
 #include <bcrypt.h>
 #include <d3d12.h>
@@ -158,7 +160,6 @@ struct Device {
     std::array<uint64_t, kMaxSets> fp8Base{};   // ... and its FP8 records
     std::array<uint64_t, kMaxSets> levelBase{}, postBase{}, preBase{};
     uint64_t blendAt = 0;                       // our own copy of the output block's history blend weight (float16)
-    std::vector<ComPtr<IUnknown>> parked;      // what an upload that did not finish may still be using; freed with the device
     struct Kernel { NVDX_ObjectHandle module = nullptr, function = nullptr; std::string failure; };
     std::array<std::array<Kernel, 5>, 4> kernels{};         // [log2 heads][variant]
     std::array<std::array<Kernel, 5>, 4> wideKernels{};     // ... the multi-window builds
@@ -197,7 +198,10 @@ struct ListState {
         std::array<SavedLaunch, 9> original{};
     } level;
 };
-struct Target { ID3D12Device* device; NVDX_ObjectHandle module; Kind kind; unsigned refs; };
+} // namespace
+struct NativeTarget { ID3D12Device* device; NVDX_ObjectHandle module; Kind kind; unsigned refs; };
+namespace {
+using Target = NativeTarget;
 
 struct State {
     bool probeEnabled = false;
@@ -240,6 +244,10 @@ struct State {
     decltype(&NvAPI_D3D12_DestroyCuModule) destroyModule = nullptr;
     decltype(&NvAPI_D3D12_DestroyCuFunction) destroyFunction = nullptr;
 };
+NvAPI_Status Submit(State& state, ID3D12GraphicsCommandList* list, const NVAPI_CU_KERNEL_LAUNCH_PARAMS* kernels, NvU32 count) {
+    return NrFourBitPlan::current ? NrFfnV2::SubmitNative(list, kernels, count) : state.launch(list, kernels, count);
+}
+
 State& S() { static State* state = new State; return *state; }
 
 void Report(State& s, const std::string& text) {
@@ -483,7 +491,7 @@ void LoadManifest(State& s) {
 
 // Every weight these layers use is in their own files: any NR runtime is accepted. Whether its launches are the ones
 // these kernels replace is still checked launch by launch (kernel names, parameter sizes, shapes).
-bool RuntimeMatches(State&) { return GetModuleHandleW(L"nvngx_dlssnr.dll") != nullptr; }
+bool RuntimeMatches(State&) { return NrFourBitPlan::current || GetModuleHandleW(L"nvngx_dlssnr.dll") != nullptr; }
 
 // An output-block parameter block (184 bytes, the runtime's layout) gets our blend weight in place of the runtime's.
 // A null pointer (no blend weight given) stays null.
@@ -530,48 +538,7 @@ void LoadWeights(State& s, Device& d, ID3D12Device* device) {
         }
         memcpy(static_cast<unsigned char*>(mapped) + d.blendAt, &kBlendWeight, 2);
         upload->Unmap(0, nullptr);
-        D3D12_COMMAND_QUEUE_DESC queueDesc{};
-        queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-        ComPtr<ID3D12CommandQueue> queue; ComPtr<ID3D12CommandAllocator> allocator; ComPtr<ID3D12GraphicsCommandList> commands; ComPtr<ID3D12Fence> fence;
-        // Once the copy is submitted, a failure below must not free what it may still be using.
-        struct Park {
-            Device& d; ComPtr<ID3D12Resource>& upload; ComPtr<ID3D12CommandQueue>& queue; ComPtr<ID3D12CommandAllocator>& allocator;
-            ComPtr<ID3D12GraphicsCommandList>& commands; bool armed = false;
-            ~Park() {
-                if (!armed) return;
-                try {
-                    for (IUnknown* object : {static_cast<IUnknown*>(d.weights.resource.Get()), static_cast<IUnknown*>(upload.Get()),
-                                             static_cast<IUnknown*>(queue.Get()), static_cast<IUnknown*>(allocator.Get()),
-                                             static_cast<IUnknown*>(commands.Get())})
-                        d.parked.emplace_back(object);
-                } catch (...) {
-                }
-            }
-        } park{d, upload, queue, allocator, commands};
-        Check(device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&queue)), "NVFP4 upload queue");
-        Check(device->CreateCommandAllocator(queueDesc.Type, IID_PPV_ARGS(&allocator)), "NVFP4 upload allocator");
-        Check(device->CreateCommandList(0, queueDesc.Type, allocator.Get(), nullptr, IID_PPV_ARGS(&commands)), "NVFP4 upload list");
-        Check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)), "NVFP4 upload fence");
-        D3D12_RESOURCE_BARRIER transition{};
-        transition.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        transition.Transition = {d.weights.resource.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST};
-        commands->ResourceBarrier(1, &transition);
-        commands->CopyBufferRegion(d.weights.resource.Get(), 0, upload.Get(), 0, bytes);
-        std::swap(transition.Transition.StateBefore, transition.Transition.StateAfter);
-        commands->ResourceBarrier(1, &transition);
-        Check(commands->Close(), "NVFP4 upload close");
-        ID3D12CommandList* lists[] = {commands.Get()};
-        queue->ExecuteCommandLists(1, lists);
-        park.armed = true;
-        Check(queue->Signal(fence.Get(), 1), "NVFP4 upload signal");
-        HANDLE done = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        if (!done) throw std::runtime_error("NVFP4 upload event failed");
-        const HRESULT armed = fence->SetEventOnCompletion(1, done);
-        const DWORD waited = SUCCEEDED(armed) ? WaitForSingleObject(done, 20000) : WAIT_FAILED;
-        CloseHandle(done);
-        Check(armed, "NVFP4 upload wait");
-        if (waited != WAIT_OBJECT_0) throw std::runtime_error("NVFP4 weight upload did not complete");
-        park.armed = false;
+        NrWeightUpload::Copy(device, d.weights.resource.Get(), upload.Get(), bytes);
         d.weightsReady = true;
     } catch (const std::exception& error) {
         d.weights = {};
@@ -604,7 +571,7 @@ NVDX_ObjectHandle KernelFor(State& s, Device& d, ID3D12Device* device, unsigned 
 
 // The set in use: Options::set where the folder has it, else the first (0).
 unsigned ChosenSet(const State& s) {
-    if (s.passSet == 0 || (s.passSet < kMaxSets && s.manifest.sets[s.passSet].present)) return s.passSet;
+    if (NrFourBitPlan::WeightSet(s.passSet) == 0 || (NrFourBitPlan::WeightSet(s.passSet) < kMaxSets && s.manifest.sets[NrFourBitPlan::WeightSet(s.passSet)].present)) return NrFourBitPlan::WeightSet(s.passSet);
     return s.options.set < kMaxSets && s.manifest.sets[s.options.set].present ? s.options.set : 0;
 }
 
@@ -731,7 +698,7 @@ void Replace(State& s, ID3D12GraphicsCommandList* commands, ID3D12Device* device
     launch.pParams = &p;
     launch.paramSize = sizeof p;
     launch.dynSharedMemBytes = 0;
-    NvCheck(s.launch(commands, &launch, 1), "NVFP4 kernel launch");
+    NvCheck(Submit(s, commands, &launch, 1), "NVFP4 kernel launch");
     if (smallMap) ++s.smallReplaced;
     if (partialMap) ++s.partialReplaced;
 }
@@ -775,7 +742,7 @@ NvAPI_Status FlushLevel(State& s, ID3D12GraphicsCommandList* commands, ListState
     LeaveWide(s, commands); UavBarrier(commands);
     for (unsigned i = 0; i < pending.saved; ++i) {
         auto k = pending.original[i].launch; k.pParams = pending.original[i].params.data();
-        const auto status = s.launch(commands, &k, 1);
+        const auto status = Submit(s, commands, &k, 1);
         if (status != NVAPI_OK) return status;
         UavBarrier(commands); // fallback cannot depend on polling progress of concurrently scheduled CTAs
     }
@@ -816,7 +783,7 @@ bool LevelLaunch(State& s, ID3D12GraphicsCommandList* commands, ID3D12Device* de
         launch.hFunction = pending.function; launch.gridDim = {unsigned((p.W+7) / 8), unsigned((p.H+7) / 8), 1};
         launch.blockDim = {32, 2, 1}; launch.pParams = &p; launch.paramSize = sizeof p;
         LeaveWide(s, commands); UavBarrier(commands);
-        NvCheck(s.launch(commands, &launch, 1), "Level4 launch");
+        NvCheck(Submit(s, commands, &launch, 1), "Level4 launch");
         UavBarrier(commands); // the level's original boundary barrier also remains in the caller's command list
         ++(pending.encoder ? s.encoderReplaced : s.levelReplaced)[Log2(kind.heads)]; ++s.replaced; ++s.perWidth[Log2(kind.heads)]; s.skipped += pending.blocks-1;
         pending = {}; list->carry = {}; s.active = true; result = NVAPI_OK;
@@ -911,7 +878,7 @@ void RecordPostProbe(State& s, ID3D12GraphicsCommandList* commands, ID3D12Device
     d.probeProjectionDiagnostic=native.paramSize==184;
     NVAPI_CU_KERNEL_LAUNCH_PARAMS launch{};launch.hFunction=k.function;launch.pParams=&p;launch.paramSize=sizeof p;
     launch.gridDim={1,1,1};launch.blockDim={1,1,1};LeaveWide(s,commands);UavBarrier(commands);
-    NvCheck(s.launch(commands,&launch,1),"post probe launch");UavBarrier(commands);
+    NvCheck(Submit(s, commands,&launch,1),"post probe launch");UavBarrier(commands);
     D3D12_RESOURCE_BARRIER transition{};transition.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     transition.Transition={d.probe.Get(),D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_SOURCE};
     commands->ResourceBarrier(1,&transition);commands->CopyBufferRegion(d.probeReadback.Get(),0,d.probe.Get(),0,32);
@@ -952,14 +919,14 @@ void RecordPostProbe(State& s, ID3D12GraphicsCommandList* commands, ID3D12Device
         // The extended kernel writes raw temporal history at common surface +16,
         // then intensity-composed output at +192. Observe the actual raw surface;
         // do not reinterpret the extended parameter block or its projection.
-        NvCheck(s.launch(commands,&native,1),"post intensity diagnostic replay");UavBarrier(commands);
+        NvCheck(Submit(s, commands,&native,1),"post intensity diagnostic replay");UavBarrier(commands);
         for(unsigned phase:{0u,2u}) {
-            sp.phase=phase;NvCheck(s.launch(commands,&capture,1),"post intensity history sample");UavBarrier(commands);
+            sp.phase=phase;NvCheck(Submit(s, commands,&capture,1),"post intensity history sample");UavBarrier(commands);
         }
     } else for (unsigned phase=0;phase<3;++phase) {
         if (phase==1) {const uint64_t w=d.probeProjection->GetGPUVirtualAddress();memcpy(rawParams+24,&w,8);}
-        NvCheck(s.launch(commands,phase==2?&native:&raw,1),"post diagnostic replay");UavBarrier(commands);
-        sp.phase=phase;NvCheck(s.launch(commands,&capture,1),"post diagnostic sample");UavBarrier(commands);
+        NvCheck(Submit(s, commands,phase==2?&native:&raw,1),"post diagnostic replay");UavBarrier(commands);
+        sp.phase=phase;NvCheck(Submit(s, commands,&capture,1),"post diagnostic sample");UavBarrier(commands);
     }
     transition.Transition={d.probeSamples.Get(),D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_SOURCE};
     commands->ResourceBarrier(1,&transition);commands->CopyBufferRegion(d.probeSamplesReadback.Get(),0,d.probeSamples.Get(),0,bytes);
@@ -972,7 +939,9 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
     auto& s = S();
     std::lock_guard guard(s.mutex);
     const Target* target = nullptr;
-    if (kernels && count == 1) {
+    if (NrFourBitPlan::current && kernels && count == 1 && !kernels->hFunction) {
+        target = NrFourBitPlan::current->swin.get();
+    } else if (kernels && count == 1) {
         const auto found = s.targets.find(kernels->hFunction);
         if (found != s.targets.end()) target = &found->second;
     }
@@ -981,13 +950,13 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
         const auto status = FlushLevel(s, commands, &pendingList->second);
         if (status != NVAPI_OK) return status;
     }
-    if (!target) { LeaveWide(s, commands); return s.launch(commands, kernels, count); }
+    if (!target) { LeaveWide(s, commands); return Submit(s, commands, kernels, count); }
     if (target->kind.clear) {               // a new evaluation
         auto& list = s.lists[commands];
         Learn(s, list);
         list = ListState{};
         list.device = target->device;
-        { LeaveWide(s, commands); return s.launch(commands, kernels, count); }
+        { LeaveWide(s, commands); return Submit(s, commands, kernels, count); }
     }
     const Kind& kind = target->kind;
     const auto known = s.lists.find(commands);
@@ -996,7 +965,7 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
         if(list && list->thinPreUsed) { Notice(s,"Thin4 requires the common 184-byte POST; extended intensity variant refused"); return NVAPI_ERROR; }
         if(s.probeEnabled)RecordPostProbe(s,commands,target->device,*kernels);
         LeaveWide(s,commands);
-        return s.launch(commands,kernels,count);
+        return Submit(s, commands,kernels,count);
     }
     if (kind.post || kind.pre) {
         if (kind.pre && list && kernels->pParams && kernels->paramSize == 272) {
@@ -1033,7 +1002,7 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
                 }
             }
             const unsigned chosen = s.manifest.loaded ? ChosenSet(s) : 0;
-            if (s.enabled && !s.paused && readable && record && ours && chosen &&
+            if (s.enabled && !NrFourBitPlan::Paused(s.paused) && readable && record && ours && chosen &&
                 (kind.pre ? s.manifest.sets[chosen].pre.present : s.manifest.sets[chosen].post.present) && RuntimeMatches(s)) {
                 const auto& set = s.manifest.sets[chosen]; const auto& r = kind.pre ? set.pre : set.post;
                 const unsigned size = kind.pre ? 272 : 184;
@@ -1079,11 +1048,11 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
                             row.block[0]=launch.blockDim.x;row.block[1]=launch.blockDim.y;row.block[2]=1;
                             const unsigned q=unsigned(trace.rows.size());trace.rows.push_back(std::move(row));
                             commands->EndQuery(trace.heap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,1+2*q);
-                            NvCheck(s.launch(commands,&launch,1),"Thin4 benchmark launch");UavBarrier(commands);
+                            NvCheck(Submit(s, commands,&launch,1),"Thin4 benchmark launch");UavBarrier(commands);
                             commands->EndQuery(trace.heap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,2+2*q);
                         }
                     }
-                    const auto status=s.launch(commands,&own,1); UavBarrier(commands);
+                    const auto status=Submit(s, commands,&own,1); UavBarrier(commands);
                     if (status==NVAPI_OK) { ++(kind.pre?s.preReplaced:s.postReplaced); if(kind.pre)list->thinPreUsed=true; }
                     return status;
                 }
@@ -1094,11 +1063,11 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
                 if (!kind.pre) OwnBlend(d, params);
                 auto own = *kernels; own.hFunction = function; own.pParams = params; own.paramSize = size + 24; own.blockDim = {32, 2, 1};
                 LeaveWide(s, commands); UavBarrier(commands);
-                const auto status = s.launch(commands, &own, 1);
+                const auto status = Submit(s, commands, &own, 1);
                 UavBarrier(commands); if (status == NVAPI_OK) ++(kind.pre ? s.preReplaced : s.postReplaced);
                 return status;
             }
-            if (s.enabled && !s.paused && readable && record && ours && chosen && s.manifest.sets[chosen].records[number].present && RuntimeMatches(s)) {
+            if (s.enabled && !NrFourBitPlan::Paused(s.paused) && readable && record && ours && chosen && s.manifest.sets[chosen].records[number].present && RuntimeMatches(s)) {
                 auto& d = s.devices[target->device];
                 LoadWeights(s, d, target->device);
                 memcpy(edited, kernels->pParams, kernels->paramSize);
@@ -1109,7 +1078,7 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
                 own.pParams = edited;
                 ++s.rerecorded;
                 LeaveWide(s, commands);
-                return s.launch(commands, &own, 1);
+                return Submit(s, commands, &own, 1);
             }
         } catch (const std::exception& error) {
             Notice(s, std::string("the input / output block kept the runtime's weights: ") + error.what());
@@ -1117,9 +1086,9 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
         } catch (...) {
         }
         if(list && list->thinPreUsed && kind.post) { Notice(s,"Thin4 POST missing after Thin4 PRE; evaluation refused"); return NVAPI_ERROR; }
-        if (s.enabled && !s.paused) ++s.ioPassed;       // the runtime's own weights run this input / output block (Faults())
+        if (s.enabled && !NrFourBitPlan::Paused(s.paused)) ++s.ioPassed;       // the runtime's own weights run this input / output block (Faults())
         LeaveWide(s, commands);
-        return s.launch(commands, kernels, count);
+        return Submit(s, commands, kernels, count);
     }
     int number = -1;                        // the block of Model A this launch is, when we can tell
     // The launch as it is recorded: the runtime's, or a copy with other pointers in it (a block after left-out blocks,
@@ -1131,7 +1100,7 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
     const NVAPI_CU_KERNEL_LAUNCH_PARAMS* k = kernels;
     const auto runtimes = [&]() {           // the runtime's own kernel for this launch
         LeaveWide(s, commands);
-        const auto result = s.launch(commands, k, count);
+        const auto result = Submit(s, commands, k, count);
         Track(list, *k, kind, f, plain);
         return result;
     };
@@ -1149,12 +1118,12 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
                 list->sequence = false;
             }
         }
-        if (!s.enabled || s.paused) {
+        if (!s.enabled || NrFourBitPlan::Paused(s.paused)) {
             const auto status = FlushLevel(s, commands, list);
             if (status != NVAPI_OK) return status;
             if (list) list->carry = {};
             LeaveWide(s, commands);
-            return s.launch(commands, kernels, count);
+            return Submit(s, commands, kernels, count);
         }
         if (!s.options.byOrder) {
             const auto d = s.devices.find(target->device);
@@ -1163,6 +1132,7 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
                 if (found != d->second.known.end() && found->second < kLayers) number = int(found->second);
             }
         }
+        if (NrFourBitPlan::current) number = NrFourBitPlan::current->swinSlot;
         const unsigned chosen = ChosenSet(s);
         const Manifest::Set* set = chosen && number >= 0 && list && plain && RuntimeMatches(s) ? &s.manifest.sets[chosen] : nullptr;
         NvAPI_Status levelStatus = NVAPI_OK;
@@ -1277,6 +1247,34 @@ NvAPI_Status __cdecl DestroyModule(ID3D12Device* device, NVDX_ObjectHandle modul
 }
 }   // namespace
 
+void BindNative(NrFourBitPlan::Operation& op, const NrFourBitPlan::Driver& driver, ID3D12Device* device,
+                const std::string& name, unsigned set, int swinSlot) {
+    auto& s = S();
+    std::lock_guard guard(s.mutex);
+    if (!s.createModule) s.createModule = driver.createModule;
+    if (!s.createFunction) s.createFunction = driver.createFunction;
+    if (!s.destroyModule) s.destroyModule = driver.destroyModule;
+    if (!s.destroyFunction) s.destroyFunction = driver.destroyFunction;
+    const Kind kind = KindOf(name.c_str());
+    if (kind.clear || kind.swin || kind.pre || kind.post)
+        op.swin = std::make_shared<NativeTarget>(NativeTarget{device, nullptr, kind, 1});
+    if (!kind.swin && !kind.pre && !kind.post) return;
+    const unsigned selected = set ? set : 1;
+    if (selected >= kMaxSets || !s.manifest.loaded || !s.manifest.sets[selected].present)
+        throw std::runtime_error("missing NVFP4 weight set " + std::to_string(selected));
+    const unsigned slot = kind.pre ? kPre : kind.post ? kPost : unsigned(swinSlot);
+    if (slot >= s.manifest.sets[selected].records.size()) throw std::runtime_error("invalid Swin plan position");
+    const auto& rec = s.manifest.sets[selected].records[slot];
+    if (!rec.present) throw std::runtime_error("missing native weight record for " + name);
+    auto& d = s.devices[device];
+    LoadWeights(s, d, device);
+    op.record = d.weights.Address() + d.fp8Base[selected] + rec.offset;
+    op.blend = d.weights.Address() + d.blendAt;
+}
+NvAPI_Status SubmitNative(ID3D12GraphicsCommandList* list, const NVAPI_CU_KERNEL_LAUNCH_PARAMS* kernels, NvU32 count) {
+    return Launch(list, kernels, count);
+}
+
 void* WrapNvapi(unsigned id, void* original) {
     if (!original) return original;
     auto& s = S();
@@ -1351,6 +1349,13 @@ bool SetComplete(unsigned set, std::string* missing) {
     if (!complete && missing)
         *missing = !s.manifest.loaded ? "swin4/swin4.txt" : n == 1 ? "swin4/swin4_trained.*" : "swin4/swin4_set" + std::to_string(n) + ".*";
     return complete;
+}
+
+unsigned long long CompletedWork(bool& active) {
+    auto& s = S();
+    std::lock_guard guard(s.mutex);
+    active = s.enabled && s.active;
+    return s.replaced + s.rerecorded + s.preReplaced + s.postReplaced;
 }
 
 unsigned long long Faults() {
@@ -1480,7 +1485,7 @@ void ReleaseDevice(ID3D12Device* device) {
         s.devices.erase(found);
     }
     for (auto i = s.targets.begin(); i != s.targets.end();) i = i->second.device == device ? s.targets.erase(i) : std::next(i);
-    s.lists.clear();                        // command lists of the device go with it; their addresses may be reused
+    std::erase_if(s.lists, [device](const auto& entry) { return entry.second.device == device; });
     s.wideOpen.clear();
 }
 

@@ -86,6 +86,7 @@ bool SetComplete(unsigned set, std::string* missing = nullptr);
 // weights, or run by our kernel with other records than the set asked for. A host that asked for a model of ours
 // compares the value before and after an evaluation: any increase means the evaluation is not wholly that model.
 unsigned long long Faults();
+unsigned long long CompletedWork();
 // For hosts that know where an evaluation of the model ends.
 void EndEvaluation(ID3D12GraphicsCommandList* commands) noexcept;
 // Checker-only: after a fence, write full/base/final/unpooled stored bytes captured

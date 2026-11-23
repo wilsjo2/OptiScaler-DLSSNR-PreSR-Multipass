@@ -53,8 +53,16 @@ foreach ($name in @('amd_fidelityfx_loader_dx12.dll', 'amd_fidelityfx_upscaler_d
 $files['OptiScaler/D3D12_OptiScaler/D3D12Core.dll'] = Join-Path $root 'external/directx_agility_sdk/lib/D3D12Core.dll'
 # The 4-bit (NVFP4) kernels and the two pass-in-one weight sets (Original - NVFP4, NVFP4 2xPass-in-one, NVFP4 3xPass-in-one),
 # and the FP8 records of FP8 2xPass-in-one and FP8 3xPass-in-one (fp8/).
+foreach ($required in 'host4/modelA_fp8.plan', 'host4/fused_manifest.txt', 'int8/int8_set2.bin', 'fp8/fp8_set5.bin') {
+    if (!(Test-Path -LiteralPath (Join-Path $Nvfp4Assets $required) -PathType Leaf)) {
+        throw "Missing $required in the model pack. Supply the v0.97 model folder with -Nvfp4Assets."
+    }
+}
 foreach ($item in Get-ChildItem -LiteralPath $Nvfp4Assets -Recurse -File | Where-Object { $_.Name -notlike '*.md' }) {
-    $files['OptiScaler/nvfp4/' + $item.FullName.Substring($Nvfp4Assets.Length).TrimStart('\', '/').Replace('\', '/')] = $item.FullName
+    $relative = $item.FullName.Substring($Nvfp4Assets.Length).TrimStart('\', '/').Replace('\', '/')
+    # Standalone uses these for its FP8 host and per-layer NVFP4 Original controls.
+    if ($relative -like 'host/*' -or $relative -like 'host4/mixed/*' -or $relative -in 'host4/mixed_set1.txt', 'host4/mixed_set1.bin') { continue }
+    $files["OptiScaler/nvfp4/$relative"] = $item.FullName
 }
 # No documents or licence/attribution files in the package.
 foreach ($key in @($files.Keys)) { if ($key -match '(?i)\.md$|licen[cs]e|attribution') { throw "Document in the release manifest: $key" } }

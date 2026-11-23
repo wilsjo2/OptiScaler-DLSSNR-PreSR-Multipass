@@ -30,7 +30,7 @@ static bool CreateDLSSContext(xess_context_handle_t handle, VkCommandBuffer comm
         return false;
 
     NVSDK_NGX_Handle* nvHandle = nullptr;
-    auto params = _nvParams[handle];
+    auto params = _nvParams[handle].value;
     auto initParams = &_vkInitParams[handle];
 
     UINT initFlags = 0;
@@ -149,7 +149,7 @@ xess_result_t hk_xessVKCreateContext(VkInstance instance, VkPhysicalDevice physi
     if (NVSDK_NGX_VULKAN_GetCapabilityParameters(&params) != NVSDK_NGX_Result_Success)
         return XESS_RESULT_ERROR_INVALID_ARGUMENT;
 
-    _nvParams[*phContext] = params;
+    _nvParams[*phContext] = { params, NVSDK_NGX_VULKAN_DestroyParameters };
     _motionScales[*phContext] = { 1.0f, 1.0f };
 
     LOG_DEBUG("Created context: {}", (size_t) *phContext);
@@ -202,7 +202,7 @@ xess_result_t hk_xessVKExecute(xess_context_handle_t hContext, VkCommandBuffer c
     if (!_contexts.contains(hContext) && !CreateDLSSContext(hContext, commandBuffer, pExecParams))
         return XESS_RESULT_ERROR_UNKNOWN;
 
-    NVSDK_NGX_Parameter* params = _nvParams[hContext];
+    NVSDK_NGX_Parameter* params = _nvParams[hContext].value;
     NVSDK_NGX_Handle* handle = _contexts[hContext];
     xess_vk_init_params_t* initParams = &_vkInitParams[hContext];
 

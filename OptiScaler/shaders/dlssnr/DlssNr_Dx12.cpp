@@ -4,6 +4,7 @@
 #include <dlssnr/NrNvfp4.h>
 #include <atomic>
 #include <list>
+#include <set>
 #include "precompile/DlssNr_Shader.h"
 #include "precompile/dlssnr_residual_Shader.h"
 #include "precompile/dlssnr_finished_color_Shader.h"
@@ -17,6 +18,8 @@ namespace
 {
 std::recursive_mutex nrOwnersMutex;
 std::vector<DlssNr_Dx12*> nrOwners;
+// Unsubmitted game command lists can reach the device even after their NR owner was abandoned.
+std::set<ID3D12Device*> devicesWithAbandonedRecordings;
 std::atomic_uint nrCaptureOutstanding { 0 };
 // Only unresolved work at process teardown is intentionally retained. During the session
 // retired owners stay registered for submission/reset callbacks until they can be reclaimed.
@@ -313,6 +316,7 @@ DlssNr_Dx12::~DlssNr_Dx12()
     const bool finished = _state->WaitForFinishedPicture();
     if (!finished || !_state->lifetime.Idle())
     {
+        devicesWithAbandonedRecordings.insert(_device);
         LOG_WARN("DLSS-NR: abandoning GPU ownership with unresolved command recordings at teardown");
         _state.release();
         for (auto& heap : _frameHeaps)
@@ -328,9 +332,12 @@ DlssNr_Dx12::~DlssNr_Dx12()
     bool modelsIdle = true;
     for (auto& model : _state->nr.models)
         modelsIdle = modelsIdle && model.Idle();
-    const bool lastOwner = nrOwners.empty();
+    if (!modelsIdle)
+        devicesWithAbandonedRecordings.insert(_device);
+    const bool lastOwner =
+        std::none_of(nrOwners.begin(), nrOwners.end(), [this](const auto* owner) { return owner->_device == _device; });
     _state.reset();
-    if (lastOwner && modelsIdle)
+    if (lastOwner && !devicesWithAbandonedRecordings.contains(_device))
         DlssNr::Nvfp4::Release(_device);
     for (auto& heap : _frameHeaps)
         heap.ReleaseHeaps();

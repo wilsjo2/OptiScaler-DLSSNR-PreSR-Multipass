@@ -247,7 +247,8 @@ static ffxReturnCode_t ffxDestroyContext_Dx12(ffxContext* context, const ffxAllo
         NVSDK_NGX_D3D12_ReleaseFeature(_contexts[*context]);
 
     _contexts.erase(*context);
-    _nvParams.erase(*context);
+    if (auto params = _nvParams.extract(*context); !params.empty() && params.mapped())
+        NVSDK_NGX_D3D12_DestroyParameters(params.mapped());
     _initParams.erase(*context);
 
     return FFX_API_RETURN_OK;

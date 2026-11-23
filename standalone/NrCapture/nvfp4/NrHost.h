@@ -1,7 +1,6 @@
-// Own NR pass host: runs one whole Model A FP8 evaluation (fp8 sets 1-6, presets 17-20, 23, 24) with no NVIDIA NR
-// runtime. It builds every kernel's parameter block from the plan (assets/host-plan/modelA_fp8.plan, written and
-// checked against NVIDIA's traces by V2/host_plan.py), owns every buffer, flag array, texture and the history, makes
-// its own CUDA texture/surface handles and launches every kernel through NvAPI CUDA-on-D3D12.
+// Records a complete Model A pass through NvAPI CUDA-on-D3D12 for INT8, NVFP4 and the hosted FP8 models.
+// The selected plan defines kernel arguments and intermediate lifetimes. Each host owns its model buffers,
+// GPU texture handles and temporal history for one resolution and weight set.
 //
 // Kernel sets (NR_HOST_ASSETS, folders separated by ';', each optionally '@<code>'): manifests in the NrAmpere format
 // (nvfp4/NrAmpere.h), launch numbers -1..156 (-1 = the leading copy and 156 = the colour step of the Natural and
@@ -34,7 +33,7 @@ struct Settings {
 };
 
 struct Options {
-    bool enabled = false;
+    bool enabled = false, fourBit = false, mixedOriginal = false;
     std::filesystem::path plan, records;
     std::string recordsName = "fp8_set";   // <records>/<recordsName><set>.txt and .bin
     std::vector<std::pair<std::filesystem::path, std::string>> kernels;   // folder, code ("" = the default code)
@@ -43,13 +42,15 @@ struct Options {
     unsigned layout = 3109;
     std::filesystem::path trace, report;
     std::filesystem::path timing;       // NR_HOST_TIMING: GPU microseconds per launch (lab)
+    bool callerTracksGpuLifetime = false; // Caller holds the host until its command lists can no longer execute.
 };
 // NR_HOST_* keys; throws on malformed values. `exeDir` gives the defaults (<exe>/nvfp4/host/...).
 Options FromEnvironment(const std::filesystem::path& exeDir);
 // NR_HOST=1 on, NR_HOST=0 off; unset: on for RTX 30 and 40 (NVIDIA's runtime refuses them), off elsewhere.
 bool Requested(ID3D12Device* device = nullptr);
-// The INT8 models (one folder: modelA_i8.plan, the kernels with their manifests, int8_set<n>.txt and .bin). The code is the
-// GPU's own: sm86 on RTX 30 and 40, sm120 on RTX 50. They run on the host on every GPU.
+// NVFP4 on RTX 50. Standalone Original can select an FP8 equivalent for individual layers.
+Options FourBitOptions(const std::filesystem::path& assets, bool allowMixedOriginal);
+// INT8 uses the GPU's architecture and the kernels, plan and quantized records in int8/.
 Options Int8Options(const std::filesystem::path& folder);
 
 class Host {

@@ -1,6 +1,6 @@
 #include "Runtime.h"
 #include "AdaMfgUnlock.h"
-#include "nvfp4/NrHost.h"
+#include "nvfp4/NrPassRuntime.h"
 #include <wintrust.h>
 #include <softpub.h>
 #include <wincrypt.h>
@@ -44,12 +44,24 @@ Runtime::Runtime(ID3D12Device* d, const std::filesystem::path& modelPath, bool u
     if (modelPath.filename() != L"nvngx_dlssnr.dll")
         throw std::runtime_error("Select nvngx_dlssnr.dll.");
     const auto selected = modelPath.is_absolute() ? modelPath : ExecutableDirectory() / modelPath;
-    std::error_code pathError;
-    if (!std::filesystem::is_regular_file(selected, pathError))
-        throw std::runtime_error("NR DLL not found: " + Narrow(selected.wstring()) +
-            ". Put nvngx_dlssnr.dll in the runtime folder beside display_filter.exe, or use Browse.");
-    const auto model = std::filesystem::canonical(selected);
-    this->modelPath = model;
+    // Custom host passes need no NVIDIA NR model. Check the selected file when a pass requests it.
+    this->modelPath = std::filesystem::weakly_canonical(selected);
+    if (unlockAdaMfg) InitializeDriver(true);
+}
+void Runtime::InitializeDriver(bool unlockAdaMfg) {
+    std::lock_guard guard(driverMutex);
+    if (driverReady) return;
+    if (owner) {
+        owner->InitializeDriver();
+        dlssPath = owner->dlssPath;
+        compatibility = owner->compatibility;
+        create = owner->create; evaluate = owner->evaluate; release = owner->release;
+        destroy = owner->destroy; allocate = owner->allocate; capabilities = owner->capabilities;
+        driverReady = true;
+        return;
+    }
+    auto* d = device.Get();
+    const auto& model = modelPath;
     wchar_t folder[32768]{}; DWORD bytes = sizeof(folder);
     LSTATUS read = RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\NVIDIA Corporation\\Global\\NGXCore",
         L"FullPath", RRF_RT_REG_SZ, nullptr, folder, &bytes);
@@ -99,17 +111,15 @@ Runtime::Runtime(ID3D12Device* d, const std::filesystem::path& modelPath, bool u
         if (unlockAdaMfg) AdaMfgUnlock::PrepareProvider(d);
         Log("NR runtime requested: " + Narrow(model.wstring()));
         Log("Unmodified NGX dispatcher: " + Narrow(driver.wstring()));
+        driverReady = true;
     } catch (...) {
         if (initialized) shutdown();
-        FreeLibrary(module); module = nullptr; throw;
+        FreeLibrary(module); module = nullptr; shutdown = nullptr; throw;
     }
 }
 Runtime::Runtime(std::shared_ptr<Runtime> parent) : owner(std::move(parent)) {
     if (!owner) throw std::runtime_error("Missing NR runtime owner.");
-    device = owner->device; dlssPath = owner->dlssPath; modelPath = owner->modelPath;
-    compatibility = owner->compatibility;
-    create = owner->create; evaluate = owner->evaluate; release = owner->release;
-    destroy = owner->destroy; allocate = owner->allocate; capabilities = owner->capabilities;
+    device = owner->device; modelPath = owner->modelPath;
 }
 Runtime::~Runtime() {
     ReleaseDlss();
@@ -144,18 +154,22 @@ NVSDK_NGX_Result Runtime::Create(ID3D12GraphicsCommandList* commands, UINT w, UI
         // NR_HOST=1: an FP8 model runs on the own pass host (Processor::Evaluate); NVIDIA's runtime makes no feature for it
         // (it refuses GPUs below the RTX 50 series).
         // An INT8 model always runs there: its kernels are ours on every GPU.
-        const bool ownHost = Settings::IsInt8(tuning.preset) || (Settings::IsFp8(tuning.preset) && NrHost::Requested(device.Get()));
+        const auto model = NrPassRuntime::Select(tuning.preset, Settings::IsFp8(tuning.preset) && NrHost::Requested(device.Get()));
         if (Settings::IsNvfp4(tuning.preset) || Settings::IsFp8(tuning.preset) || Settings::IsInt8(tuning.preset)) tuning.preset = 1; // Model A; Processor::Evaluate lets the 4-bit kernels or the FP8 records in.
         tuning.preset = std::min(tuning.preset, 3u); tuning.style = std::min(tuning.style, 2u);
         tuning.intensity = std::clamp(tuning.intensity, 0.0f, 2.0f);
         tuning.localStructure = std::clamp(tuning.localStructure, 0.0f, 2.0f);
         tuning.localTone = std::clamp(tuning.localTone, 0.0f, 2.0f);
         tuning.skinStructure = std::clamp(tuning.skinStructure, -1.0f, 2.0f);
-        if (ownHost) {
+        if (NrPassRuntime::UsesHost(model)) {
             Log(std::format("NR pass {} {}x{}: model {} on the own pass host (no NVIDIA feature); intensity {}, structure {}, tone {}, skin {}, style {}",
                 pass + 1, w, h, requested[pass], tuning.intensity, tuning.localStructure, tuning.localTone, tuning.skinStructure, tuning.style));
             continue;
         }
+        if (!std::filesystem::is_regular_file(modelPath))
+            throw std::runtime_error("NR pass " + std::to_string(pass + 1) + " requires nvngx_dlssnr.dll at " + Narrow(modelPath.wstring()));
+        InitializeDriver();
+        if (owner && owner->compatibility) compatibility = owner->compatibility;
         CheckResult(capabilities(&parameters[pass]), "NR pass parameters");
         auto* p = parameters[pass]; if (!p) throw std::runtime_error("NGX returned no parameter map.");
         // Match OptiScaler's default pass profiles: only the first pass changes broad lighting.

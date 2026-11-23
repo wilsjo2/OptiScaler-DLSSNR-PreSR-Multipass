@@ -274,7 +274,11 @@ void DLSSG_Dx12::CreateContext(ID3D12Device* device, FG_Constants& fgConstants)
         return;
 
     _device = device;
-    CreateObjects(device);
+    if (!CreateObjects(device))
+    {
+        _device = nullptr;
+        return;
+    }
 
     if (_isActive)
     {
@@ -680,24 +684,22 @@ void DLSSG_Dx12::ReleaseObjects()
     _depthFlip.reset();
 }
 
-void DLSSG_Dx12::CreateObjects(ID3D12Device* InDevice)
+bool DLSSG_Dx12::CreateObjects(ID3D12Device* InDevice)
 {
     _device = InDevice;
 
     if (_uiCommandAllocator[0] != nullptr)
-        return;
+        return true;
 
     LOG_DEBUG("");
 
     do
     {
         HRESULT result;
-        ID3D12CommandAllocator* allocator = nullptr;
-        ID3D12GraphicsCommandList* cmdList = nullptr;
-        ID3D12CommandQueue* cmdQueue = nullptr;
 
         // FG
-        for (size_t i = 0; i < BUFFER_COUNT; i++)
+        size_t i = 0;
+        for (; i < BUFFER_COUNT; ++i)
         {
             // Reset command list state
             _scCommandListResetted[i] = false;
@@ -715,8 +717,7 @@ void DLSSG_Dx12::CreateObjects(ID3D12Device* InDevice)
             }
 
             _uiCommandAllocator[i]->SetName(std::format(L"_uiCommandAllocator[{}]", i).c_str());
-            if (CheckForRealObject(__FUNCTION__, _uiCommandAllocator[i], (IUnknown**) &allocator))
-                _uiCommandAllocator[i] = allocator;
+            UnwrapOwned(__FUNCTION__, _uiCommandAllocator[i]);
 
             result = InDevice->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, _uiCommandAllocator[i], NULL,
                                                  IID_PPV_ARGS(&_uiCommandList[i]));
@@ -726,8 +727,7 @@ void DLSSG_Dx12::CreateObjects(ID3D12Device* InDevice)
                 break;
             }
             _uiCommandList[i]->SetName(std::format(L"_uiCommandList[{}]", i).c_str());
-            if (CheckForRealObject(__FUNCTION__, _uiCommandList[i], (IUnknown**) &cmdList))
-                _uiCommandList[i] = cmdList;
+            UnwrapOwned(__FUNCTION__, _uiCommandList[i]);
 
             result = _uiCommandList[i]->Close();
             if (result != S_OK)
@@ -765,8 +765,7 @@ void DLSSG_Dx12::CreateObjects(ID3D12Device* InDevice)
             }
 
             _scCommandAllocator[i]->SetName(std::format(L"_scCommandAllocator[{}]", i).c_str());
-            if (CheckForRealObject(__FUNCTION__, _scCommandAllocator[i], (IUnknown**) &allocator))
-                _scCommandAllocator[i] = allocator;
+            UnwrapOwned(__FUNCTION__, _scCommandAllocator[i]);
 
             result = InDevice->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, _scCommandAllocator[i], NULL,
                                                  IID_PPV_ARGS(&_scCommandList[i]));
@@ -776,8 +775,7 @@ void DLSSG_Dx12::CreateObjects(ID3D12Device* InDevice)
                 break;
             }
             _scCommandList[i]->SetName(std::format(L"_scCommandList[{}]", i).c_str());
-            if (CheckForRealObject(__FUNCTION__, _scCommandList[i], (IUnknown**) &cmdList))
-                _scCommandList[i] = cmdList;
+            UnwrapOwned(__FUNCTION__, _scCommandList[i]);
 
             result = _scCommandList[i]->Close();
             if (result != S_OK)
@@ -807,7 +805,13 @@ void DLSSG_Dx12::CreateObjects(ID3D12Device* InDevice)
             }
         }
 
+        if (i < BUFFER_COUNT)
+        {
+            ReleaseObjects();
+            return false;
+        }
     } while (false);
+    return true;
 }
 
 bool DLSSG_Dx12::Present()

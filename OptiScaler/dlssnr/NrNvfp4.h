@@ -1,14 +1,11 @@
 #pragma once
-// The 4-bit (NVFP4) kernels and the pass-in-one weight sets of the Display Filter application
-// (standalone/NrCapture/nvfp4: NrFfnV2, NrSwin4, NrNet4) for the D3D12 NR path. They sit below pass borrowing in the
-// NvAPI hook and replace launches of the NR runtime's Model A with our own kernels; a pass-in-one model is the same kernels
-// with a weight set of its own. Self-contained (no precompiled header).
+// Model selection and evaluation for the D3D12 NR path. The game and Display Filter share the native pass host
+// for NVFP4 and INT8. FP8 on the game's signed runtime binds the selected weight set to its command list.
 //
 // A pass asks for them with a model choice above the runtime's own presets (DlssNr Preset / pass preset):
-//   4  Model A with the 4-bit kernels (fused blocks 256 and 128, split blocks, transformer, feed-forward; trained weights)
-//   15 NVFP4 3xPass-in-one (weight set 12)
-//   16 NVFP4 2xPass-in-one (weight set 13)
-//   17 FP8 2xPass-in-one, 18 FP8 3xPass-in-one: NVIDIA's own FP8 kernels with weight records of ours (NrFp8; RTX 40 and
+//   4  Model A with the 4-bit kernels (fused blocks 256 and 128, split blocks, transformer, feed-forward; trained
+//   weights) 15 NVFP4 3xPass-in-one (weight set 12) 16 NVFP4 2xPass-in-one (weight set 13) 17 FP8 2xPass-in-one, 18 FP8
+//   3xPass-in-one: NVIDIA's own FP8 kernels with weight records of ours (NrFp8; RTX 40 and
 //      50 series; files OptiScaler/nvfp4/fp8/fp8_set1.* and fp8_set2.*). No 4-bit kernel runs in such a pass.
 //   19 FP8 2xPass-in-one v2, 20 FP8 3xPass-in-one v2: the same with their v2 weights (fp8_set3.*, fp8_set4.*).
 //   21 NVFP4 2xPass-in-one 4K (weight set 10), 22 NVFP4 3xPass-in-one 4K (weight set 11),
@@ -17,7 +14,7 @@
 //      run wholly on the own pass host (standalone/NrCapture/nvfp4/NrHost: RTX 30, 40 and 50 series; no launch of the
 //      NR runtime at all, so such a pass creates no NGX feature). Files OptiScaler/nvfp4/int8.
 // Any other value from 4 up (5..14 were models that have been removed) is refused, never run as another model.
-// The runtime itself is given preset 1 (Model A) for these, because our kernels replace its launches one by one.
+// Game FP8 selects signed Model A and substitutes the selected FP8 weight records.
 // Assets: <OptiScaler.dll's folder>/OptiScaler/nvfp4, laid out as the Display Filter package's nvfp4 folder.
 //
 // NO FALLBACK. A pass that asks for one of these and does not get it (files missing, another runtime build, the Vulkan
@@ -71,6 +68,10 @@ constexpr unsigned Current(unsigned preset)
            : preset == ModelFp8Triple || preset == ModelFp8Triple2 ? ModelFp8Triple4k
            : preset;
 }
+constexpr bool UsesNativeHost(unsigned preset)
+{
+    return IsInt8(preset) || preset == ModelANvfp4 || IsPassInOne(preset);
+}
 constexpr bool IsKnown(unsigned preset)
 {
     return preset == ModelANvfp4 || IsPassInOne(preset) || IsFp8(preset) || IsInt8(preset);
@@ -116,11 +117,9 @@ void* WrapNvapi(unsigned id, void* original);
 // layers the first time one does; they stay loaded (and idle) afterwards.
 void Configure(bool wanted, const std::filesystem::path& assets);
 // Around every evaluation of the NR model recorded on `list`, whatever the pass's model is.
-void BeginEvaluation(unsigned requestedPreset);
+void BeginEvaluation(unsigned requestedPreset, ID3D12GraphicsCommandList* commands);
 void EndEvaluation(ID3D12GraphicsCommandList* list);
-// After EndEvaluation() of an evaluation the runtime really made: false when the pass asked for a 4-bit model and our
-// kernels did not run it, so its output is the runtime's own model and must not be shown. `whole`: no part of the
-// evaluation was borrowed from another pass (a borrowed part runs no kernels of its own). True for other passes.
+// True when the requested model completed. Borrowed work is excluded from the expected per-pass layer counts.
 bool OursRan(bool whole);
 // A path that cannot run a 4-bit model at all (Vulkan) says so here instead of running the runtime's own.
 void Refuse(const char* reason);
@@ -138,9 +137,9 @@ void FreeRetired(ID3D12Device* device, unsigned long long ticket);
 void Release(ID3D12Device* device);
 std::string Status();
 
-// The INT8 models. One pass host per pass: its kernels and weights (shared by every host on the device), its buffers
-// and the pass's history, for one model at one picture size.
-struct Int8Pass
+// INT8 and NVFP4 have one native host per pass: its kernels and weights (shared by every host on the device), its
+// buffers and the pass's history, for one model at one picture size.
+struct HostPass
 {
     ID3D12Resource* colour = nullptr;
     ID3D12Resource* motion = nullptr; // null: no usable motion vectors, the frame is run as a first frame
@@ -154,11 +153,11 @@ struct Int8Pass
 // `assets`: the folder Configure() takes (<OptiScaler.dll's folder>/OptiScaler/nvfp4). Null when the host cannot be
 // made (files missing, a GPU that is not an RTX 30, 40 or 50 series one): Problem() says why. The owner keeps it until
 // the GPU has finished every command list an evaluation was recorded on.
-std::shared_ptr<void> CreateInt8(ID3D12Device* device, unsigned preset, unsigned width, unsigned height,
+std::shared_ptr<void> CreateHost(ID3D12Device* device, unsigned preset, unsigned width, unsigned height,
                                  const std::filesystem::path& assets);
 // Records one whole evaluation between BeginEvaluation() and EndEvaluation(). False when it could not: OursRan() then
 // answers false and Problem() says why.
-bool RunInt8(const std::shared_ptr<void>& host, ID3D12GraphicsCommandList* list, const Int8Pass& pass);
+bool RunHost(const std::shared_ptr<void>& host, ID3D12GraphicsCommandList* list, const HostPass& pass);
 // The driver's own nvapi_QueryInterface (the hook's trampoline), so the host's launches pass none of the layers.
 void SetDriverQuery(void* query);
 

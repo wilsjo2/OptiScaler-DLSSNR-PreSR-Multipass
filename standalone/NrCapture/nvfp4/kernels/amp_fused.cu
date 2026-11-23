@@ -10,9 +10,9 @@
 // done by the software round-to-nearest-even satfinite of amp_common.cuh. Nothing else differs, so the outputs agree with
 // NVIDIA's kernel except where the k16 pair rounds its float16 accumulator differently from the k32 instruction.
 //
-// -DAMP_HW_REF=1 (sm_120 lab builds only, never shipped, not an amp-variant): the same code with the k32 e4m3
-// instruction in place of the k16 pair. It must match NVIDIA's kernel bit for bit, which proves the layouts, the order
-// of the work, the edges and the switches below.
+// The sm_120 NVFP4 host uses NR_NATIVE_FP8=1 for its native E4M3 layers. The 64-channel variants
+// use --maxrregcount=96 and the 32-channel upsample uses 160, measured on RTX 5090.
+// AMP_HW_REF selects the same k32 arithmetic for individual reference builds.
 //
 // Switches the hardware reference settles (defaults = what it showed):
 //   AMP_UP_FMA       upsample blend skip * gain + projection: the runtime's PTX has mul.f16x2 then add.f16x2 (no .rn) and
@@ -90,7 +90,7 @@
 #define PUBLISH 0
 #endif
 #ifndef AMP_HW_REF
-#define AMP_HW_REF 0
+#define AMP_HW_REF NR_NATIVE_FP8
 #endif
 #ifndef AMP_F32ACC
 #define AMP_F32ACC 0
@@ -348,9 +348,15 @@ AMP_INLINE void norm_rows(u32 (*q)[2], bool scaled, u32 scale, u32* words)
         s = amp_h2_add(s, shfl_x(s, 1));
         s = amp_h2_add(s, swap_h(s));
         s = amp_h2_max(s, hconst(K_FLOOR));
+#if NR_NATIVE_FP8
+        // The preceding half-pair reduction duplicated the sum.
+        const float inv = amp_rsqrt_approx(amp_h_to_f32(u16(s)));
+        const u32 rr = amp_h2_pack(inv, inv);
+#else
         float lo, hi;
         amp_h2_unpack(s, lo, hi);
         const u32 rr = amp_h2_pack(amp_rsqrt_approx(lo), amp_rsqrt_approx(hi));
+#endif
 #pragma unroll
         for (u32 j = 0; j < 4; ++j) {
             q[j][r] = amp_h2_mul(q[j][r], rr);
@@ -388,12 +394,38 @@ AMP_INLINE u32 den_reduce(u32 A, u32 B, u32 Cc, u32 D, u32 L)
 extern "C" __global__ void amp_fused_swin(Params p)
 {
     __shared__ __align__(16) u8 WIN[4u * NB * 512u];
+#if NR_NATIVE_FP8 && HEADS <= 2
+    // QKV consumes the window before attention writes its context.
+    u8* const CTX = WIN;
+#else
     __shared__ __align__(16) u8 CTX[4u * NB * 512u];
+#endif
 #if VARIANT == 2
+#if NR_NATIVE_FP8 && HEADS == 1
+    u8* const POOL = WIN;
+#else
     __shared__ __align__(16) u8 POOL[NB * 512u];
+#endif
 #endif
 #if HEADS == 1 && VARIANT == 3
     __shared__ __align__(16) u8 XF[4u * 2u * 32u * 16u];      // the float16 blend (the single-head residual reads it)
+#endif
+#if NR_NATIVE_FP8 && HEADS == 1
+    // A lane owns these four tiles throughout the single-head block.
+    amp_v4 localWin[4];
+#define LOAD_WIN(tile, k) localWin[tile]
+#define STORE_WIN(tile, k, v) localWin[tile] = amp_v4{v[0], v[1], v[2], v[3]}
+#else
+#define LOAD_WIN(tile, k) lds(WIN + BLK(tile, k) + lane * 16u)
+#define STORE_WIN(tile, k, v) sts(WIN + BLK(tile, k) + lane * 16u, v)
+#endif
+#if NR_NATIVE_FP8 && HEADS == 1 && (VARIANT == 1 || VARIANT == 3)
+    amp_v4 localContext[4];
+#define LOAD_CTX(tile, k) localContext[tile]
+#define STORE_CTX(tile, k, v) localContext[tile] = amp_v4{v[0], v[1], v[2], v[3]}
+#else
+#define LOAD_CTX(tile, k) lds(CTX + BLK(tile, k) + lane * 16u)
+#define STORE_CTX(tile, k, v) sts(CTX + BLK(tile, k) + lane * 16u, v)
 #endif
     const u32 lane = threadIdx.x & 31u, w = threadIdx.y, g = lane >> 2, t = lane & 3u;
     const bool leader = (threadIdx.x | threadIdx.y) == 0u;
@@ -457,6 +489,9 @@ extern "C" __global__ void amp_fused_swin(Params p)
 #pragma unroll
             for (u32 j = 0; j < 4; ++j) mma(pr[j], a, b[j]);
         }
+#if NR_NATIVE_FP8 && HEADS == 2
+        __syncthreads(); // Every warp has read the coarse tiles before WIN reuses them.
+#endif
         // skip (tile layout) * gain + the replicated projection
         u32 gain[4];
 #pragma unroll
@@ -496,7 +531,7 @@ extern "C" __global__ void amp_fused_swin(Params p)
             }
             u32 xw[4];
             pack_a(bl, xw);
-            sts(WIN + BLK(s, w) + lane * 16u, xw);
+            STORE_WIN(s, w, xw);
 #if HEADS == 1
 #pragma unroll
             for (u32 r = 0; r < 2; ++r) {
@@ -527,7 +562,7 @@ extern "C" __global__ void amp_fused_swin(Params p)
             xw[0] = v.x; xw[1] = v.y; xw[2] = v.z; xw[3] = v.w;
         }
 #endif
-        sts(WIN + BLK(s, w) + lane * 16u, xw);
+        STORE_WIN(s, w, xw);
     }
 #endif
     __syncthreads();
@@ -550,7 +585,7 @@ extern "C" __global__ void amp_fused_swin(Params p)
             for (u32 j = 0; j < 4; ++j) macc[s][j][r] = amp_h2_mul(bl[j], rsw[j]);
         }
 #else
-        const amp_v4 v = lds(WIN + BLK(s, 0u) + lane * 16u);
+        const amp_v4 v = LOAD_WIN(s, 0u);
         const u32 xw[4] = {v.x, v.y, v.z, v.w};
 #pragma unroll
         for (u32 j = 0; j < 4; ++j)
@@ -574,7 +609,7 @@ extern "C" __global__ void amp_fused_swin(Params p)
             bfrag2(we + kb * 4096u, lane, b);
 #pragma unroll
             for (u32 s = 0; s < 4; ++s) {
-                const AF a = afrag_v(lds(WIN + BLK(s, kb) + lane * 16u));
+                const AF a = afrag_v(LOAD_WIN(s, kb));
 #pragma unroll
                 for (u32 j = 0; j < 4; ++j) mma(eacc[s][j], a, b[j]);
             }
@@ -607,7 +642,7 @@ extern "C" __global__ void amp_fused_swin(Params p)
 #else
 #pragma unroll
     for (u32 s = 0; s < 4; ++s) {
-        const amp_v4 v = lds(WIN + BLK(s, w) + lane * 16u);
+        const amp_v4 v = LOAD_WIN(s, w);
         const u32 xw[4] = {v.x, v.y, v.z, v.w};
 #pragma unroll
         for (u32 j = 0; j < 4; ++j)
@@ -619,7 +654,7 @@ extern "C" __global__ void amp_fused_swin(Params p)
     for (u32 s = 0; s < 4; ++s) {
         u32 mw[4];
         pack_a(macc[s], mw);
-        sts(WIN + BLK(s, w) + lane * 16u, mw);
+        STORE_WIN(s, w, mw);
     }
     __syncthreads();
 #pragma unroll 1
@@ -628,7 +663,7 @@ extern "C" __global__ void amp_fused_swin(Params p)
         bfrag2(rec + R_CONTRACT + kb * (NB * 1024u) + w * 1024u, lane, b);
 #pragma unroll
         for (u32 s = 0; s < 4; ++s) {
-            const AF a = afrag_v(lds(WIN + BLK(s, kb) + lane * 16u));
+            const AF a = afrag_v(LOAD_WIN(s, kb));
 #pragma unroll
             for (u32 j = 0; j < 4; ++j) mma(yacc[s][j], a, b[j]);
         }
@@ -640,7 +675,7 @@ extern "C" __global__ void amp_fused_swin(Params p)
     for (u32 s = 0; s < 4; ++s) {
         u32 yw[4];
         pack_a(yacc[s], yw);
-        sts(WIN + BLK(s, w) + lane * 16u, yw);
+        STORE_WIN(s, w, yw);
     }
 #if HEADS == 1
     // the single-head attention residual: float16 y * ars, kept as the output projection's seed
@@ -669,7 +704,7 @@ extern "C" __global__ void amp_fused_swin(Params p)
             bfrag2(wqkv + kb * (NB * 3072u) + slice * 512u, lane, b);
 #pragma unroll
             for (u32 s = 0; s < 4; ++s) {
-                const AF a = afrag_v(lds(WIN + BLK(s, kb) + lane * 16u));
+                const AF a = afrag_v(LOAD_WIN(s, kb));
 #pragma unroll
                 for (u32 j = 0; j < 4; ++j) mma(acc[s][j], a, b[j]);
             }
@@ -691,9 +726,19 @@ extern "C" __global__ void amp_fused_swin(Params p)
         }
     }
 
+#if NR_NATIVE_FP8 && HEADS == 2
+    amp_v4 residualY[4];
+#pragma unroll
+    for (u32 tile = 0; tile < 4; ++tile) residualY[tile] = LOAD_WIN(tile, w);
+    __syncthreads(); // Finish QKV and save the residual before CTX overwrites WIN.
+#endif
     // ---- attention, two query tiles at a time ---------------------------------------------------------------------------
     const u8* const wbias = rec + R_BIAS + w * 8192u;
+#if NR_NATIVE_FP8 && HEADS == 1 && (VARIANT == 1 || VARIANT == 3)
+#pragma unroll
+#else
 #pragma unroll 1
+#endif
     for (u32 gp = 0; gp < 2; ++gp) {
         u32 n[2][8][2];                         // logits -> numerators, [query tile][key fragment][row]
 #pragma unroll
@@ -729,9 +774,14 @@ extern "C" __global__ void amp_fused_swin(Params p)
         u32 rc = den_reduce(den[0][0], den[0][1], den[1][0], den[1][1], lane);
         rc = amp_h2_max(rc, hconst(K_FLOOR));
         {
+#if NR_NATIVE_FP8
+            const float inv = amp_rcp_approx(amp_h_to_f32(u16(rc)));
+            rc = amp_h2_pack(inv, inv);
+#else
             float lo, hi;
             amp_h2_unpack(rc, lo, hi);
             rc = amp_h2_pack(amp_rcp_approx(lo), amp_rcp_approx(hi));
+#endif
         }
 #pragma unroll
         for (u32 qq = 0; qq < 2; ++qq) {
@@ -758,7 +808,7 @@ extern "C" __global__ void amp_fused_swin(Params p)
             }
             u32 cw[4];
             pack_a(ctx, cw);
-            sts(CTX + BLK(qt, w) + lane * 16u, cw);
+            STORE_CTX(qt, w, cw);
         }
     }
 
@@ -776,7 +826,11 @@ extern "C" __global__ void amp_fused_swin(Params p)
         for (u32 j = 0; j < 4; ++j) ars[j] = *(const u32*)(rec + R_ARS + 4u * (16u * w + 4u * j + t));
 #pragma unroll
         for (u32 s = 0; s < 4; ++s) {
-            const amp_v4 v = lds(WIN + BLK(s, w) + lane * 16u);
+#if NR_NATIVE_FP8 && HEADS == 2
+            const amp_v4 v = residualY[s];
+#else
+            const amp_v4 v = LOAD_WIN(s, w);
+#endif
             const u32 yw[4] = {v.x, v.y, v.z, v.w};
 #pragma unroll
             for (u32 j = 0; j < 4; ++j)
@@ -792,7 +846,7 @@ extern "C" __global__ void amp_fused_swin(Params p)
         bfrag2(rec + R_OUT + kb * (NB * 1024u) + w * 1024u, lane, b);
 #pragma unroll
         for (u32 s = 0; s < 4; ++s) {
-            const AF a = afrag_v(lds(CTX + BLK(s, kb) + lane * 16u));
+            const AF a = afrag_v(LOAD_CTX(s, kb));
 #pragma unroll
             for (u32 j = 0; j < 4; ++j) mma(o[s][j], a, b[j]);
         }
@@ -911,3 +965,8 @@ extern "C" __global__ void amp_fused_swin(Params p)
     }
 #endif
 }
+
+#undef LOAD_WIN
+#undef STORE_WIN
+#undef LOAD_CTX
+#undef STORE_CTX

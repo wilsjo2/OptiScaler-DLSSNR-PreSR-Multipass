@@ -76,10 +76,15 @@ foreach ($file in $fgFiles) {
     if ((Get-FileHash -LiteralPath $copied -Algorithm SHA256).Hash -ne $hash) { throw "FG runtime hash mismatch: $file" }
     $fgHashes[$file] = $hash
 }
-# Optional: kernels and repacked weights of the experimental NVFP4 feed-forward option.
+# Native NR kernels and model weights when packaging the model pack.
 $nvfp4Hashes = $null
 if ($Nvfp4Assets -and (Test-Path -LiteralPath (Join-Path $Nvfp4Assets 'ffn_v2.cubin') -PathType Leaf)) {
     $nvfp4Hashes = [ordered]@{}
+    foreach ($required in 'host/modelA_fp8.plan', 'host/amp_helpers_base.sm86.cubin', 'host4/modelA_fp8.plan', 'host4/fused_manifest.txt', 'host4/mixed/fused_manifest.txt', 'host4/mixed_set1.bin') {
+        if (!(Test-Path -LiteralPath (Join-Path $Nvfp4Assets $required) -PathType Leaf)) {
+            throw "Missing $required in the Display Filter model pack."
+        }
+    }
     # Model A's first set (modelA/ffn_v2.bin) and Model B's files are optional: a folder may leave them out.
     foreach ($stale in @('modelA/ffn_v2.bin', 'modelB/ffn_v2.bin', 'modelB/ffn_v2.txt')) {
         $old = Join-Path (Join-Path $target 'nvfp4') $stale
@@ -153,9 +158,10 @@ if ($Nvfp4Assets -and (Test-Path -LiteralPath (Join-Path $Nvfp4Assets 'ffn_v2.cu
     # attention, input and output block, the FP8 models' records (fp8/fp8_set<n>.*) and the own pass host (host/: its
     # plan, kernel manifests and cubins; RTX 30 and 40 run the FP8 models on it). A family's folder is copied whole when
     # its manifest is there.
-    foreach ($family in @('swin4', 'split4', 'vit4', 'prepost4', 'fp8', 'host', 'int8')) {
+    foreach ($family in @('swin4', 'split4', 'vit4', 'prepost4', 'fp8', 'host', 'int8', 'host4', 'host4/mixed')) {
         $folder = Join-Path $Nvfp4Assets $family
-        if (!(Test-Path -LiteralPath (Join-Path $folder "$family.txt") -PathType Leaf) -and
+        if (!(Test-Path -LiteralPath (Join-Path $folder "fused_manifest.txt") -PathType Leaf) -and
+            !(Test-Path -LiteralPath (Join-Path $folder "$family.txt") -PathType Leaf) -and
             !(Test-Path -LiteralPath (Join-Path $folder 'modelA_fp8.plan') -PathType Leaf) -and
             !(Get-ChildItem -Path $folder -Filter "${family}_set*.txt" -File -ErrorAction SilentlyContinue)) { continue }
         $familyTarget = Join-Path $target "nvfp4/$family"

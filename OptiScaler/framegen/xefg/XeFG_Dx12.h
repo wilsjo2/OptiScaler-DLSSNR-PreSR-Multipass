@@ -37,7 +37,7 @@ class XeFG_Dx12 : public virtual IFGFeature_Dx12
 
   protected:
     void ReleaseObjects() override final;
-    void CreateObjects(ID3D12Device* InDevice) override final;
+    bool CreateObjects(ID3D12Device* InDevice) override final;
 
   public:
     // IFGFeature

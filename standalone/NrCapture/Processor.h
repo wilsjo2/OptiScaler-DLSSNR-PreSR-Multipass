@@ -46,6 +46,7 @@ public:
     // runtime (the other side of a model comparison). `sharing` must outlive it.
     Processor(Gpu& gpu, const Processor& sharing);
     ~Processor();
+    void PrepareFrameGeneration() { runtime->InitializeDriver(); }
     void Resize(UINT width, UINT height, const Settings& settings);
     // Input is linear scRGB (also for SDR capture), arrives/leaves COMMON.
     // Records into the host's open list. Returned texture is COPY_SOURCE.

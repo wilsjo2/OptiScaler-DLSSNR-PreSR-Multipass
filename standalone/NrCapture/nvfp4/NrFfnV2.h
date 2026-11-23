@@ -76,6 +76,7 @@ bool SetComplete(unsigned set, std::string* missing = nullptr);
 // contracts left to the runtime, and pairs run with other weights than the set asked for. A host that asked for a
 // model of ours compares the value before and after an evaluation: any increase means it is not wholly that model.
 unsigned long long Faults();
+unsigned long long CompletedWork();
 // Buffers are kept per frame size (token count), and recorded command lists refer to them. For hosts that can tell
 // when the GPU has finished: RetireIdleSizes sets aside the buffers of every size of `device` beyond the `keep` most
 // recently used that no evaluation used among the last `recent` ones, and returns a ticket (0: nothing set aside).

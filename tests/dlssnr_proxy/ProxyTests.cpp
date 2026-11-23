@@ -11,6 +11,22 @@ Scope::~Scope() {}
 void RuntimeReport(ID3D12GraphicsCommandList*, ID3D12Device*, const char*) {}
 }
 
+namespace DlssNr::Nvfp4
+{
+unsigned hostsCreated = 0, hostsDestroyed = 0;
+HostPass lastPass;
+std::shared_ptr<void> CreateHost(ID3D12Device*, unsigned, unsigned, unsigned, const std::filesystem::path&)
+{
+    ++hostsCreated;
+    return std::shared_ptr<void>(new int{}, [](int* host) { delete host; ++hostsDestroyed; });
+}
+bool RunHost(const std::shared_ptr<void>&, ID3D12GraphicsCommandList*, const HostPass& pass)
+{
+    lastPass = pass;
+    return true;
+}
+}
+
 // Routing seam: hardware tests separately exercise the real compatibility loader.
 namespace CompatibilityMock {
 bool available=false;
@@ -83,9 +99,35 @@ struct Dx11Parameters : Mock::Params
 int main()
 {
     DlssNr::Proxy::Context proxy;
-    ID3D12Device device;
-    ID3D12GraphicsCommandList commands;
-    ID3D12Resource color, depth, motion, output;
+    using Microsoft::WRL::ComPtr;
+    ComPtr<IDXGIFactory4> factory;
+    ComPtr<IDXGIAdapter> warp;
+    ComPtr<ID3D12Device> warpDevice;
+    ComPtr<ID3D12CommandAllocator> allocator;
+    ComPtr<ID3D12GraphicsCommandList> list;
+    assert(SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))));
+    assert(SUCCEEDED(factory->EnumWarpAdapter(IID_PPV_ARGS(&warp))));
+    assert(SUCCEEDED(D3D12CreateDevice(warp.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&warpDevice))));
+    auto& device = *warpDevice.Get();
+    assert(SUCCEEDED(device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator))));
+    assert(SUCCEEDED(device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr, IID_PPV_ARGS(&list))));
+    auto& commands = *list.Get();
+    D3D12_HEAP_PROPERTIES heap {};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC desc {};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = desc.Height = 64;
+    desc.DepthOrArraySize = desc.MipLevels = 1;
+    desc.SampleDesc.Count = 1;
+    desc.Format = DXGI_FORMAT_R16G16_FLOAT;
+    ComPtr<ID3D12Resource> textures[5];
+    for (auto& texture : textures)
+        assert(SUCCEEDED(device.CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                        D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&texture))));
+    auto& color = *textures[0].Get();
+    auto& depth = *textures[1].Get();
+    auto& motion = *textures[2].Get();
+    auto& output = *textures[3].Get();
     bool evaluated = true;
     uint64_t epoch = 0;
     DlssNr::ModelSettings settings { 0, 0, 0.5f, 1.0f, 0.0f, -1.0f, true };
@@ -302,6 +344,47 @@ int main()
     assert(CompatibilityMock::opens == attempts + 1 && Mock::allocations == Mock::destructions);
     Mock::createResult = NVSDK_NGX_Result_Success;
 
+    // Calibration retunes a live INT8 host. Both the pipeline preflight and direct Run callers use this path.
+    {
+        using namespace DlssNr::Nvfp4;
+        DlssNr::Proxy::Context int8;
+        DlssNr::ModelSettings tuning {};
+        tuning.requested = ModelInt8;
+        DlssNr::Proxy::Frame frame { &color, &depth, &motion, &output, { 64, 64 },
+                                     { { 0, 0, 64, 64 }, { 0, 0, 64, 64 } } };
+        auto evaluate = [&] { assert(int8.Run(&commands, &device, frame, tuning, ++epoch, &evaluated) ==
+                                     NVSDK_NGX_Result_Success && evaluated); };
+        for (unsigned trial = 1; trial <= 64; ++trial)
+        {
+            tuning.intensity = float(trial) / 64;
+            if (trial % 2 == 0)
+                assert(int8.UpdateTuning(tuning));
+            evaluate();
+            assert(hostsCreated == 1 && hostsDestroyed == 0 && lastPass.intensity == tuning.intensity && lastPass.reset);
+            evaluate();
+            assert(!lastPass.reset);
+        }
+        // Moving an active region within the motion atlas preserves history and the game's vector units.
+        frame.guides.motion = { 4, 8, 48, 40 };
+        frame.mvScaleX = -64.0f;
+        frame.mvScaleY = 32.0f;
+        evaluate();
+        assert(lastPass.motion && lastPass.motion != &motion && !lastPass.reset);
+        assert(lastPass.motion->GetDesc().Width == 48 && lastPass.motion->GetDesc().Height == 40);
+        assert(lastPass.mvScaleX == -64.0f && lastPass.mvScaleY == 32.0f);
+        const auto cropped = lastPass.motion;
+        frame.guides.motion.x = 8;
+        evaluate();
+        assert(lastPass.motion == cropped && !lastPass.reset);
+        tuning.requested = ModelInt8Double;
+        evaluate();
+        assert(hostsCreated == 2 && hostsDestroyed == 0 && lastPass.reset);
+        int8.Release();
+        assert(hostsDestroyed == 0);
+        int8.ResetRecording(&commands);
+        assert(hostsDestroyed == 2);
+    }
+
     // Clearing an older owner must not erase the current shader's menu snapshot.
     DlssNr::StatusSnapshot status;
     status.running = true;
@@ -321,7 +404,7 @@ int main()
     assert(requestsAfter.captureFrames == 8);
 
     // The shared runner routes resources backwards, then executes stages forwards.
-    ID3D12Resource intermediate;
+    auto& intermediate = *textures[4].Get();
     std::string order;
     ShaderPipeline_Dx12 pipeline { { [&](ID3D12Resource* target)
                                      {

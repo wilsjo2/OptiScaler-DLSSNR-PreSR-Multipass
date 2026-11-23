@@ -59,16 +59,16 @@ std::vector<std::string> log;
 unsigned long long retiredTicket = 0, freedTicket = 0;
 unsigned retireKeep = 0, retireRecent = 0;
 // One evaluation of the model as the runtime would launch it: a layer that is on and not paused does its part.
-void Evaluate(unsigned long long swinFaults = 0, unsigned long long netFaults = 0, unsigned long long ffnFaults = 0)
+void Evaluate(unsigned long long swinFaults = 0, unsigned long long netFaults = 0, unsigned long long ffnFaults = 0, bool native = false)
 {
     for (Layer* layer : { &swin, &net, &ffn })
-        if (layer->enabled && !layer->paused)
+        if (layer->enabled && (native || !layer->paused))
             layer->work += 10;
-    if (swin.enabled && !swin.paused)
+    if (swin.enabled && (native || !swin.paused))
         swin.faults += swinFaults;
-    if (net.enabled && !net.paused)
+    if (net.enabled && (native || !net.paused))
         net.faults += netFaults;
-    if (ffn.enabled && !ffn.paused)
+    if (ffn.enabled && (native || !ffn.paused))
         ffn.faults += ffnFaults;
     if (fp8.enabled && fp8.set)
     {
@@ -91,6 +91,7 @@ void Pause(bool paused) { Mock::swin.paused = paused; }
 unsigned UseSet(unsigned set) { return Mock::swin.set = set; }
 bool SetComplete(unsigned set, std::string* missing) { return Mock::swin.Complete(set, missing); }
 unsigned long long Faults() { return Mock::swin.faults; }
+unsigned long long CompletedWork(bool& active) { active = Mock::swin.enabled; return Mock::swin.work; }
 void EndEvaluation(ID3D12GraphicsCommandList*) noexcept {}
 void ReleaseDevice(ID3D12Device*) { ++Mock::swin.released; }
 std::string Status(bool counters)
@@ -109,6 +110,7 @@ void Pause(bool paused) { Mock::net.paused = paused; }
 void UseSet(unsigned set) { Mock::net.set = set; }
 bool SetComplete(unsigned set, std::string* missing) { return Mock::net.Complete(set, missing); }
 unsigned long long Faults() { return Mock::net.faults; }
+unsigned long long CompletedWork() { return Mock::net.work; }
 void EndEvaluation(ID3D12GraphicsCommandList*) noexcept {}
 void ReleaseDevice(ID3D12Device*) { ++Mock::net.released; }
 std::string Status(bool counters)
@@ -125,6 +127,7 @@ void Pause(bool paused) { Mock::ffn.paused = paused; }
 void UseSet(unsigned set) { Mock::ffn.set = set; }
 bool SetComplete(unsigned set, std::string* missing) { return Mock::ffn.Complete(set, missing); }
 unsigned long long Faults() { return Mock::ffn.faults; }
+unsigned long long CompletedWork() { return Mock::ffn.work; }
 bool Failed() { return false; }
 void EndEvaluation(ID3D12GraphicsCommandList*) noexcept {}
 void ReleaseDevice(ID3D12Device*) { ++Mock::ffn.released; }
@@ -153,7 +156,7 @@ void Enable(const Options&)
 }
 void Disable() { Mock::fp8.enabled = false; }
 bool Enabled() { return Mock::fp8.enabled; }
-void UseSet(unsigned set) { Mock::fp8.set = set; }
+void UseSet(unsigned set, ID3D12GraphicsCommandList*) { Mock::fp8.set = set; }
 bool SetComplete(unsigned set, std::string* missing)
 {
     const bool complete = Mock::fp8.enabled && set && set != Mock::fp8.missingSet;
@@ -164,7 +167,7 @@ bool SetComplete(unsigned set, std::string* missing)
 unsigned long long Faults() { return Mock::fp8.faults; }
 std::string Problem() { return "FP8 set 1: launch 57 is cc_repack, Model A's is cc_vit_1d_qkv_chained_fp8"; }
 unsigned long long Completed() { return Mock::fp8.completed; }
-void EndEvaluation(ID3D12GraphicsCommandList*) noexcept {}
+void EndEvaluation(ID3D12GraphicsCommandList*) noexcept { Mock::fp8.set = 0; }
 void ReleaseDevice(ID3D12Device*) { ++Mock::fp8.released; }
 std::string Status(bool) { return "active"; }
 } // namespace NrFp8
@@ -191,6 +194,7 @@ Host::Host(std::unique_ptr<Impl> made) : impl(std::move(made)) {}
 Host::~Host() = default;
 std::unique_ptr<Host> Host::Create(ID3D12Device*, const Options& options, unsigned width, unsigned height, unsigned set)
 {
+    CHECK(options.callerTracksGpuLifetime);
     if (Mock::host.failCreate)
         throw std::runtime_error("int8_set" + std::to_string(set) + ".bin is missing. Nothing was shown.");
     ++Mock::host.created;
@@ -204,6 +208,14 @@ void Host::Evaluate(ID3D12GraphicsCommandList*, ID3D12Resource*, ID3D12Resource*
     if (Mock::host.failRun)
         throw std::runtime_error("a kernel could not be launched. Nothing was shown.");
     ++Mock::host.evaluated;
+}
+Options FourBitOptions(const std::filesystem::path& folder, bool allowMixedOriginal)
+{
+    CHECK(!allowMixedOriginal);
+    Options options;
+    options.enabled = options.fourBit = true;
+    options.plan = folder / "host4" / "modelA_fp8.plan";
+    return options;
 }
 Options Int8Options(const std::filesystem::path& folder)
 {
@@ -225,8 +237,10 @@ using namespace DlssNr::Nvfp4;
 bool Pass(unsigned preset, unsigned long long swinFaults = 0, unsigned long long netFaults = 0,
           unsigned long long ffnFaults = 0, bool whole = true)
 {
-    BeginEvaluation(preset);
-    Mock::Evaluate(swinFaults, netFaults, ffnFaults);
+    BeginEvaluation(preset, nullptr);
+    if (preset == ModelANvfp4 || IsPassInOne(preset))
+        RunHost(CreateHost(nullptr, preset, 640, 360, L"assets"), nullptr, {});
+    Mock::Evaluate(swinFaults, netFaults, ffnFaults, preset == ModelANvfp4 || IsPassInOne(preset));
     EndEvaluation(nullptr);
     return OursRan(whole);
 }
@@ -259,7 +273,8 @@ int main()
         CHECK(Pass(1) && Mock::swin.work + Mock::net.work + Mock::ffn.work == work);
     }
     // A borrowed part of an evaluation runs no split, transformer or feed-forward kernels of its own.
-    BeginEvaluation(ModelANvfp4);
+    BeginEvaluation(ModelANvfp4, nullptr);
+    RunHost(CreateHost(nullptr, ModelANvfp4, 640, 360, L"assets"), nullptr, {});
     Mock::swin.work += 10;
     EndEvaluation(nullptr);
     CHECK(OursRan(false));
@@ -273,7 +288,7 @@ int main()
                          : layer == &Mock::net ? "vit4/vit4_set13.bin"
                                                : "modelA/ffn_v2_set13.bin";
         const auto work = Mock::swin.work + Mock::net.work + Mock::ffn.work;
-        BeginEvaluation(ModelTwoDouble);
+        BeginEvaluation(ModelTwoDouble, nullptr);
         CHECK(AllPaused());
         Mock::Evaluate();
         EndEvaluation(nullptr);
@@ -300,12 +315,10 @@ int main()
     CHECK(!Pass(ModelTwoDouble, 0, 0, 1));
     CHECK(!Pass(ModelANvfp4, 0, 3, 0, false));
     CHECK(!Running());
-    // The reason reaches the menu once the failure has lasted (the first evaluations after loading may miss).
-    for (int i = 0; i < 40; ++i)
-        CHECK(!Pass(ModelTwoDouble, 1, 0, 0));
+    // The native plan can report missing work on the first failed evaluation.
+    CHECK(!Pass(ModelTwoDouble, 1, 0, 0));
     CHECK(Contains(Problem(), "runtime's own weights"));
-    for (int i = 0; i < 40; ++i)
-        CHECK(!Pass(ModelTwoDouble, 0, 1, 0));
+    CHECK(!Pass(ModelTwoDouble, 0, 1, 0));
     CHECK(Contains(Problem(), "without our kernels or weights"));
     // Faults of an evaluation that did not ask for our model are not held against the next one that does.
     Mock::swin.faults += 5;
@@ -332,7 +345,7 @@ int main()
     CHECK(!Pass(ModelFp8Double) && !Running() && Contains(Problem(), "launch 57"));
     CHECK(Pass(ModelFp8Double) && Problem().empty());
     // An evaluation the FP8 layer never saw (no cc_cb_clear reached it) is refused too.
-    BeginEvaluation(ModelFp8Triple);
+    BeginEvaluation(ModelFp8Triple, nullptr);
     EndEvaluation(nullptr);
     CHECK(!OursRan(true) && Contains(Problem(), "did not see"));
     // A missing set: nothing of ours is asked for, the pass is refused, the reason names the files.
@@ -366,34 +379,35 @@ int main()
         CHECK(Int8Set(ModelInt8) == 1 && Int8Set(ModelInt8Double) == 2);
         SetDriverQuery(device);
         CHECK(Mock::host.query == device);
-        const auto host = CreateInt8(device, ModelInt8Double, 1920, 1080, L"assets");
-        CHECK(host && Mock::host.created == 1 && Mock::host.set == 2 && Mock::host.recordsName == "int8_set");
+        const auto createdBefore = Mock::host.created, evaluatedBefore = Mock::host.evaluated;
+        const auto host = CreateHost(device, ModelInt8Double, 1920, 1080, L"assets");
+        CHECK(host && Mock::host.created == createdBefore + 1 && Mock::host.set == 2 && Mock::host.recordsName == "int8_set");
         CHECK(Mock::host.folder == std::filesystem::path(L"assets") / L"int8");
-        const Int8Pass pass;
+        const HostPass pass;
         const auto work = Mock::swin.work + Mock::net.work + Mock::ffn.work;
-        BeginEvaluation(ModelInt8Double);
+        BeginEvaluation(ModelInt8Double, nullptr);
         CHECK(AllPaused() && Mock::fp8.set == 0);
-        CHECK(RunInt8(host, nullptr, pass) && Mock::host.evaluated == 1);
+        CHECK(RunHost(host, nullptr, pass) && Mock::host.evaluated == evaluatedBefore + 1);
         EndEvaluation(nullptr);
         CHECK(OursRan(true) && Running() && Problem().empty());
         CHECK(Mock::swin.work + Mock::net.work + Mock::ffn.work == work);
         // A pass of the host that did not run is refused at once, with the reason; the next one that runs is shown.
         Mock::host.failRun = true;
-        BeginEvaluation(ModelInt8Double);
-        CHECK(!RunInt8(host, nullptr, pass));
+        BeginEvaluation(ModelInt8Double, nullptr);
+        CHECK(!RunHost(host, nullptr, pass));
         EndEvaluation(nullptr);
         CHECK(!OursRan(true) && !Running() && Contains(Problem(), "INT8") && Contains(Problem(), "launched"));
         Mock::host.failRun = false;
-        BeginEvaluation(ModelInt8Double);
-        CHECK(RunInt8(host, nullptr, pass));
+        BeginEvaluation(ModelInt8Double, nullptr);
+        CHECK(RunHost(host, nullptr, pass));
         EndEvaluation(nullptr);
         CHECK(OursRan(true) && Problem().empty());
         // A host that cannot be made: the pass is recorded without it and refused, and the reason names the file.
         Mock::host.failCreate = true;
-        const auto none = CreateInt8(device, ModelInt8, 1920, 1080, L"assets");
+        const auto none = CreateHost(device, ModelInt8, 1920, 1080, L"assets");
         CHECK(!none);
-        BeginEvaluation(ModelInt8);
-        CHECK(!RunInt8(none, nullptr, pass));
+        BeginEvaluation(ModelInt8, nullptr);
+        CHECK(!RunHost(none, nullptr, pass));
         EndEvaluation(nullptr);
         CHECK(!OursRan(true) && Contains(Problem(), "int8_set1"));
         Mock::host.failCreate = false;

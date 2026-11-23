@@ -2,6 +2,7 @@
 #include "Common.h"
 #include <nvsdk_ngx.h>
 #include <array>
+#include <mutex>
 #include <dlssnr/DlssNr_CompatibilityRuntime.h>
 namespace nr {
 class Runtime {
@@ -24,6 +25,7 @@ public:
     unsigned RequestedModel(unsigned pass) const { return pass < requested.size() ? requested[pass] : 0; }
     // The pass's tuning as given to the runtime (clamped; the own pass host builds its parameter blocks from it).
     const DlssNr::ModelSettings& PassSettings(unsigned pass) const { return settings[std::min<size_t>(pass, settings.size() - 1)]; }
+    void InitializeDriver(bool unlockAdaMfg = false);
     void Release(); // Only after the host's fence completes, or recording is discarded.
     NVSDK_NGX_Result CreateDlss(ID3D12GraphicsCommandList* commands, UINT width, UINT height, UINT outWidth, UINT outHeight);
     void EvaluateDlss(ID3D12GraphicsCommandList* commands, ID3D12Resource* colour, ID3D12Resource* depth,
@@ -32,6 +34,8 @@ public:
     static void CheckResult(NVSDK_NGX_Result result, const char* operation);
 private:
     std::shared_ptr<Runtime> owner;
+    std::mutex driverMutex;
+    bool driverReady = false;
     HMODULE module = nullptr;
     ComPtr<ID3D12Device> device;
     std::array<NVSDK_NGX_Parameter*, Settings::MaxPasses> parameters{};

@@ -102,9 +102,6 @@ struct ModelStateDx12
     bool rayReconstruction = false;
     bool reset = true;
 
-    // The preset, style and strengths each live feature was created with.
-    ModelSettings builtSettings[DlssNr::MaxPassCount] {};
-
     // Latch failures until an explicit retry rather than recording failing GPU work every frame.
     bool failed = false;
     const char* reason = "";

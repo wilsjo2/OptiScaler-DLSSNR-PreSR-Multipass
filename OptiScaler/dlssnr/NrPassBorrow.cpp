@@ -343,6 +343,13 @@ struct Record
         uint32_t paramSize, offset, shared;
         NVAPI_DIM3 grid, block;
         HMODULE creator;
+        bool ownedPlan;
+        GateResult Layout() const
+        {
+            // Owned Model A uses the 310.9.16 parameter table. Nvidia launches keep the signed runtime check.
+            return ownedPlan ? GateResult { GateState::Audited, Tb::Runtime::R310_9_16, "native NVFP4" }
+                             : Gate(creator);
+        }
     };
     std::vector<Launch> launches;
     std::vector<uint8_t> params;
@@ -402,6 +409,7 @@ struct State
     std::mutex mutex;
     // Plan of the current frame.
     bool active = false;
+    bool includesNativePlan = false;
     ID3D12GraphicsCommandList* list = nullptr;
     uint64_t frame = 0;
     unsigned evaluations = 0, next = 0;
@@ -607,7 +615,7 @@ void TakeSnapshots(State& s, unsigned k)
             continue;
         auto& snapshot = s.snapshot[c];
         snapshot.valid = false;
-        const auto gate = Gate(s.current.launches[k].creator);
+        const auto gate = s.current.launches[k].Layout();
         if (gate.state != GateState::Audited || gate.runtime != Tb::kVariants[variant].runtime)
             continue;
         const uint64_t bytes = HandoffBytes(s.current, *spec), output = s.current.Q(k, spec->output);
@@ -671,7 +679,7 @@ std::string CanStartSkipping(State& s)
         return std::string("Off: no snapshot of ") + CutName(s.cut);
     if (!bytes || bytes != snapshot.bytes || bytes != HandoffBytes(s.templ, spec))
         return "Off: pass sizes differ";
-    const auto gate = Gate(s.current.launches[spec.first].creator);
+    const auto gate = s.current.launches[spec.first].Layout();
     if (gate.state != GateState::Audited || gate.runtime != Tb::kVariants[s.variant].runtime)
         return gate.state == GateState::Checking ? "Off: checking runtime" : "Off: runtime not audited";
     const auto clear = Tb::kVariants[s.variant].clear;
@@ -724,7 +732,8 @@ std::string ConsumerContract(State& s, unsigned k)
     return failure;
 }
 
-bool CaptureLaunch(State& s, const NVAPI_CU_KERNEL_LAUNCH_PARAMS* kernels, NvU32 count, std::string& why)
+bool CaptureLaunch(State& s, const NVAPI_CU_KERNEL_LAUNCH_PARAMS* kernels, NvU32 count, std::string& why,
+                   const char* ownedName)
 {
     Record::Launch launch {};
     launch.id = kUnknown;
@@ -739,22 +748,30 @@ bool CaptureLaunch(State& s, const NVAPI_CU_KERNEL_LAUNCH_PARAMS* kernels, NvU32
         launch.grid = kernels->gridDim;
         launch.block = kernels->blockDim;
         launch.shared = kernels->dynSharedMemBytes;
-        auto& names = GetNames();
-        std::lock_guard lock(names.mutex);
-        const auto found = names.functions.find(kernels->hFunction);
-        if (found != names.functions.end())
+        if (ownedName)
         {
-            launch.id = found->second.id;
-            launch.creator = found->second.creator;
-            if (launch.id == kUnknown)
-                why = "kernel '" + found->second.name.substr(0, 60) + "' is not in the borrow tables";
+            launch.ownedPlan = true;
+            launch.id = NameId(ownedName);
         }
-        else if (const auto gone = names.destroyed.find(kernels->hFunction); gone != names.destroyed.end())
-            why = "kernel '" + gone->second.substr(0, 60) + "' was launched after it was destroyed";
         else
-            why = names.creates ? "a kernel was launched that was not seen being created (" +
-                                      std::to_string(names.creates) + " creations seen)"
-                                : "NR kernels were not observed being created (restart the NR feature)";
+        {
+            auto& names = GetNames();
+            std::lock_guard lock(names.mutex);
+            const auto found = names.functions.find(kernels->hFunction);
+            if (found != names.functions.end())
+            {
+                launch.id = found->second.id;
+                launch.creator = found->second.creator;
+                if (launch.id == kUnknown)
+                    why = "kernel '" + found->second.name.substr(0, 60) + "' is not in the borrow tables";
+            }
+            else if (const auto gone = names.destroyed.find(kernels->hFunction); gone != names.destroyed.end())
+                why = "kernel '" + gone->second.substr(0, 60) + "' was launched after it was destroyed";
+            else
+                why = names.creates ? "a kernel was launched that was not seen being created (" +
+                                          std::to_string(names.creates) + " creations seen)"
+                                    : "NR kernels were not observed being created (restart the NR feature)";
+        }
     }
     if (good && launch.id == kUnknown)
         good = false;
@@ -795,7 +812,7 @@ bool CaptureLaunch(State& s, const NVAPI_CU_KERNEL_LAUNCH_PARAMS* kernels, NvU32
 }
 
 NvAPI_Status ArmedLaunch(LaunchFn original, ID3D12GraphicsCommandList* list,
-                         const NVAPI_CU_KERNEL_LAUNCH_PARAMS* kernels, NvU32 count)
+                         const NVAPI_CU_KERNEL_LAUNCH_PARAMS* kernels, NvU32 count, const char* ownedName = nullptr)
 {
     FlushOnExit flush;
     auto& s = GetState();
@@ -809,7 +826,7 @@ NvAPI_Status ArmedLaunch(LaunchFn original, ID3D12GraphicsCommandList* list,
     unsigned k = 0;
     try
     {
-        same = CaptureLaunch(s, kernels, count, why);
+        same = CaptureLaunch(s, kernels, count, why, ownedName);
         k = static_cast<unsigned>(s.current.launches.size() - 1);
     }
     catch (...)
@@ -1037,6 +1054,21 @@ void* __stdcall DetouredQueryInterface(uint32_t id)
 
 } // namespace
 
+NvAPI_Status SubmitOwned(LaunchFn submit, const char* name, ID3D12GraphicsCommandList* list,
+                         const NVAPI_CU_KERNEL_LAUNCH_PARAMS* kernels, NvU32 count)
+{
+    if (!tArmed)
+        return submit(list, kernels, count);
+    try
+    {
+        return ArmedLaunch(submit, list, kernels, count, name);
+    }
+    catch (...)
+    {
+        return AfterException(submit, list, kernels, count);
+    }
+}
+
 Cut ChooseCut(bool borrowTransformer, bool borrowBelow, unsigned level)
 {
     if (!borrowBelow)
@@ -1104,7 +1136,10 @@ bool InstallQueryInterfaceHook(const char** error)
             return fail("cannot load system32 nvapi64.dll");
         hooks.query = reinterpret_cast<QueryFn>(GetProcAddress(nvapi, "nvapi_QueryInterface"));
         if (!hooks.query)
+        {
+            FreeLibrary(nvapi);
             return fail("nvapi64.dll has no nvapi_QueryInterface");
+        }
         LONG result = DetourTransactionBegin();
         if (result == NO_ERROR)
         {
@@ -1118,7 +1153,11 @@ bool InstallQueryInterfaceHook(const char** error)
                 DetourTransactionAbort();
         }
         if (result != NO_ERROR)
+        {
+            hooks.query = nullptr;
+            FreeLibrary(nvapi);
             return fail("Detours could not hook nvapi_QueryInterface");
+        }
         hooks.detoured = true;
     }
     if (error)
@@ -1163,7 +1202,7 @@ unsigned TakeRetired(ID3D12Object** objects, unsigned capacity)
     return count;
 }
 
-void BeginFrame(ID3D12GraphicsCommandList* list, const Cut* cuts, unsigned evaluations)
+void BeginFrame(ID3D12GraphicsCommandList* list, const Cut* cuts, unsigned evaluations, bool includesNativePlan)
 {
     FlushOnExit flush;
     tArmed = false;
@@ -1172,6 +1211,7 @@ void BeginFrame(ID3D12GraphicsCommandList* list, const Cut* cuts, unsigned evalu
     try
     {
         ++s.frame;
+        s.includesNativePlan = includesNativePlan;
         // A host that tracks GPU completion collects these (TakeRetired). Otherwise they are kept for a number of
         // frames, which is only safe for a host whose queue finishes each frame before the next is recorded.
         if (!s.hostRetires)
@@ -1183,7 +1223,7 @@ void BeginFrame(ID3D12GraphicsCommandList* list, const Cut* cuts, unsigned evalu
         s.index = 0;
         if (!list || !cuts || !evaluations || s.latched)
             return;
-        if (!GetHooks().launchWrapped || !GetHooks().createWrapped)
+        if (!includesNativePlan && (!GetHooks().launchWrapped || !GetHooks().createWrapped))
             return Refuse(s, "Off: hook not installed");
         if (evaluations > kMaxEvaluations)
             return Refuse(s, "Off: too many passes");
@@ -1256,7 +1296,7 @@ void BeginEvaluation(unsigned evaluation)
             reason = std::string("Off: ") + CutName(s.cut) + " not supported for " + VariantName(s.variant);
         else
         {
-            const auto gate = Gate(s.templ.launches[0].creator);
+            const auto gate = s.templ.launches[0].Layout();
             if (gate.state == GateState::Checking)
                 reason = "Off: checking runtime";
             else if (gate.state != GateState::Audited || gate.runtime != Tb::kVariants[s.variant].runtime)
@@ -1341,7 +1381,8 @@ void EndFrame()
                 if ((s.borrowedMask >> c) & 1)
                     names += (names.empty() ? "" : ", ") + std::string(CutName(static_cast<Cut>(c)));
             s.status = "Borrowing: " + names + " (" + VariantName(s.variant) + ", " +
-                       Tb::kVariants[s.variant].runtimeName + ")";
+                       (s.templ.launches.front().ownedPlan ? "native NVFP4" : Tb::kVariants[s.variant].runtimeName) +
+                       ")";
         }
         else if (!s.frameReason.empty())
             s.status = s.frameReason;
@@ -1358,6 +1399,7 @@ void Reset()
     auto& s = GetState();
     {
         std::lock_guard lock(s.mutex);
+        s.includesNativePlan = false;
         s.latched = false;
         s.latchReason.clear();
         s.templateValid = false;
@@ -1380,9 +1422,10 @@ void Status(char* buf, size_t size)
         return;
     auto& s = GetState();
     std::lock_guard lock(s.mutex);
-    const char* text = !GetHooks().launchWrapped || !GetHooks().createWrapped ? "Off: hook not installed"
-                       : s.latched                                            ? nullptr
-                                                                              : s.status.c_str();
+    const char* text = !s.includesNativePlan && (!GetHooks().launchWrapped || !GetHooks().createWrapped)
+                           ? "Off: hook not installed"
+                       : s.latched ? nullptr
+                                   : s.status.c_str();
     if (text)
         std::snprintf(buf, size, "%s", text);
     else

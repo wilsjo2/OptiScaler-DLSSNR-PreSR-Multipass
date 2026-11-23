@@ -123,11 +123,8 @@ ID3D12GraphicsCommandList* IFGFeature_Dx12::GetUICommandList(int index)
 
     if (_uiCommandAllocator[0] == nullptr)
     {
-        if (_device != nullptr)
-            CreateObjects(_device);
-        else if (State::Instance().currentD3D12Device != nullptr)
-            CreateObjects(State::Instance().currentD3D12Device);
-        else
+        auto* device = _device ? _device : State::Instance().currentD3D12Device;
+        if (!device || !CreateObjects(device))
             return nullptr;
     }
 
@@ -183,11 +180,8 @@ ID3D12GraphicsCommandList* IFGFeature_Dx12::GetSCCommandList(int index)
 
     if (_scCommandAllocator[0] == nullptr)
     {
-        if (_device != nullptr)
-            CreateObjects(_device);
-        else if (State::Instance().currentD3D12Device != nullptr)
-            CreateObjects(State::Instance().currentD3D12Device);
-        else
+        auto* device = _device ? _device : State::Instance().currentD3D12Device;
+        if (!device || !CreateObjects(device))
             return nullptr;
     }
 
@@ -392,6 +386,17 @@ bool IFGFeature_Dx12::CreateBufferResourceWithSize(ID3D12Device* device, ID3D12R
     return true;
 }
 
+IFGFeature_Dx12::~IFGFeature_Dx12()
+{
+    DestroyCopyCmdList();
+    SAFE_RELEASE(_uiFence);
+    SAFE_RELEASE(_scFence);
+    if (_uiFenceEvent)
+        CloseHandle(_uiFenceEvent);
+    if (_scFenceEvent)
+        CloseHandle(_scFenceEvent);
+}
+
 bool IFGFeature_Dx12::InitCopyCmdList()
 {
     if (_copyCommandList[0] != nullptr && _copyCommandAllocator[0] != nullptr)
@@ -400,12 +405,6 @@ bool IFGFeature_Dx12::InitCopyCmdList()
     if (_device == nullptr)
         return false;
 
-    if (_copyCommandList[0] == nullptr || _copyCommandAllocator[0] == nullptr)
-        DestroyCopyCmdList();
-
-    ID3D12CommandAllocator* allocator = nullptr;
-    ID3D12GraphicsCommandList* cmdList = nullptr;
-
     for (size_t i = 0; i < BUFFER_COUNT; i++)
     {
         auto result =
@@ -413,28 +412,29 @@ bool IFGFeature_Dx12::InitCopyCmdList()
         if (result != S_OK)
         {
             LOG_ERROR("_copyCommandAllocator: {:X}", (unsigned long) result);
+            DestroyCopyCmdList();
             return false;
         }
 
         _copyCommandAllocator[i]->SetName(L"_copyCommandAllocator");
-        if (CheckForRealObject(__FUNCTION__, _copyCommandAllocator[i], (IUnknown**) &allocator))
-            _copyCommandAllocator[i] = allocator;
+        UnwrapOwned(__FUNCTION__, _copyCommandAllocator[i]);
 
         result = _device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, _copyCommandAllocator[i], NULL,
                                             IID_PPV_ARGS(&_copyCommandList[i]));
         if (result != S_OK)
         {
             LOG_ERROR("_copyCommandAllocator: {:X}", (unsigned long) result);
+            DestroyCopyCmdList();
             return false;
         }
         _copyCommandList[i]->SetName(L"_copyCommandList");
-        if (CheckForRealObject(__FUNCTION__, _copyCommandList[i], (IUnknown**) &cmdList))
-            _copyCommandList[i] = cmdList;
+        UnwrapOwned(__FUNCTION__, _copyCommandList[i]);
 
         result = _copyCommandList[i]->Close();
         if (result != S_OK)
         {
             LOG_ERROR("_copyCommandList->Close: {:X}", (unsigned long) result);
+            DestroyCopyCmdList();
             return false;
         }
     }

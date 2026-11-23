@@ -888,7 +888,8 @@ static Fsr212::FfxErrorCode ffxFsr2ContextDestroy_Dx12(Fsr212::FfxFsr2Context* c
         NVSDK_NGX_D3D12_ReleaseFeature(_contexts[context]);
 
     _contexts.erase(context);
-    _nvParams.erase(context);
+    if (auto params = _nvParams.extract(context); !params.empty() && params.mapped())
+        NVSDK_NGX_D3D12_DestroyParameters(params.mapped());
     _initParams.erase(context);
 
     _skipDestroy = true;
@@ -909,7 +910,8 @@ static Fsr212::FfxErrorCode ffxFsr2ContextDestroy_Pattern_Dx12(Fsr212::FfxFsr2Co
         NVSDK_NGX_D3D12_ReleaseFeature(_contexts[context]);
 
     _contexts.erase(context);
-    _nvParams.erase(context);
+    if (auto params = _nvParams.extract(context); !params.empty() && params.mapped())
+        NVSDK_NGX_D3D12_DestroyParameters(params.mapped());
     _initParams.erase(context);
 
     auto cdResult = o_ffxFsr2ContextDestroy_Pattern_Dx12(context);

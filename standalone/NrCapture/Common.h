@@ -10,6 +10,7 @@
 #include <array>
 #include <optional>
 #include <dlssnr/DlssNr_ModelParameters.h>
+#include <dlssnr/NrNvfp4.h>
 #include <shaders/dlssnr/DlssNr_Spatial.h>
 namespace nr {
 template<class T> using ComPtr = Microsoft::WRL::ComPtr<T>;
@@ -76,34 +77,15 @@ struct Settings {
     static constexpr unsigned ModelAInt8 = 25, ModelAInt8TwoDouble = 26, ModelLast = 26;
     // One version of each model. The numbers 15..20 were earlier weights of the four pass-in-one models: a saved one
     // means the model as it is now (21..24).
-    static constexpr unsigned CurrentModel(unsigned preset)
-    {
-        return preset == ModelANvfp4TwoDouble ? ModelANvfp4TwoDouble4k : preset == ModelANvfp4TwoTriple ? ModelANvfp4TwoTriple4k
-            : preset == ModelAFp8TwoDouble || preset == ModelAFp8TwoDouble2 ? ModelAFp8TwoDouble4k
-            : preset == ModelAFp8TwoTriple || preset == ModelAFp8TwoTriple2 ? ModelAFp8TwoTriple4k : preset;
-    }
-    static constexpr bool IsPassInOne(unsigned preset)
-    {
-        return preset == ModelANvfp4TwoTriple || preset == ModelANvfp4TwoDouble || preset == ModelANvfp4TwoDouble4k ||
-               preset == ModelANvfp4TwoTriple4k;
-    }
+    static constexpr unsigned CurrentModel(unsigned preset) { return DlssNr::Nvfp4::Current(preset); }
+    static constexpr bool IsPassInOne(unsigned preset) { return DlssNr::Nvfp4::IsPassInOne(preset); }
     static constexpr bool IsNvfp4(unsigned preset) { return preset == ModelANvfp4 || IsPassInOne(preset); }
-    static constexpr bool IsFp8(unsigned preset)
-    {
-        return (preset >= ModelAFp8TwoDouble && preset <= ModelAFp8TwoTriple2) || preset == ModelAFp8TwoDouble4k ||
-               preset == ModelAFp8TwoTriple4k;
-    }
-    static constexpr bool IsInt8(unsigned preset) { return preset >= ModelAInt8 && preset <= ModelAInt8TwoDouble; }
-    static constexpr unsigned Int8Set(unsigned preset) { return IsInt8(preset) ? preset - (ModelAInt8 - 1) : 0; } // nvfp4/int8/int8_set<n>
-    static constexpr bool IsModel(unsigned preset) { return preset <= 3 || IsNvfp4(preset) || IsFp8(preset) || IsInt8(preset); }
-    static constexpr unsigned Nvfp4Set(unsigned preset) // 0: the tab's choice
-    {
-        return preset == ModelANvfp4TwoDouble4k ? 10 : preset == ModelANvfp4TwoTriple4k ? 11 : IsPassInOne(preset) ? preset - 3 : 0;
-    }
-    static constexpr unsigned Fp8Set(unsigned preset) // nvfp4/fp8/fp8_set<n>
-    {
-        return preset == ModelAFp8TwoDouble4k ? 5 : preset == ModelAFp8TwoTriple4k ? 6 : IsFp8(preset) ? preset - 16 : 0;
-    }
+    static constexpr bool IsFp8(unsigned preset) { return DlssNr::Nvfp4::IsFp8(preset); }
+    static constexpr bool IsInt8(unsigned preset) { return DlssNr::Nvfp4::IsInt8(preset); }
+    static constexpr unsigned Int8Set(unsigned preset) { return DlssNr::Nvfp4::Int8Set(preset); }
+    static constexpr bool IsModel(unsigned preset) { return preset <= 3 || DlssNr::Nvfp4::IsKnown(preset); }
+    static constexpr unsigned Nvfp4Set(unsigned preset) { return DlssNr::Nvfp4::WeightSet(preset); }
+    static constexpr unsigned Fp8Set(unsigned preset) { return DlssNr::Nvfp4::Fp8Set(preset); }
     std::filesystem::path runtime;
     std::filesystem::path runtimeChosen; // The DLL last picked or typed in the box: kept even in another package.
     DlssNr::ModelSettings model{0, 0, 1, 1, 1, -1, true}; // Match OptiScaler's first-pass defaults.

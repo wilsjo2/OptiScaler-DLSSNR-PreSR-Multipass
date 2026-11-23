@@ -41,6 +41,8 @@ class Context
     // Creation records GPU work. A feature becomes ready only in a later submission epoch.
     unsigned int Prepare(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, unsigned int width,
                          unsigned int height, const ModelSettings& settings, uint64_t submissionEpoch, bool* ready);
+    // Returns true when a live pass changes tuning. NGX reads it at creation, the INT8 host at evaluation.
+    bool UpdateTuning(const ModelSettings& settings);
     bool HasFeature() const;
     bool Ready(uint64_t submissionEpoch) const;
     void Collect();

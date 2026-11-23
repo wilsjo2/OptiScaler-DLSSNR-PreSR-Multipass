@@ -1,19 +1,16 @@
 #pragma once
 
 #include <cassert>
+#include <d3d12.h>
+#include <dxgi1_4.h>
+#include <filesystem>
 #include <map>
 #include <string>
 #include <variant>
+#include <wrl/client.h>
 #include <nvsdk_ngx_params.h>
 
-struct ID3D12Device {};
-struct ID3D12CommandList {};
-struct ID3D12GraphicsCommandList : ID3D12CommandList {};
-using UINT = unsigned int;
-struct ID3D12CommandQueue
-{
-};
-struct ID3D12Resource {};
+namespace Util { inline std::filesystem::path DllPath() { return {}; } }
 
 #define LOG_INFO(...) ((void) 0)
 #define LOG_WARN(...) ((void) 0)

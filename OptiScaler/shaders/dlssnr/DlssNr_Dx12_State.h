@@ -175,7 +175,6 @@ struct DlssNr_Dx12::State
 
     ID3D12Resource* GetResource(NVSDK_NGX_Parameter* params, const char* a, const char* b);
 
-    bool TuningMatchesFeature(const Config& cfg, unsigned int requestedPasses);
 
     // Serialize rendering, presentation and submission callbacks; destruction can re-enter hooks.
     std::recursive_mutex mutex;

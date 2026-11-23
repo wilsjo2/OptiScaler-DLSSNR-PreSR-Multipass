@@ -101,7 +101,19 @@ class IFGFeature_Dx12 : public virtual IFGFeature
 
   protected:
     virtual void ReleaseObjects() = 0;
-    virtual void CreateObjects(ID3D12Device* InDevice) = 0;
+    virtual bool CreateObjects(ID3D12Device* device) = 0;
+
+    // CheckForRealObject returns a borrowed pointer. Transfer the owned creation reference to the native object.
+    template <typename T> void UnwrapOwned(const char* caller, T*& object)
+    {
+        T* native = nullptr;
+        if (CheckForRealObject(caller, object, reinterpret_cast<IUnknown**>(&native)))
+        {
+            native->AddRef();
+            object->Release();
+            object = native;
+        }
+    }
 
   public:
     virtual void* FrameGenerationContext() = 0;
@@ -130,5 +142,5 @@ class IFGFeature_Dx12 : public virtual IFGFeature
     bool HasResource(FG_ResourceType type, int index = -1) override final;
 
     IFGFeature_Dx12() = default;
-    virtual ~IFGFeature_Dx12() { DestroyCopyCmdList(); }
+    virtual ~IFGFeature_Dx12();
 };

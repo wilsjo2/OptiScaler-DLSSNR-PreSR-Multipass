@@ -8,18 +8,22 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
 
 #include "NrHost.h"
+#include "NrFourBitPlan.h"
+#include "NrWeightUpload.h"
 
 namespace NrHost {
 namespace {
@@ -36,7 +40,7 @@ constexpr unsigned kPerEval = 4;                  // colour SRV, motion SRV, out
 constexpr unsigned kStatic = 6;                   // history SRV/UAV, netout SRV/UAV, inputcopy SRV/UAV
 
 void (*g_log)(const char*) = nullptr;
-void* g_driverQuery = nullptr;
+std::atomic<void*> g_driverQuery = nullptr;
 void Log(const std::string& line) {
     const std::string text = "NR host: " + line;
     if (g_log) g_log(text.c_str()); else fprintf(stderr, "%s\n", text.c_str());
@@ -76,29 +80,36 @@ struct Api {
     decltype(&NvAPI_D3D12_LaunchCuKernelChain) launch = nullptr;
     decltype(&NvAPI_D3D12_GetCudaMergedTextureSamplerObject) mergedTexture = nullptr;
     decltype(&NvAPI_D3D12_GetCudaIndependentDescriptorObject) independent = nullptr;
+    decltype(&NvAPI_D3D12_DestroyCuModule) destroyModule = nullptr;
+    decltype(&NvAPI_D3D12_DestroyCuFunction) destroyFunction = nullptr;
     Query query = nullptr;
 };
 Api& GetApi() {
     static Api api;
     if (api.query) return api;
     // The driver's own entry (not a hooked one: the app's NvAPI layers must not see the host's launches).
-    auto query = reinterpret_cast<Query>(g_driverQuery);
+    auto query = reinterpret_cast<Query>(g_driverQuery.load());
+    std::unique_ptr<std::remove_pointer_t<HMODULE>, decltype(&FreeLibrary)> module(nullptr, &FreeLibrary);
     if (!query) {
-        const HMODULE module = LoadLibraryExW(L"nvapi64.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        module.reset(LoadLibraryExW(L"nvapi64.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32));
         if (!module) Fail("the system's nvapi64.dll is not available (no NVIDIA driver?)");
-        query = reinterpret_cast<Query>(GetProcAddress(module, "nvapi_QueryInterface"));
+        query = reinterpret_cast<Query>(GetProcAddress(module.get(), "nvapi_QueryInterface"));
         if (!query) Fail("nvapi_QueryInterface is missing from nvapi64.dll");
     }
     const auto initialize = reinterpret_cast<decltype(&NvAPI_Initialize)>(query(0x0150e828));
-    if (!initialize || initialize() != NVAPI_OK) Fail("NvAPI_Initialize failed");
     Api a;
     a.createModule = reinterpret_cast<decltype(a.createModule)>(query(kCreateModule));
     a.createFunction = reinterpret_cast<decltype(a.createFunction)>(query(kCreateFunction));
     a.launch = reinterpret_cast<decltype(a.launch)>(query(kLaunch));
     a.mergedTexture = reinterpret_cast<decltype(a.mergedTexture)>(query(kMergedTexture));
     a.independent = reinterpret_cast<decltype(a.independent)>(query(kIndependentDescriptor));
-    if (!a.createModule || !a.createFunction || !a.launch || !a.mergedTexture || !a.independent)
+    a.destroyModule = reinterpret_cast<decltype(a.destroyModule)>(query(0x41c65285));
+    a.destroyFunction = reinterpret_cast<decltype(a.destroyFunction)>(query(0xdf295ea6));
+    if (!a.createModule || !a.createFunction || !a.launch || !a.mergedTexture || !a.independent ||
+        !a.destroyModule || !a.destroyFunction)
         Fail("the NVIDIA driver lacks the CUDA-on-D3D12 entry points the host needs (update the driver)");
+    if (!initialize || initialize() != NVAPI_OK) Fail("NvAPI_Initialize failed");
+    module.release(); // The successful dispatch table is used for the rest of the process.
     a.query = query;
     api = a;
     return api;
@@ -268,6 +279,9 @@ struct PlanLaunch {
     int sx = 0, sy = 0;
     bool barrier = false;
     std::vector<Field> fields;
+    std::vector<unsigned char> parameters;
+    NVAPI_CU_KERNEL_LAUNCH_PARAMS dispatch {};
+    std::unique_ptr<NrFourBitPlan::Operation> fourBit;
 };
 struct PlanTensor { std::string name, kind; int a = 0, b = 0; int first = 0, last = 0; };
 struct Plan {
@@ -311,7 +325,11 @@ Plan ReadPlan(const fs::path& path) {
             t.first = std::stoi(rest[i + 1]); t.last = std::stoi(rest[i + 3]);
             if (nums.size() > 0) t.a = nums[0];
             if (nums.size() > 1) t.b = nums[1];
-            tensorIndex[t.name] = p.tensors.size();
+            if (t.first < kFirst || t.last > kLast || t.last < t.first) bad("invalid tensor lifetime");
+            if ((t.kind == "view" || t.kind == "tile") && (t.a < 0 || t.a > 6 || t.b <= 0))
+                bad("invalid tensor level or width");
+            if ((t.kind == "act" || t.kind == "scratch") && t.a <= 0) bad("invalid tensor extent");
+            if (!tensorIndex.emplace(t.name, p.tensors.size()).second) bad("duplicate tensor");
             p.tensors.push_back(t);
         } else if (key == "launch") {
             PlanLaunch l;
@@ -322,7 +340,8 @@ Plan ReadPlan(const fs::path& path) {
             if (!(w >> barrier)) bad("barrier");
             l.barrier = barrier != 0;
             if (l.idx < kFirst || l.idx > kLast) bad("launch number");
-            p.launches.push_back(l);
+            if (!l.params || l.params > 4096) bad("invalid CUDA parameter block size");
+            p.launches.push_back(std::move(l));
             cur = &p.launches.back();
         } else if (key == "f") {
             if (!cur) bad("field outside a launch");
@@ -349,7 +368,11 @@ Plan ReadPlan(const fs::path& path) {
             else if (code == "style") { w >> f.sym; f.code = Code::Style; }
             else if (code == "seed") f.code = Code::Seed;
             else bad("unknown code " + code);
-            if (f.off + f.size > cur->params) bad("field past the parameter block");
+            if (!w || !f.size || f.off > cur->params || f.size > cur->params - f.off)
+                bad("invalid parameter field");
+            const bool pointer = f.code == Code::Ptr || f.code == Code::Flags || f.code == Code::ClearBase ||
+                                 f.code == Code::Record || f.code == Code::Blend || f.code == Code::Tex || f.code == Code::Surf;
+            if (f.code != Code::Zero && f.size != (pointer ? 8u : 4u)) bad("field has the wrong size");
             cur->fields.push_back(f);
         } else if (key == "end") {
             cur = nullptr;
@@ -516,6 +539,7 @@ std::string ModuleFile(const KernelChoice& c) {
 // ---- per-device objects -----------------------------------------------------------------------------------------------
 struct Records { ComPtr<ID3D12Resource> buffer; uint64_t blendAt = 0; std::map<int, std::pair<uint64_t, std::string>> offsets; std::map<int, uint64_t> bytes; };
 struct DeviceState {
+    std::optional<bool> hostFp8;
     std::map<std::string, NVDX_ObjectHandle> modules;                     // by module path
     std::map<std::pair<std::string, std::string>, NVDX_ObjectHandle> functions;
     std::map<std::string, std::shared_ptr<Records>> records;              // by records file
@@ -558,7 +582,7 @@ std::shared_ptr<Records> RecordsFor(ID3D12Device* device, const fs::path& folder
             std::string key;
             if (!(w >> key) || key != "launch") continue;
             int n = 0;
-            w >> n;
+            if (!(w >> n) || n < 0 || n > 65535) Fail("invalid launch index in " + txt.string());
             std::string name;
             uint64_t offset = 0, bytes = 0;
             bool haveOffset = false;
@@ -569,11 +593,16 @@ std::shared_ptr<Records> RecordsFor(ID3D12Device* device, const fs::path& folder
                 else { std::string skip; w >> skip; }
             }
             if (!haveOffset || name.empty()) Fail(txt.filename().string() + ": launch " + std::to_string(n) + " has no name or offset");
+            if (!bytes || bytes > UINT32_MAX || r->offsets.contains(n)) Fail("invalid or duplicate record in " + txt.string());
             r->offsets[n] = {offset, name};
             r->bytes[n] = bytes;
         }
     }
     const auto blob = ReadAll(bin);
+    if (r->offsets.empty()) Fail("empty records manifest " + txt.string());
+    for (const auto& [index, entry] : r->offsets)
+        if (entry.first > blob.size() || r->bytes.at(index) > blob.size() - entry.first)
+            Fail("record " + std::to_string(index) + " extends beyond " + bin.string());
     r->blendAt = (blob.size() + 511) / 512 * 512;
     const uint64_t bytes = (r->blendAt + 512 + 4096 + 255) / 256 * 256;
     D3D12_RESOURCE_DESC desc{};
@@ -594,28 +623,7 @@ std::shared_ptr<Records> RecordsFor(ID3D12Device* device, const fs::path& folder
     memcpy(mapped, blob.data(), blob.size());
     memcpy(static_cast<unsigned char*>(mapped) + r->blendAt, &kBlendWeight, 2);
     upload->Unmap(0, nullptr);
-    D3D12_COMMAND_QUEUE_DESC qd{};
-    qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-    ComPtr<ID3D12CommandQueue> queue; ComPtr<ID3D12CommandAllocator> allocator; ComPtr<ID3D12GraphicsCommandList> list; ComPtr<ID3D12Fence> fence;
-    Check(device->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue)), "record upload queue");
-    Check(device->CreateCommandAllocator(qd.Type, IID_PPV_ARGS(&allocator)), "record upload allocator");
-    Check(device->CreateCommandList(0, qd.Type, allocator.Get(), nullptr, IID_PPV_ARGS(&list)), "record upload list");
-    Check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)), "record upload fence");
-    list->CopyBufferRegion(r->buffer.Get(), 0, upload.Get(), 0, bytes);
-    Check(list->Close(), "record upload close");
-    ID3D12CommandList* lists[] = {list.Get()};
-    queue->ExecuteCommandLists(1, lists);
-    Check(queue->Signal(fence.Get(), 1), "record upload signal");
-    HANDLE done = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    if (!done) Fail("record upload event");
-    const HRESULT armed = fence->SetEventOnCompletion(1, done);
-    const DWORD waited = SUCCEEDED(armed) ? WaitForSingleObject(done, 20000) : WAIT_FAILED;
-    CloseHandle(done);
-    if (waited != WAIT_OBJECT_0) {
-        for (IUnknown* o : {static_cast<IUnknown*>(upload.Get()), static_cast<IUnknown*>(queue.Get()), static_cast<IUnknown*>(allocator.Get()), static_cast<IUnknown*>(list.Get())})
-            d.retired.emplace_back(o);
-        Fail("the record upload did not complete");
-    }
+    NrWeightUpload::Copy(device, r->buffer.Get(), upload.Get(), bytes, D3D12_RESOURCE_STATE_COMMON);
     d.records[bin.string()] = r;
     Log("records " + stem + " loaded (" + std::to_string(blob.size() >> 20) + " MB)");
     return r;
@@ -677,10 +685,7 @@ struct Host::Impl {
     unsigned W = 0, H = 0, set = 0;
     Plan plan;
     Geometry geometry{1920, 1080};
-    std::vector<const PlanLaunch*> order;                 // plan launches for this layout, in idx order
-    std::map<int, NVDX_ObjectHandle> functions;           // per idx
-    std::map<int, const KernelChoice*> kernelOf;
-    Choices choices;
+    std::vector<PlanLaunch*> order;                 // plan launches for this layout, in idx order
     std::shared_ptr<Records> records;
     // Prepared records ('prepare' in a manifest): one buffer per host, filled by the first evaluation.
     ComPtr<ID3D12Resource> prepared;
@@ -697,6 +702,7 @@ struct Host::Impl {
     unsigned long long evaluations = 0;
     uint32_t sinceReset = 0;                              // the noise seed: evaluations since the last reset frame
     bool historyValid = false;
+    bool reportedMissingMotion = false;
     std::ofstream trace;
     // NR_HOST_TIMING: a timestamp before the first launch and after each one; read back kTimingSlots evaluations later.
     static constexpr unsigned kTimingSlots = 4;
@@ -774,6 +780,18 @@ struct Host::Impl {
         Check(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&r)), what);
         return r;
     }
+    void EnsureGradingTextures() {
+        if (netout) return;
+        auto network = Texture("network output texture");
+        auto input = Texture("input copy texture");
+        Srv(network.Get(), 2); Uav(network.Get(), 3);
+        Srv(input.Get(), 4); Uav(input.Get(), 5);
+        netoutTex = TexHandle(2, 0); netoutSurf = SurfHandle(3);
+        inputcopyTex = TexHandle(4, 0); inputcopySurf = SurfHandle(5);
+        netout = std::move(network);
+        inputcopy = std::move(input);
+    }
+
 };
 
 namespace {
@@ -794,6 +812,7 @@ Host::~Host() {
     if (!impl) return;
     try {
         for (unsigned k = 0; k < Impl::kTimingSlots; ++k) impl->WriteTiming(unsigned((impl->evaluations + k) % Impl::kTimingSlots));
+        if (impl->options.callerTracksGpuLifetime) return;
         std::lock_guard g(g_mutex);
         auto& d = Devices()[impl->device.Get()];
         for (IUnknown* o : {static_cast<IUnknown*>(impl->arena.Get()), static_cast<IUnknown*>(impl->history.Get()), static_cast<IUnknown*>(impl->netout.Get()),
@@ -810,13 +829,17 @@ std::unique_ptr<Host> Host::Create(ID3D12Device* device, const Options& options,
     i->device = device;
     i->options = options;
     i->W = width; i->H = height; i->set = set;
+    if (width > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION || height > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION)
+        Fail("frame dimensions exceed D3D12's texture limit");
     if (width < 64 || height < 64) Fail("frame " + std::to_string(width) + "x" + std::to_string(height) + " is too small");
-    if (set < 1 || set > 7) Fail("set " + std::to_string(set) + " does not exist");
+    if (options.fourBit ? (set != 0 && set != 10 && set != 11 && set != 12 && set != 13) : (set < 1 || set > 7)) Fail("set " + std::to_string(set) + " does not exist");
     const std::string setName = options.recordsName + std::to_string(set);
     i->arch = Architecture(device);
     i->plan = ReadPlan(options.plan);
     if (options.kernels.empty()) Fail("no kernel folders (NR_HOST_ASSETS)");
     // Kernel folders and their codes; the architecture rule.
+    Choices choices;
+    std::map<int, const KernelChoice*> kernelOf;
     std::set<std::string> codes;
     for (const auto& [folder, code0] : options.kernels) {
         std::string code = code0.empty() ? options.code : code0;
@@ -831,22 +854,38 @@ std::unique_ptr<Host> Host::Create(ID3D12Device* device, const Options& options,
                         : code == "sm86ptx" ? (IsAmpere(i->arch) || IsAda(i->arch) || IsBlackwell2(i->arch)) : false;
         if (!fits) Fail("the " + code + " kernels cannot run on this GPU (architecture 0x" + [&] { char b[16]; snprintf(b, sizeof b, "%x", i->arch.first); return std::string(b); }() + ")");
         codes.insert(code);
-        ReadFolder(folder, code, i->choices);
+        ReadFolder(folder, code, choices);
     }
+    if (options.mixedOriginal && set == 0)
+        ReadFolder(options.plan.parent_path() / "mixed", "sm120", choices);
     for (const auto& c : codes) i->kindText += (i->kindText.empty() ? "" : "+") + c;
     // The launches of this layout and their kernels.
     const std::string layout = options.layout == 3108 ? "3108" : "3109";
-    for (const auto& l : i->plan.launches) {
+    int swinSlot = 0;
+    for (auto& l : i->plan.launches) {
         if (l.layout != "any" && l.layout != layout) continue;
         i->order.push_back(&l);
-        const auto found = i->choices.find(l.idx);
-        if (found == i->choices.end()) Fail("no kernel for launch " + std::to_string(l.idx) + " (" + l.name + ") in the kernel folders");
+        if (options.fourBit) {
+            auto& api = GetApi();
+            const NrFourBitPlan::Driver driver{api.createModule, api.createFunction, api.destroyModule, api.destroyFunction, api.launch};
+            auto& op = l.fourBit = std::make_unique<NrFourBitPlan::Operation>();
+            op->driver = api.launch;
+            const int block = l.name.starts_with("cc_tinlayout_fused_swin_") ? swinSlot++ : -1;
+            op->swinSlot = block;
+            op->weightSet = set ? set : ~0u;
+            NrNet4::BindNative(*op, driver, device, l.name, l.idx);
+            NrSwin4::BindNative(*op, driver, device, l.name, set, block);
+            NrFfnV2::BindNative(*op, driver, device, l.name, set, block);
+        }
+        const auto found = choices.find(l.idx);
+        if (l.fourBit && found == choices.end()) continue; // Selected four-bit layer supplies its kernel.
+        if (found == choices.end()) Fail("no kernel for launch " + std::to_string(l.idx) + " (" + l.name + ") in the kernel folders");
         const KernelChoice* pick = nullptr;
         for (const auto& c : found->second) if (!c.params || c.params == l.params) { if (pick && pick->params == l.params) continue; pick = &c; if (c.params == l.params) break; }
         if (!pick) Fail("launch " + std::to_string(l.idx) + ": no kernel takes the " + std::to_string(l.params) + "-byte parameter block");
         if (!pick->name.empty() && pick->name != l.name) Fail("launch " + std::to_string(l.idx) + ": the manifest names " + pick->name + ", the plan " + l.name + " (" + pick->where + ")");
-        i->kernelOf[l.idx] = pick;
-        i->functions[l.idx] = FunctionFor(device, *pick);
+        kernelOf[l.idx] = pick;
+        l.dispatch.hFunction = FunctionFor(device, *pick);
         if (!pick->prepare.empty()) {
             KernelChoice prep = *pick;
             prep.entry = pick->prepare;
@@ -855,10 +894,24 @@ std::unique_ptr<Host> Host::Create(ID3D12Device* device, const Options& options,
     }
     std::sort(i->order.begin(), i->order.end(), [](const PlanLaunch* a, const PlanLaunch* b) { return a->idx < b->idx; });
     // Records: every weighted launch must have one, under the plan's kernel name.
-    i->records = RecordsFor(device, options.records, options.recordsName, set);
+    if (!options.fourBit) i->records = RecordsFor(device, options.records, options.recordsName, set);
+    else if (options.mixedOriginal && set == 0) {
+        // Standalone exposes per-layer precision on Original. Its FP8 kernels consume the FP8 representation of the
+        // same trained four-bit checkpoint. Pass-in-one presets always use their own four-bit transformer.
+        i->records = RecordsFor(device, options.plan.parent_path(), "mixed_set", 1);
+        for (auto* l : i->order) {
+            if (l->fourBit->record) continue;
+            for (const auto& field : l->fields) if (field.code == Code::Record) {
+                const auto r = i->records->offsets.find(l->idx);
+                if (r == i->records->offsets.end() || r->second.second != l->name)
+                    Fail("missing trained FP8 equivalent for launch " + std::to_string(l->idx));
+                l->fourBit->record = i->records->buffer->GetGPUVirtualAddress() + r->second.first;
+            }
+        }
+    }
     for (const auto* l : i->order)
         for (const auto& f : l->fields)
-            if (f.code == Code::Record) {
+            if (!options.fourBit && f.code == Code::Record) {
                 const auto r = i->records->offsets.find(l->idx);
                 if (r == i->records->offsets.end()) Fail(setName + ".txt has no record for launch " + std::to_string(l->idx));
                 if (r->second.second != l->name) Fail(setName + ".txt launch " + std::to_string(l->idx) + " is " + r->second.second + ", the plan's is " + l->name);
@@ -868,7 +921,7 @@ std::unique_ptr<Host> Host::Create(ID3D12Device* device, const Options& options,
         for (const auto& [idx, function] : i->prepareFunctions) {
             const auto bytes = i->records->bytes.find(idx);
             if (bytes == i->records->bytes.end() || !bytes->second) Fail("launch " + std::to_string(idx) + " has a 'prepare' but no record bytes in " + setName + ".txt");
-            const uint64_t out = (uint64_t(double(bytes->second) * i->kernelOf.at(idx)->prepareFactor) + 255) / 256 * 256;
+            const uint64_t out = (uint64_t(double(bytes->second) * kernelOf.at(idx)->prepareFactor) + 255) / 256 * 256;
             i->preparedOffset[idx] = total;
             i->preparedBytes[idx] = out;
             total += out;
@@ -899,6 +952,25 @@ std::unique_ptr<Host> Host::Create(ID3D12Device* device, const Options& options,
     }
     i->flagBytes = off;
     geo.count = int64_t(off / 4);
+    // Geometry and kernel selection are fixed for the lifetime of this host.
+    for (auto* l : i->order) {
+        const KernelChoice base{};
+        const auto it = kernelOf.find(l->idx);
+        const auto& kernel = it == kernelOf.end() ? base : *it->second;
+        const auto [grid, block] = Grid(l->name, geo, l->sx, l->sy);
+        auto& dispatch = l->dispatch;
+        dispatch.gridDim = {Apply(kernel.grid[0], grid.x), Apply(kernel.grid[1], grid.y), Apply(kernel.grid[2], grid.z)};
+        dispatch.blockDim = {Apply(kernel.block[0], block.x), Apply(kernel.block[1], block.y), Apply(kernel.block[2], block.z)};
+        dispatch.dynSharedMemBytes = kernel.shared;
+        dispatch.paramSize = l->params;
+        if (l->fourBit) {
+            l->fourBit->base = dispatch;
+            dispatch.hFunction = nullptr;
+            dispatch.gridDim = {grid.x, grid.y, grid.z};
+            dispatch.blockDim = {block.x, block.y, block.z};
+            dispatch.dynSharedMemBytes = 0;
+        }
+    }
     i->tensorBase = uint64_t(Up(int64_t(off), 4096));
     {   // first-fit, memory reused only after a barrier launch (host-spec/planner.py rule 'barrier')
         std::set<int> barrierLaunches;
@@ -942,8 +1014,6 @@ std::unique_ptr<Host> Host::Create(ID3D12Device* device, const Options& options,
         Check(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &d, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&i->arena)), "arena buffer");
     }
     i->history = i->Texture("history texture");
-    i->netout = i->Texture("network output texture");
-    i->inputcopy = i->Texture("input copy texture");
     {
         D3D12_DESCRIPTOR_HEAP_DESC h{};
         h.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
@@ -965,12 +1035,43 @@ std::unique_ptr<Host> Host::Create(ID3D12Device* device, const Options& options,
             device->CreateSampler(&s, i->SamplerCpu(k));
         }
         i->Srv(i->history.Get(), 0); i->Uav(i->history.Get(), 1);
-        i->Srv(i->netout.Get(), 2); i->Uav(i->netout.Get(), 3);
-        i->Srv(i->inputcopy.Get(), 4); i->Uav(i->inputcopy.Get(), 5);
         const bool historyLinear = Env(L"NR_HOST_HISTORY_SAMPLER") != L"point";
         i->historyTex = i->TexHandle(0, historyLinear ? 1 : 0); i->historySurf = i->SurfHandle(1);
-        i->netoutTex = i->TexHandle(2, 0); i->netoutSurf = i->SurfHandle(3);
-        i->inputcopyTex = i->TexHandle(4, 0); i->inputcopySurf = i->SurfHandle(5);
+    }
+    // Geometry, tensor addresses, synchronization flags and weights stay fixed until this host is retired.
+    const uint64_t arena = i->arena->GetGPUVirtualAddress();
+    const uint64_t recordBase = i->records ? i->records->buffer->GetGPUVirtualAddress() : 0;
+    const uint64_t preparedBase = i->prepared ? i->prepared->GetGPUVirtualAddress() : 0;
+    for (auto* l : i->order) {
+        l->parameters.resize(l->params);
+        std::erase_if(l->fields, [&](const Field& f) {
+            const auto write = [&](auto value) { memcpy(l->parameters.data() + f.off, &value, sizeof(value)); };
+            switch (f.code) {
+            case Code::Zero: break;
+            case Code::U32: write(uint32_t(f.value)); break;
+            case Code::I: write(int32_t(geo.Symbol(f.sym))); break;
+            case Code::F: write(float(geo.Symbol(f.sym))); break;
+            case Code::Rcp: write(float(1.0 / double(geo.Symbol(f.sym)))); break;
+            case Code::Ptr: write(arena + i->tensorBase + i->tensorOffset.at(size_t(f.value))); break;
+            case Code::Flags: {
+                const auto flags = i->flagOffset.find({int(int64_t(f.value)), f.sym});
+                if (flags == i->flagOffset.end()) Fail("launch " + std::to_string(l->idx) + ": missing " + f.sym + " flags");
+                write(arena + flags->second);
+                break;
+            }
+            case Code::ClearBase: write(arena); break;
+            case Code::Record: {
+                const auto prepared = i->preparedOffset.find(l->idx);
+                if (l->fourBit) write(l->fourBit->record);
+                else if (prepared != i->preparedOffset.end()) write(preparedBase + prepared->second);
+                else write(recordBase + i->records->offsets.at(l->idx).first);
+                break;
+            }
+            case Code::Blend: write(l->fourBit ? l->fourBit->blend : recordBase + i->records->blendAt); break;
+            default: return false;
+            }
+            return true;
+        });
     }
     if (!options.timing.empty()) {
         i->timingStride = unsigned(i->order.size()) + 2;
@@ -1011,22 +1112,27 @@ void Host::Evaluate(ID3D12GraphicsCommandList* commands, ID3D12Resource* colour,
         Fail("the colour/output size differs from the host's " + std::to_string(m.W) + "x" + std::to_string(m.H));
     if (s.style > 2) Fail("style " + std::to_string(s.style));
     const bool resetFrame = reset || !m.historyValid || !motion;
-    if (!reset && !motion) Log("no motion vectors: a reset frame");
-    const bool graded = s.style != 0;
+    if (motion) m.reportedMissingMotion = false;
+    else if (!reset && !m.reportedMissingMotion) {
+        Log("motion vectors unavailable, resetting history until they return");
+        m.reportedMissingMotion = true;
+    }
+    // Blending reads the unfiltered input and the raw model result. Keep the latter as temporal history.
+    const bool graded = s.style != 0 || s.intensity != 1.f;
+    if (graded) m.EnsureGradingTextures();
     const unsigned slot = unsigned(m.evaluations % kRing);
     const UINT base = kStatic + slot * kPerEval;
     m.Srv(colour, base + 0);
-    if (motion) m.Srv(motion, base + 1);
-    m.Srv(output, base + 2);
+    if (!resetFrame) m.Srv(motion, base + 1);
+    if (!graded) m.Srv(output, base + 2);
     m.Uav(output, base + 3);
     const uint64_t colourTex = m.TexHandle(base + 0, 0);
     const uint64_t motionTex = motion && !resetFrame ? m.TexHandle(base + 1, 0) : 0;
-    const uint64_t outputTex = m.TexHandle(base + 2, 0);
+    const uint64_t outputTex = graded ? 0 : m.TexHandle(base + 2, 0);
     const uint64_t outputSurf = m.SurfHandle(base + 3);
     ID3D12DescriptorHeap* heaps[] = {m.views.Get(), m.samplers.Get()};
     commands->SetDescriptorHeaps(2, heaps);
-    const uint64_t arena = m.arena->GetGPUVirtualAddress();
-    const uint64_t recordBase = m.records->buffer->GetGPUVirtualAddress();
+    const uint64_t recordBase = m.records ? m.records->buffer->GetGPUVirtualAddress() : 0;
     const Geometry& geo = m.geometry;
     const auto tex = [&](const std::string& role) -> uint64_t {
         if (role == "colour") return colourTex;
@@ -1063,7 +1169,7 @@ void Host::Evaluate(ID3D12GraphicsCommandList* commands, ID3D12Resource* colour,
         }
         Fail("unknown style field " + name);
     };
-    std::vector<unsigned char> block(512);
+    const auto launch = GetApi().launch;
     const bool timed = m.timestamps != nullptr;
     const unsigned timingSlot = unsigned(m.evaluations % Impl::kTimingSlots);
     unsigned query = timingSlot * m.timingStride;
@@ -1088,14 +1194,15 @@ void Host::Evaluate(ID3D12GraphicsCommandList* commands, ID3D12Resource* colour,
             p.blockDim = {256, 1, 1};
             p.pParams = &pp;
             p.paramSize = sizeof pp;
-            NvCheck(GetApi().launch(commands, &p, 1), "preparing the record of launch " + std::to_string(idx));
+            const auto status = launch(commands, &p, 1);
+            if (status != NVAPI_OK) NvCheck(status, "preparing the record of launch " + std::to_string(idx));
         }
         D3D12_RESOURCE_BARRIER b{};
         b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
         commands->ResourceBarrier(1, &b);
         m.preparedDone = true;
     }
-    for (const PlanLaunch* l : m.order) {
+    for (PlanLaunch* l : m.order) {
         if (l->styles == "graded" && !graded) continue;
         const bool barrier = l->barrier || m.options.barriersAll;
         if (barrier) {
@@ -1104,55 +1211,35 @@ void Host::Evaluate(ID3D12GraphicsCommandList* commands, ID3D12Resource* colour,
             b.UAV.pResource = nullptr;
             commands->ResourceBarrier(1, &b);
         }
-        block.assign(l->params, 0);
+        auto& block = l->parameters;
         const auto put32 = [&](uint32_t off, uint32_t v) { memcpy(block.data() + off, &v, 4); };
         const auto putF = [&](uint32_t off, float v) { memcpy(block.data() + off, &v, 4); };
         const auto put64 = [&](uint32_t off, uint64_t v) { memcpy(block.data() + off, &v, 8); };
         for (const Field& f : l->fields) {
             switch (f.code) {
-            case Code::Zero: break;
-            case Code::U32: put32(f.off, uint32_t(f.value)); break;
-            case Code::I: put32(f.off, uint32_t(int32_t(geo.Symbol(f.sym)))); break;
-            case Code::F: putF(f.off, float(geo.Symbol(f.sym))); break;
-            case Code::Rcp: putF(f.off, float(1.0 / double(geo.Symbol(f.sym)))); break;
             case Code::TF: putF(f.off, resetFrame ? 0.f : float(geo.Symbol(f.sym))); break;
             case Code::TRcp: putF(f.off, resetFrame ? 0.f : float(1.0 / double(geo.Symbol(f.sym)))); break;
-            case Code::Ptr: put64(f.off, arena + m.tensorBase + m.tensorOffset[size_t(f.value)]); break;
-            case Code::Flags: {
-                const auto found = m.flagOffset.find({int(int64_t(f.value)), f.sym});
-                if (found == m.flagOffset.end()) Fail("launch " + std::to_string(l->idx) + ": launch " + std::to_string(int64_t(f.value)) + " owns no " + f.sym + " array");
-                put64(f.off, arena + found->second);
-                break;
-            }
-            case Code::ClearBase: put64(f.off, arena); break;
-            case Code::Record: {
-                const auto prepared = m.preparedOffset.find(l->idx);
-                put64(f.off, prepared != m.preparedOffset.end() ? preparedBase + prepared->second : recordBase + m.records->offsets.at(l->idx).first);
-                break;
-            }
-            case Code::Blend: put64(f.off, recordBase + m.records->blendAt); break;
             case Code::Tex: put64(f.off, tex(f.sym)); break;
             case Code::Surf: put64(f.off, surf(f.sym)); break;
             case Code::Mv: putF(f.off, f.sym == "x" ? float(double(s.mvScaleX) / double(m.W)) : float(double(s.mvScaleY) / double(m.H))); break;
             case Code::Style: put32(f.off, style(f.sym)); break;
             case Code::Seed: put32(f.off, resetFrame ? 0u : m.sinceReset); break;
+            default: Fail("unexpected dynamic launch field");
             }
-            if (f.code == Code::I && f.size != 4) Fail("plan field size");
         }
-        const KernelChoice& kc = *m.kernelOf.at(l->idx);
-        if (kc.params && kc.params != l->params) Fail("launch " + std::to_string(l->idx) + ": parameter size mismatch");
-        auto [grid, blk] = Grid(l->name, geo, l->sx, l->sy);
-        NVAPI_CU_KERNEL_LAUNCH_PARAMS p{};
-        p.hFunction = m.functions.at(l->idx);
-        p.gridDim = {Apply(kc.grid[0], grid.x), Apply(kc.grid[1], grid.y), Apply(kc.grid[2], grid.z)};
-        p.blockDim = {Apply(kc.block[0], blk.x), Apply(kc.block[1], blk.y), Apply(kc.block[2], blk.z)};
-        p.dynSharedMemBytes = kc.shared;
+        auto p = l->dispatch;
         p.pParams = block.data();
-        p.paramSize = l->params;
         if (m.trace)
             m.trace << m.evaluations << "," << l->idx << "," << l->name << "," << p.gridDim.x << "x" << p.gridDim.y << "x" << p.gridDim.z << "," << p.blockDim.x << "x" << p.blockDim.y << "x"
                     << p.blockDim.z << "," << p.dynSharedMemBytes << "," << l->params << "," << Hex(block.data(), l->params) << "\n";
-        NvCheck(GetApi().launch(commands, &p, 1), "launch " + std::to_string(l->idx) + " (" + l->name + ")");
+        NvAPI_Status status;
+        if (l->fourBit) {
+            NrFourBitPlan::Scope scope(*l->fourBit);
+            status = NrPassBorrow::SubmitOwned(NrNet4::SubmitNative, l->name.c_str(), commands, &p, 1);
+        } else {
+            status = launch(commands, &p, 1);
+        }
+        if (status != NVAPI_OK) NvCheck(status, "launch " + std::to_string(l->idx) + " (" + l->name + ")");
         if (timed) { commands->EndQuery(m.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query++); m.timedLaunches[timingSlot].push_back(l); }
     }
     if (timed)
@@ -1168,7 +1255,8 @@ void Host::Evaluate(ID3D12GraphicsCommandList* commands, ID3D12Resource* colour,
     if (!m.options.report.empty()) {
         std::ofstream r(m.options.report, std::ios::trunc);
         r << "own pass host: " << m.kindText << ", " << m.options.recordsName << m.set << ", " << m.W << "x" << m.H << ", evaluations " << m.evaluations
-          << ", nvngx_dlssnr.dll loaded: " << (GetModuleHandleW(L"nvngx_dlssnr.dll") ? "yes" : "no") << "\n";
+          << ", nvngx_dlssnr.dll loaded: " << (GetModuleHandleW(L"nvngx_dlssnr.dll") ? "yes" : "no")
+          << ", NGX dispatcher loaded: " << (GetModuleHandleW(L"_nvngx.dll") ? "yes" : "no") << "\n";
     }
 }
 
@@ -1186,13 +1274,12 @@ bool Requested(ID3D12Device* device) {
     if (!v.empty()) return v != L"0";
     if (!device) return false;
     // Unset: on by itself where NVIDIA's runtime refuses the GPU (below the RTX 50 series), so an FP8 model runs there.
-    static std::mutex mutex;
-    static std::map<ID3D12Device*, bool> known;
-    std::lock_guard g(mutex);
-    if (const auto found = known.find(device); found != known.end()) return found->second;
+    std::lock_guard g(g_mutex);
+    auto& cached = Devices()[device].hostFp8;
+    if (cached) return *cached;
     bool own = false;
-    try { const auto a = Architecture(device); own = IsAmpere(a) || IsAda(a); } catch (const std::exception&) { own = false; }
-    known[device] = own;
+    try { const auto a = Architecture(device); own = IsAmpere(a) || IsAda(a); } catch (const std::exception&) {}
+    cached = own;
     return own;
 }
 
@@ -1233,6 +1320,20 @@ Options FromEnvironment(const fs::path& exeDir) {
     return o;
 }
 
+Options FourBitOptions(const fs::path& assets, bool allowMixedOriginal) {
+    Options o;
+    o.enabled = o.fourBit = true;
+    o.mixedOriginal = allowMixedOriginal;
+    const auto folder = assets / "host4";
+    o.plan = folder / "modelA_fp8.plan";
+    o.recordsName = "nvfp4 set ";
+    o.kernels.emplace_back(folder, "sm120");
+    o.report = Env(L"NR_HOST_REPORT");
+    o.trace = Env(L"NR_HOST_TRACE");
+    o.timing = Env(L"NR_HOST_TIMING");
+    return o;
+}
+
 Options Int8Options(const fs::path& folder) {
     Options o;
     o.enabled = true;
@@ -1250,8 +1351,18 @@ Options Int8Options(const fs::path& folder) {
 }
 
 void ReleaseDevice(ID3D12Device* device) {
+    NrWeightUpload::Collect();
     std::lock_guard g(g_mutex);
-    Devices().erase(device);       // (modules and functions are left to the driver's teardown, as NrAmpere does)
+    auto& devices = Devices();
+    const auto found = devices.find(device);
+    if (found == devices.end()) return;
+    auto& state = found->second;
+    if (!state.modules.empty()) {
+        auto& api = GetApi();
+        for (const auto& [key, function] : state.functions) api.destroyFunction(device, function);
+        for (const auto& [path, module] : state.modules) api.destroyModule(device, module);
+    }
+    devices.erase(found);
 }
 void SetLog(void (*log)(const char*)) { g_log = log; }
 void SetDriverQuery(void* query) { g_driverQuery = query; }

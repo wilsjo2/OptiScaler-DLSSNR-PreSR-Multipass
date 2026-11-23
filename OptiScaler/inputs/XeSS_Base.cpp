@@ -1,7 +1,7 @@
 #include "pch.h"
 #include "XeSS_Base.h"
 
-std::unordered_map<xess_context_handle_t, NVSDK_NGX_Parameter*> _nvParams;
+std::unordered_map<xess_context_handle_t, XeSSParameters> _nvParams;
 std::unordered_map<xess_context_handle_t, NVSDK_NGX_Handle*> _contexts;
 std::unordered_map<xess_context_handle_t, Scale> _motionScales;
 std::unordered_map<xess_context_handle_t, Scale> _jitterScales;

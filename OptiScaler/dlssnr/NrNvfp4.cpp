@@ -9,12 +9,11 @@
 #include "../../standalone/NrCapture/nvfp4/NrFfnV2.h"
 #include "../../standalone/NrCapture/nvfp4/NrFp8.h"
 #include "../../standalone/NrCapture/nvfp4/NrHost.h"
+#include "../../standalone/NrCapture/nvfp4/NrPassRuntime.h"
 #include "../../standalone/NrCapture/nvfp4/NrNet4.h"
 #include "../../standalone/NrCapture/nvfp4/NrSwin4.h"
 
 #include <atomic>
-#include <cctype>
-#include <cstring>
 #include <exception>
 #include <mutex>
 
@@ -22,12 +21,9 @@ namespace DlssNr::Nvfp4
 {
 namespace
 {
-// Evaluations in a row that may fail to run our kernels before it is called a failure: the layers recognise the model
-// from the runtime's own launches, which takes the first evaluations after they are switched on.
-constexpr unsigned kStarting = 30;
-
 struct Work
 {
+    bool swinActive = false;
     unsigned long long swin = 0, net = 0, ffn = 0;
     // Launches that did not run as asked (each layer: Faults()): any during an evaluation and it is not our model.
     unsigned long long swinFaults = 0, netFaults = 0, ffnFaults = 0;
@@ -41,10 +37,8 @@ bool gAskedDestroy = false;
 std::string gEnableProblem; // a layer that could not be switched on: nothing can run
 std::string gRefused;       // a path that cannot run these models at all
 bool gOurs = false;         // the evaluation in progress asked for a 4-bit model
-bool gPassInOne = false;
 std::string gSetMissing;     // the model asked for lacks a weight file: nothing else is run in its place
 Work gBefore;
-unsigned gMissed = 0; // evaluations in a row that asked for our kernels and did not get them
 std::string gWhy;     // why the last of them did not
 bool gRunning = false, gToldFailed = false;
 // The FP8 pass-in-one models (NrFp8): loaded beside the 4-bit layers, independent of them (they run on RTX 40 too).
@@ -53,9 +47,10 @@ bool gFp8 = false;          // the evaluation in progress asked for an FP8 model
 unsigned long long gFp8Faults = 0, gFp8Completed = 0;
 // The INT8 models (NrHost): the whole pass is ours, on the own pass host.
 bool gInt8 = false;       // the evaluation in progress asked for an INT8 model
-bool gInt8Ran = false;    // ... and the host recorded it
+bool gHostRan = false;    // ... and the host recorded it
 bool gLastInt8 = false;   // the last evaluation judged (OursRan) asked for an INT8 model
-std::string gInt8Problem; // why the host could not be made or could not run
+unsigned gHostProblemPreset = 0, gEvaluatingPreset = 0;
+std::string gHostProblem; // why the host could not be made or could not run
 std::atomic<unsigned> gComparisonShown { 0 };
 std::string gComparisonNote;
 
@@ -65,82 +60,18 @@ void Say(const std::string& line)
         gLog(line.c_str());
 }
 
-bool EndsWith(const std::string& text, size_t end, const char* tail)
-{
-    const size_t length = strlen(tail);
-    return end >= length && text.compare(end - length, length, tail) == 0;
-}
-
-unsigned long long Number(const std::string& text, size_t& at)
-{
-    unsigned long long n = 0;
-    while (at < text.size() && std::isdigit(static_cast<unsigned char>(text[at])))
-        n = n * 10 + static_cast<unsigned long long>(text[at++] - '0');
-    return n;
-}
-
-// The work counters of the layers, read from their status lines (the fused-block layer has no other way to ask).
-// Fused blocks: every "name: n" and "name: n/m" after "blocks replaced", except what was left to the runtime or left
-// out. Only whether the sum grew during an evaluation matters.
-unsigned long long SwinWork(const std::string& status)
-{
-    const size_t from = status.find(" | blocks replaced: ");
-    if (from == std::string::npos)
-        return 0;
-    unsigned long long sum = 0;
-    for (size_t i = from; i + 2 < status.size(); ++i)
-    {
-        if (status[i] != ':' || status[i + 1] != ' ' || !std::isdigit(static_cast<unsigned char>(status[i + 2])))
-            continue;
-        const bool left = EndsWith(status, i, "left to the runtime") || EndsWith(status, i, "left out");
-        size_t at = i + 2;
-        for (;;)
-        {
-            const auto n = Number(status, at);
-            if (!left)
-                sum += n;
-            if (at + 1 < status.size() && status[at] == '/' && std::isdigit(static_cast<unsigned char>(status[at + 1])))
-            {
-                ++at;
-                continue;
-            }
-            break;
-        }
-        i = at - 1;
-    }
-    return sum;
-}
-
-unsigned long long After(const std::string& status, const char* label)
-{
-    unsigned long long sum = 0;
-    const size_t length = strlen(label);
-    for (size_t at = status.find(label); at != std::string::npos; at = status.find(label, at))
-    {
-        at += length;
-        sum += Number(status, at);
-    }
-    return sum;
-}
-
 Work Read()
 {
     Work work;
-    work.swin = SwinWork(NrSwin4::Status(true));
-    work.net = After(NrNet4::Status(true), " replaced ");
-    work.ffn = After(NrFfnV2::Status(true), "feed-forward pairs replaced: ");
+    work.swin = NrSwin4::CompletedWork(work.swinActive);
+    work.net = NrNet4::CompletedWork();
+    work.ffn = NrFfnV2::CompletedWork();
     work.swinFaults = NrSwin4::Faults();
     work.netFaults = NrNet4::Faults();
     work.ffnFaults = NrFfnV2::Faults();
     return work;
 }
 
-void PauseAll(bool paused)
-{
-    NrSwin4::Pause(paused);
-    NrNet4::Pause(paused);
-    NrFfnV2::Pause(paused);
-}
 } // namespace
 
 void SetLog(void (*log)(const char* line))
@@ -155,28 +86,34 @@ void SetLog(void (*log)(const char* line))
 
 void SetDriverQuery(void* query) { NrHost::SetDriverQuery(query); }
 
-std::shared_ptr<void> CreateInt8(ID3D12Device* device, unsigned preset, unsigned width, unsigned height,
+std::shared_ptr<void> CreateHost(ID3D12Device* device, unsigned preset, unsigned width, unsigned height,
                                  const std::filesystem::path& assets)
 {
     try
     {
-        std::shared_ptr<NrHost::Host> host =
-            NrHost::Host::Create(device, NrHost::Int8Options(assets / L"int8"), width, height, Int8Set(preset));
-        return host;
+        auto options = IsInt8(preset) ? NrHost::Int8Options(assets / L"int8") : NrHost::FourBitOptions(assets, false);
+        return NrPassRuntime::CreateTrackedHost(device, NrPassRuntime::Select(preset), std::move(options), width,
+                                                height);
     }
     catch (const std::exception& e)
     {
         std::lock_guard guard(gMutex);
-        gInt8Problem = std::string("INT8 model: ") + e.what();
-        Say("FAILED to set up the INT8 model, so a pass that asks for it is not applied: " + std::string(e.what()));
+        gHostProblemPreset = preset;
+        gHostProblem = std::string(IsInt8(preset) ? "INT8 model: " : "NVFP4 model: ") + e.what();
+        Say("Could not create native NR model: " + std::string(e.what()));
         return {};
     }
 }
 
-bool RunInt8(const std::shared_ptr<void>& host, ID3D12GraphicsCommandList* list, const Int8Pass& pass)
+bool RunHost(const std::shared_ptr<void>& host, ID3D12GraphicsCommandList* list, const HostPass& pass)
 {
     if (!host)
         return false;
+    {
+        std::lock_guard guard(gMutex);
+        if (gOurs && !gInt8 && (!gOn || !gEnableProblem.empty() || !gSetMissing.empty()))
+            return false;
+    }
     try
     {
         NrHost::Settings settings;
@@ -191,13 +128,15 @@ bool RunInt8(const std::shared_ptr<void>& host, ID3D12GraphicsCommandList* list,
         static_cast<NrHost::Host*>(host.get())->Evaluate(list, pass.colour, pass.motion, pass.output, settings,
                                                          pass.reset || !pass.motion);
         std::lock_guard guard(gMutex);
-        gInt8Ran = true;
+        gHostRan = true;
+        gHostProblem.clear();
         return true;
     }
     catch (const std::exception& e)
     {
         std::lock_guard guard(gMutex);
-        gInt8Problem = std::string("INT8 model: ") + e.what();
+        gHostProblemPreset = gEvaluatingPreset;
+        gHostProblem = std::string(gInt8 ? "INT8 model: " : "NVFP4 model: ") + e.what();
         return false;
     }
 }
@@ -303,8 +242,8 @@ void Configure(bool wanted, const std::filesystem::path& assets)
         Say("FAILED to load the FP8 models, so a pass that asks for one is not applied: " + std::string(e.what()));
     }
     // Idle until an evaluation asks: other users of the same NvAPI calls (DLSS itself) pass straight through.
-    PauseAll(true);
-    gMissed = 0;
+    NrPassRuntime::EnableFourBit(false);
+    gWhy.clear();
     gRunning = gToldFailed = false;
     if (gEnableProblem.empty())
         Say("loaded, assets " + assets.string());
@@ -312,42 +251,37 @@ void Configure(bool wanted, const std::filesystem::path& assets)
         Say("FAILED to load, so a pass that asks for a 4-bit model is not applied: " + gEnableProblem);
 }
 
-void BeginEvaluation(unsigned requestedPreset)
+void BeginEvaluation(unsigned requestedPreset, ID3D12GraphicsCommandList* commands)
 {
     std::lock_guard guard(gMutex);
-    gOurs = IsNvfp4(requestedPreset);
-    gPassInOne = IsPassInOne(requestedPreset);
-    gFp8 = IsFp8(requestedPreset);
-    gInt8 = IsInt8(requestedPreset);
-    gInt8Ran = false;
+    gEvaluatingPreset = requestedPreset;
+    const auto model = NrPassRuntime::Select(requestedPreset);
+    gOurs = model.backend != NrPassRuntime::Backend::Nvidia;
+    gFp8 = model.backend == NrPassRuntime::Backend::Fp8;
+    gInt8 = model.backend == NrPassRuntime::Backend::Host;
+    gHostRan = false;
     if (gInt8)
     {
         // The whole pass runs on the own pass host: none of the layers has anything to do.
-        PauseAll(true);
-        NrFp8::UseSet(0);
+        NrPassRuntime::Activate(model, commands);
         gSetMissing.clear();
         return;
     }
     if (gFp8)
     {
         // NVIDIA's kernels with our records: no 4-bit kernel runs.
-        PauseAll(true);
         gSetMissing.clear();
-        const unsigned set = Fp8Set(requestedPreset);
+        const unsigned set = model.weights;
         std::string file;
         if (gOn && gFp8Problem.empty() && !NrFp8::SetComplete(set, &file))
             gSetMissing = "a weight file of this model is missing (OptiScaler/nvfp4/" + file + ")";
-        NrFp8::UseSet(gSetMissing.empty() && gFp8Problem.empty() ? set : 0);
+        NrPassRuntime::Activate(gSetMissing.empty() && gFp8Problem.empty() ? model : NrPassRuntime::Select(0),
+                                commands);
         gFp8Faults = NrFp8::Faults();
         gFp8Completed = NrFp8::Completed();
         return;
     }
-    NrFp8::UseSet(0);
-    // A pass-in-one model is the same kernels with its own set of weights.
-    const unsigned set = WeightSet(requestedPreset);
-    const unsigned taken = NrSwin4::UseSet(set ? set : NrSwin4::kDefaultSet);
-    NrNet4::UseSet(taken);
-    NrFfnV2::UseSet(taken);
+    const auto taken = NrPassRuntime::BindFourBitWeights(model);
     gSetMissing.clear();
     if (gOurs && !IsKnown(requestedPreset))
         gSetMissing = "model " + std::to_string(requestedPreset) + " was removed from this build; choose another NR model";
@@ -359,21 +293,13 @@ void BeginEvaluation(unsigned requestedPreset)
             !NrFfnV2::SetComplete(taken, &file))
             gSetMissing = "a weight file of this model is missing or incomplete (OptiScaler/nvfp4/" + file + ")";
     }
-    // An incomplete model is not run at all: the runtime's own evaluation is recorded and then not shown (OursRan).
-    PauseAll(!gOurs || !gSetMissing.empty());
+    // Keep an incomplete model inactive. RunHost and OursRan report the missing weight file.
+    NrPassRuntime::Activate(gSetMissing.empty() ? model : NrPassRuntime::Select(0), commands);
     if (gOurs && gOn)
         gBefore = Read();
 }
 
-void EndEvaluation(ID3D12GraphicsCommandList* list)
-{
-    NrFp8::EndEvaluation(list);
-    NrFp8::UseSet(0);
-    NrFfnV2::EndEvaluation(list);
-    NrSwin4::EndEvaluation(list);
-    NrNet4::EndEvaluation(list);
-    PauseAll(true);
-}
+void EndEvaluation(ID3D12GraphicsCommandList* list) { NrPassRuntime::End(list); }
 
 bool OursRan(bool whole)
 {
@@ -385,8 +311,8 @@ bool OursRan(bool whole)
     std::string why;
     if (gInt8)
     {
-        if (!gInt8Ran)
-            why = gInt8Problem.empty() ? "the INT8 model's pass was not run" : gInt8Problem;
+        if (!gHostRan)
+            why = gHostProblem.empty() ? "the INT8 model's pass was not run" : gHostProblem;
     }
     else if (gFp8)
     {
@@ -405,14 +331,17 @@ bool OursRan(bool whole)
         why = "the 4-bit kernels were not loaded";
     else if (!gEnableProblem.empty())
         why = gEnableProblem;
+    else if (!gHostRan && gHostProblemPreset == gEvaluatingPreset && !gHostProblem.empty())
+        why = gHostProblem;
     else if (!gSetMissing.empty())
         why = gSetMissing;
+    else if (!gHostRan)
+        why = "the NVFP4 host did not record this pass";
     else
     {
         const Work now = Read();
-        const std::string swin = NrSwin4::Status(false);
-        if (swin.rfind("active", 0) != 0 || now.swin <= gBefore.swin)
-            why = "fused blocks: " + swin;
+        if (!now.swinActive || now.swin <= gBefore.swin)
+            why = "fused blocks: " + NrSwin4::Status(false);
         else if (whole && now.net <= gBefore.net)
             why = "split blocks and transformer: " + NrNet4::Status(false);
         else if (whole && now.ffn <= gBefore.ffn)
@@ -437,17 +366,12 @@ bool OursRan(bool whole)
                        : "running: this pass is our 4-bit kernels | " + NrSwin4::Status(false) + " | " + NrNet4::Status(false));
         gRunning = true;
         gToldFailed = false;
-        gMissed = 0;
         gWhy.clear();
         return true;
     }
     gRunning = false;
     gWhy = std::move(why);
-    // (An FP8 model knows from its first evaluation whether it ran: no time to recognise the model.)
-    const bool certain = gFp8 || gInt8 || !gEnableProblem.empty() || !gSetMissing.empty();
-    if (gMissed < kStarting || certain)
-        gMissed = certain ? kStarting : gMissed + 1;
-    if (gMissed >= kStarting && !gToldFailed)
+    if (!gToldFailed)
     {
         gToldFailed = true;
         Say(std::string("FAILED: the pass asked for ") + (gInt8 ? "an INT8" : gFp8 ? "an FP8" : "a 4-bit") +
@@ -474,7 +398,7 @@ std::string Problem()
     // (An INT8 pass uses none of the layers: a layer that could not be switched on is not its problem.)
     if (!gEnableProblem.empty() && !gLastInt8)
         return gEnableProblem;
-    return gMissed >= kStarting ? gWhy : std::string();
+    return gWhy;
 }
 
 bool Running()

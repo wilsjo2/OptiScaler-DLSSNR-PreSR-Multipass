@@ -34,7 +34,8 @@ void Disable();
 bool Enabled();
 // The set of the evaluations that follow (0: none, the runtime's own records, nothing is counted). Call it between
 // evaluations only.
-void UseSet(unsigned set);
+// Only the specified command list may use these records. Other evaluations keep their own model.
+void UseSet(unsigned set, ID3D12GraphicsCommandList* commands);
 // Whether `set` was read (on false, *missing names the files).
 bool SetComplete(unsigned set, std::string* missing = nullptr);
 // Evaluations with a set that did not run wholly on it, and the reason of the last one.

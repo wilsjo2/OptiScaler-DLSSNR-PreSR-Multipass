@@ -1,4 +1,5 @@
 // FP8 pass-in-one models: the runtime's kernels with weight records of ours; see NrFp8.h.
+#include "NrWeightUpload.h"
 #include <windows.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -65,7 +66,6 @@ struct Weights {
 };
 struct Device {
     std::array<Weights, kMaxSets> sets;
-    std::vector<ComPtr<IUnknown>> parked;                   // what an upload that did not finish may still be using
 };
 struct ListState {
     ID3D12Device* device = nullptr;
@@ -80,7 +80,6 @@ struct State {
     bool enabled = false;
     Options options;
     std::array<Set, kMaxSets> sets;
-    unsigned useSet = 0;
     std::map<NVDX_ObjectHandle, Function> functions;
     std::map<ID3D12Device*, Device> devices;
     std::map<ID3D12GraphicsCommandList*, ListState> lists;
@@ -183,47 +182,7 @@ Weights& LoadWeights(State& s, Device& d, ID3D12Device* device, unsigned n) {
         memcpy(mapped, blob.data(), blob.size());
         memcpy(static_cast<unsigned char*>(mapped) + w.blendAt, &kBlendWeight, 2);
         upload->Unmap(0, nullptr);
-        D3D12_COMMAND_QUEUE_DESC queueDesc{};
-        queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-        ComPtr<ID3D12CommandQueue> queue; ComPtr<ID3D12CommandAllocator> allocator; ComPtr<ID3D12GraphicsCommandList> commands; ComPtr<ID3D12Fence> fence;
-        // Once the copy is submitted, a failure below must not free what it may still be using.
-        struct Park {
-            Device& d; Weights& w; ComPtr<ID3D12Resource>& upload; ComPtr<ID3D12CommandQueue>& queue; ComPtr<ID3D12CommandAllocator>& allocator;
-            ComPtr<ID3D12GraphicsCommandList>& commands; bool armed = false;
-            ~Park() {
-                if (!armed) return;
-                try {
-                    for (IUnknown* object : {static_cast<IUnknown*>(w.buffer.Get()), static_cast<IUnknown*>(upload.Get()), static_cast<IUnknown*>(queue.Get()),
-                                             static_cast<IUnknown*>(allocator.Get()), static_cast<IUnknown*>(commands.Get())})
-                        if (object) d.parked.emplace_back(object);
-                } catch (...) {
-                }
-            }
-        } park{d, w, upload, queue, allocator, commands};
-        Check(device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&queue)), "FP8 upload queue");
-        Check(device->CreateCommandAllocator(queueDesc.Type, IID_PPV_ARGS(&allocator)), "FP8 upload allocator");
-        Check(device->CreateCommandList(0, queueDesc.Type, allocator.Get(), nullptr, IID_PPV_ARGS(&commands)), "FP8 upload list");
-        Check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)), "FP8 upload fence");
-        D3D12_RESOURCE_BARRIER transition{};
-        transition.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        transition.Transition = {w.buffer.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST};
-        commands->ResourceBarrier(1, &transition);
-        commands->CopyBufferRegion(w.buffer.Get(), 0, upload.Get(), 0, bytes);
-        std::swap(transition.Transition.StateBefore, transition.Transition.StateAfter);
-        commands->ResourceBarrier(1, &transition);
-        Check(commands->Close(), "FP8 upload close");
-        ID3D12CommandList* lists[] = {commands.Get()};
-        queue->ExecuteCommandLists(1, lists);
-        park.armed = true;
-        Check(queue->Signal(fence.Get(), 1), "FP8 upload signal");
-        HANDLE done = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        if (!done) throw std::runtime_error("FP8 upload event failed");
-        const HRESULT armed = fence->SetEventOnCompletion(1, done);
-        const DWORD waited = SUCCEEDED(armed) ? WaitForSingleObject(done, 20000) : WAIT_FAILED;
-        CloseHandle(done);
-        Check(armed, "FP8 upload wait");
-        if (waited != WAIT_OBJECT_0) throw std::runtime_error("the FP8 weight upload did not complete");
-        park.armed = false;
+        NrWeightUpload::Copy(device, w.buffer.Get(), upload.Get(), bytes);
         w.ready = true;
         Report(s, "set " + std::to_string(n) + " loaded (" + std::to_string(blob.size() >> 20) + " MB)");
         return w;
@@ -236,6 +195,7 @@ Weights& LoadWeights(State& s, Device& d, ID3D12Device* device, unsigned n) {
 
 // An evaluation with a set ends: counted as whole, or as a fault with its reason.
 void Finish(State& s, ListState& l) {
+    if (!l.index) return; // Armed on this list, but the runtime never started a model.
     const Set& set = s.sets[l.set];
     if (!l.failed && l.index < set.launches.size())
         l.failed = true, l.reason = "the evaluation ended after " + std::to_string(l.index) + " launches, Model A's network has " + std::to_string(set.launches.size());
@@ -281,21 +241,19 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
         const auto found = s.functions.find(kernels->hFunction);
         if (found != s.functions.end()) function = &found->second;
     }
-    if (function && function->name == "cc_cb_clear") {         // a new evaluation
-        const auto found = s.lists.find(commands);
-        if (found != s.lists.end()) { Finish(s, found->second); s.lists.erase(found); }
-        if (s.enabled && s.useSet && s.useSet < kMaxSets && s.sets[s.useSet].present) {
-            ListState l;
-            l.device = function->device;
-            l.set = s.useSet;
-            l.index = 1;
-            s.lists[commands] = l;
-        }
-        return s.launch(commands, kernels, count);
-    }
     const auto found = s.lists.find(commands);
     if (found == s.lists.end()) return s.launch(commands, kernels, count);
     ListState& l = found->second;
+    if (function && function->name == "cc_cb_clear") {
+        Finish(s, l);
+        const unsigned set = l.set;
+        l = {};
+        l.device = function->device;
+        l.set = set;
+        l.index = 1;
+        return s.launch(commands, kernels, count);
+    }
+    if (!l.index) return s.launch(commands, kernels, count);
     const unsigned first = l.index;
     l.index += kernels ? count : 1;
     if (l.failed) return s.launch(commands, kernels, count);
@@ -400,7 +358,7 @@ void Disable() {
     auto& s = S();
     std::lock_guard guard(s.mutex);
     s.enabled = false;
-    s.useSet = 0;
+    s.lists.clear();
 }
 
 bool Enabled() {
@@ -409,11 +367,17 @@ bool Enabled() {
     return s.enabled;
 }
 
-void UseSet(unsigned set) {
+void UseSet(unsigned set, ID3D12GraphicsCommandList* commands) {
     auto& s = S();
     std::lock_guard guard(s.mutex);
-    s.useSet = set < kMaxSets ? set : 0;
+    auto found = s.lists.find(commands);
+    if (found != s.lists.end()) {
+        if (found->second.set == set) return;
+        Finish(s, found->second);
+        s.lists.erase(found);
+    }
     if (set >= kMaxSets) { ++s.faults; s.problem = "FP8 set " + std::to_string(set) + " does not exist"; }
+    else if (commands && set && s.enabled && s.sets[set].present) s.lists[commands].set = set;
 }
 
 bool SetComplete(unsigned set, std::string* missing) {
@@ -459,14 +423,14 @@ void ReleaseDevice(ID3D12Device* device) {
     std::lock_guard guard(s.mutex);
     s.devices.erase(device);
     for (auto i = s.functions.begin(); i != s.functions.end();) i = i->second.device == device ? s.functions.erase(i) : std::next(i);
-    s.lists.clear();                        // command lists of the device go with it; their addresses may be reused
+    std::erase_if(s.lists, [device](const auto& entry) { return entry.second.device == device; });
 }
 
 std::string Status(bool counters) {
     auto& s = S();
     std::lock_guard guard(s.mutex);
     std::string status = !s.enabled ? "off" : s.completed ? "active" : "on, waiting for an evaluation";
-    if (s.enabled && s.useSet) status += ", set " + std::to_string(s.useSet);
+    if (s.lists.size() == 1) status += ", set " + std::to_string(s.lists.begin()->second.set);
     if (s.faults) status += " (" + s.problem + ")";
     if (!counters) return status;
     return status + " | evaluations on our records: " + std::to_string(s.completed) + " | faults: " + std::to_string(s.faults) +

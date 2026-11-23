@@ -28,7 +28,7 @@ struct ProxyState
     ID3D12Device* device = nullptr;
     bool failed = false;
     bool reset = true;
-    // An INT8 model: the own pass host in place of an NGX feature. hostFailed: it could not be made or could not run;
+    // Native passes use a host in place of an NGX feature. hostFailed: it could not be made or could not run;
     // the pass then reports through DlssNr::Nvfp4::OursRan and nothing is shown.
     std::shared_ptr<void> host;
     bool hostModel = false, hostFailed = false, hostMotionTold = false;
@@ -120,6 +120,7 @@ struct Context::Impl
                state.creation() == DlssNr::GpuLifetime::Recorded::Discarded;
     }
     void RetireState();
+    bool UpdateTuning(const ModelSettings& settings);
     unsigned int Prepare(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, unsigned int width,
                          unsigned int height, const ModelSettings& settings, uint64_t submissionEpoch, bool* ready);
     void Release();
@@ -148,24 +149,44 @@ void Context::Impl::Release()
 
 void Context::RetryAfterFailure() { _impl->RetireState(); }
 
+bool Context::Impl::UpdateTuning(const ModelSettings& settings)
+{
+    if ((!state.feature && !state.hostModel) || state.settings == settings)
+        return false;
+    if (state.hostModel && !state.hostFailed && state.settings.requested == settings.requested)
+    {
+        state.settings = settings;
+        state.reset = true;
+    }
+    else
+        RetireState();
+    return true;
+}
+
+bool Context::UpdateTuning(const ModelSettings& settings) { return _impl->UpdateTuning(settings); }
+
 unsigned int Context::Impl::Prepare(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, unsigned int width,
                                     unsigned int height, const ModelSettings& settings, uint64_t submissionEpoch,
                                     bool* ready)
 {
     *ready = false;
     lifetime.Collect();
-    if (state.failed || !cmdList || !device || !width || !height)
+    if (!cmdList || !device || !width || !height)
         return 0;
     if ((state.feature || state.hostModel) &&
-        (state.settings != settings || state.device != device || state.width != width || state.height != height))
+        (state.device != device || state.width != width || state.height != height))
         RetireState();
-    if (DlssNr::Nvfp4::IsInt8(settings.requested))
+    else
+        UpdateTuning(settings);
+    if (state.failed)
+        return 0;
+    if (DlssNr::Nvfp4::UsesNativeHost(settings.requested))
     {
         // No NGX feature: the whole pass runs on the own pass host, which is ready as soon as it is made.
         if (!state.hostModel)
         {
-            state.host = DlssNr::Nvfp4::CreateInt8(device, settings.requested, width, height,
-                                                  Util::DllPath().parent_path() / L"OptiScaler" / L"nvfp4");
+            state.host = DlssNr::Nvfp4::CreateHost(device, settings.requested, width, height,
+                                                   Util::DllPath().parent_path() / L"OptiScaler" / L"nvfp4");
             state.hostModel = true;
             state.hostFailed = !state.host;
             state.settings = settings;
@@ -175,7 +196,7 @@ unsigned int Context::Impl::Prepare(ID3D12GraphicsCommandList* cmdList, ID3D12De
             state.creationEpoch = submissionEpoch;
             state.creationReady = true;
             if (state.host)
-                LOG_INFO("DLSS-NR: INT8 model {} set up at {}x{} on the own pass host", settings.requested, width,
+                LOG_INFO("DLSS-NR: native model {} set up at {}x{} on the own pass host", settings.requested, width,
                          height);
         }
         *ready = true;
@@ -357,7 +378,7 @@ unsigned int Context::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Device* devi
                 transition(motion, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
                 motion = state.hostMotion.get();
                 if (!state.hostMotionTold)
-                    LOG_INFO("DLSS-NR INT8 model: the motion vectors are a {}x{} region at {},{} of a {}x{} texture; "
+                    LOG_INFO("DLSS-NR native model: the motion vectors are a {}x{} region at {},{} of a {}x{} texture; "
                              "the region is copied for the own pass host each frame",
                              region.width, region.height, region.x, region.y, (unsigned) motionDesc.Width,
                              motionDesc.Height);
@@ -366,14 +387,14 @@ unsigned int Context::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Device* devi
             {
                 motion = nullptr;
                 if (!state.hostMotionTold)
-                    LOG_WARN("DLSS-NR INT8 model: the motion vectors' {}x{} region at {},{} of a {}x{} texture could "
+                    LOG_WARN("DLSS-NR native model: the motion vectors' {}x{} region at {},{} of a {}x{} texture could "
                              "not be copied; every frame runs without history",
                              region.width, region.height, region.x, region.y, (unsigned) motionDesc.Width,
                              motionDesc.Height);
             }
             state.hostMotionTold = true;
         }
-        DlssNr::Nvfp4::Int8Pass pass;
+        DlssNr::Nvfp4::HostPass pass;
         pass.colour = frame.color;
         pass.motion = motion;
         pass.output = frame.output;
@@ -387,7 +408,7 @@ unsigned int Context::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Device* devi
         pass.mvScaleY = frame.mvScaleY;
         pass.reset = frame.reset || state.reset;
         lifetime.Record(cmdList);
-        if (!state.hostFailed && DlssNr::Nvfp4::RunInt8(state.host, cmdList, pass))
+        if (!state.hostFailed && DlssNr::Nvfp4::RunHost(state.host, cmdList, pass))
             state.reset = false;
         else
             state.hostFailed = true; // until Retry or a settings change

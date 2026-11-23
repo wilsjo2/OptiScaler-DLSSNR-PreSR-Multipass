@@ -6,6 +6,7 @@ void Runtime::ReleaseDlss() {
 }
 NVSDK_NGX_Result Runtime::CreateDlss(ID3D12GraphicsCommandList* commands, UINT w, UINT h, UINT outW, UINT outH) {
     ReleaseDlss();
+    InitializeDriver();
     if (!std::filesystem::exists(dlssPath))
         throw std::runtime_error("Private DLSS needs the original NVIDIA-signed nvngx_dlss.dll beside the NR runtime or in this application's runtime folder.");
     VerifyNvidia(dlssPath);

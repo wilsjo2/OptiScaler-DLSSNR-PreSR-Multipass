@@ -398,7 +398,8 @@ static Fsr3::FfxErrorCode ffxFsr3ContextDestroy_Dx12(Fsr3::FfxFsr3UpscalerContex
         NVSDK_NGX_D3D12_ReleaseFeature(_contexts[pContext]);
 
     _contexts.erase(pContext);
-    _nvParams.erase(pContext);
+    if (auto params = _nvParams.extract(pContext); !params.empty() && params.mapped())
+        NVSDK_NGX_D3D12_DestroyParameters(params.mapped());
     _initParams.erase(pContext);
 
     _skipDestroy = true;
@@ -594,7 +595,8 @@ static Fsr3::FfxErrorCode ffxFsr3ContextDestroy_Pattern_Dx12(Fsr3::FfxFsr3Upscal
         NVSDK_NGX_D3D12_ReleaseFeature(_contexts[pContext]);
 
     _contexts.erase(pContext);
-    _nvParams.erase(pContext);
+    if (auto params = _nvParams.extract(pContext); !params.empty() && params.mapped())
+        NVSDK_NGX_D3D12_DestroyParameters(params.mapped());
     _initParams.erase(pContext);
 
     auto cdResult = o_ffxFsr3UpscalerContextDestroy_Dx12(pContext);

@@ -28,8 +28,7 @@ inline unsigned int CompareModel(const Config& cfg)
     return wanted && known ? model : 0u;
 }
 
-// Whether any of the passes (or the comparison) asks for one of DlssNr::Nvfp4's models that run as layers over the NR
-// runtime's launches. (An INT8 model runs on the own pass host and needs none of them.)
+// Four-bit kernels and FP8 records are configured here. The INT8 host loads its own assets.
 inline bool WantsNvfp4(const Config& cfg, unsigned int passes)
 {
     const auto layered = [](unsigned int preset) { return Nvfp4::IsNvfp4(preset) && !Nvfp4::IsInt8(preset); };
@@ -145,13 +144,14 @@ inline BorrowChoice PassBorrow(const Config& cfg, unsigned int pass)
              extra.borrowLevel.value_or(32u) };
 }
 
-// Whether any pass that runs a network needs the NR runtime (every model but the INT8 ones).
+// Whether a network pass requests the NVIDIA NR runtime.
 inline bool NeedsRuntime(const Config& cfg, unsigned int passes)
 {
     for (unsigned int pass = 0; pass < passes; ++pass)
-        if (!PassReapplies(cfg, pass) && !Nvfp4::IsInt8(RequestedPreset(cfg, pass)))
+        if (!PassReapplies(cfg, pass) && !Nvfp4::UsesNativeHost(RequestedPreset(cfg, pass)))
             return true;
-    return false;
+    const unsigned compare = CompareModel(cfg);
+    return compare && !Nvfp4::UsesNativeHost(compare);
 }
 
 // A re-applying pass runs no network, so its resolution profile is ignored.

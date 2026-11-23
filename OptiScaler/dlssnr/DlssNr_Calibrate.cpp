@@ -35,8 +35,7 @@ void Publish(bool active, std::string text)
     published = { active, std::move(text) };
 }
 
-// NR frames to let pass after a change before a picture is measured: a change of a model slider makes the pass
-// anew and its history starts over; the other sliders only change the blend.
+// A model slider restarts temporal history. Let it settle before measuring the new settings.
 constexpr unsigned kSettleModel = 10, kSettleBlend = 2;
 // NR frames without a picture before the run gives up.
 constexpr unsigned kPatience = 900;
@@ -221,7 +220,7 @@ void Measured(Config& config, capture::FrameCapture& frames)
         options.skin = run.skin;
         run.solver.Start(run.start, options);
         run.phase = Run::Phase::Working;
-        // (The models are those of the settings in use again: whatever the first values are, the passes are made anew.)
+        // Allow the working preset's history to settle again after measuring the goal.
         SetValues(config, run.pass, run.solver.Trial());
         run.applied = run.solver.Trial();
         Measure(1, true);

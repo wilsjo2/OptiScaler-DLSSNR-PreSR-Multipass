@@ -7,6 +7,8 @@
 #include <low_latency/low_latency_tech/ll_antilag2.h>
 #include <low_latency/low_latency_tech/ll_latencyflex.h>
 
+std::atomic<std::shared_ptr<LowLatencyTech>> InputCommon::currently_active_tech {};
+
 // private
 bool InputCommon::deinit_current_tech()
 {

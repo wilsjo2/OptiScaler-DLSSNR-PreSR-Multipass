@@ -193,6 +193,30 @@ AMP_INLINE void stage_issue(u8* st, const u8* src, u32 gstride, u32 tile, int G,
 template <int NP>
 AMP_INLINE void stage_mma(u32 (&acc)[4][2 * NP][2], const u8* st, u32 th, u32 lane, const u8* wb, u32 kstride, u32 kbl)
 {
+#if NR_NATIVE_FP8
+#pragma unroll
+    for (unsigned part = 0; part < 2; ++part) {
+        amp_v4 input[4];
+#pragma unroll
+        for (unsigned row = 0; row < 4; ++row)
+            input[row] = *(const amp_v4*)(st + (th * 4u + row) * 1024u + part * 512u + lane * 16u);
+        const u8* weights = wb + (u64)(kbl + part) * kstride;
+#pragma unroll
+        for (unsigned n = 0; n < NP; ++n) {
+            const amp_v4 w = amp_load_nc(weights + n * 512u);
+#pragma unroll
+            for (unsigned row = 0; row < 4; ++row) {
+                const amp_v4 a = input[row];
+                u32* left = acc[row][2 * n];
+                u32* right = acc[row][2 * n + 1];
+                asm("mma.sync.aligned.m16n8k32.row.col.f16.e4m3.e4m3.f16 {%0,%1}, {%2,%3,%4,%5}, {%6,%7}, {%0,%1};"
+                    : "+r"(left[0]), "+r"(left[1]) : "r"(a.x), "r"(a.y), "r"(a.z), "r"(a.w), "r"(w.x), "r"(w.y));
+                asm("mma.sync.aligned.m16n8k32.row.col.f16.e4m3.e4m3.f16 {%0,%1}, {%2,%3,%4,%5}, {%6,%7}, {%0,%1};"
+                    : "+r"(right[0]), "+r"(right[1]) : "r"(a.x), "r"(a.y), "r"(a.z), "r"(a.w), "r"(w.z), "r"(w.w));
+            }
+        }
+    }
+#else
 #pragma unroll
     for (u32 part = 0; part < 2; ++part) {
         u32 A0[4][4], A1[4][4];
@@ -222,6 +246,7 @@ AMP_INLINE void stage_mma(u32 (&acc)[4][2 * NP][2], const u8* st, u32 th, u32 la
             }
         }
     }
+#endif
 }
 
 // the whole K loop over `stages` stages. wait(s) runs on the leader thread only, before stage s is issued (a CTA

@@ -4,7 +4,7 @@
 #include "nvfp4/NrNet4.h"
 #include "nvfp4/NrFp8.h"
 #include "nvfp4/NrAmpere.h"
-#include "nvfp4/NrHost.h"
+#include "nvfp4/NrPassRuntime.h"
 #include <atomic>
 #include <mutex>
 #include <shaders/dlssnr/precompile/DlssNr_Shader.h>
@@ -46,7 +46,7 @@ Processor::Processor(Gpu& g) : gpu(g) {
 Processor::~Processor() {
     stages.clear();
     // Share the same fence-backed retention used by the in-game NR implementation.
-    gpu.lifetime.Retire([model = std::move(runtime), flow = std::move(opticalFlow), a = std::move(proxy), b = std::move(original),
+    gpu.lifetime.Retire([model = std::move(runtime), nativeHosts = std::move(hosts), flow = std::move(opticalFlow), a = std::move(proxy), b = std::move(original),
         c = std::move(answer), d = std::move(output), e = std::move(depth), f = std::move(motion),
         full = std::move(fullProxy), flowSource = std::move(flowInput), filtered = std::move(filteredAnswer),
         srInput = std::move(resizeInput), upscaled = std::move(enlarged), bounded = std::move(boundedDlss), unit = std::move(exposure),
@@ -116,6 +116,10 @@ void Processor::ResizeLegacy(UINT w, UINT h, const Settings& s) {
         privateDlss == useDlss && activeFullField == fullField) return;
     if (opticalFlow) opticalFlow->Reset();
     if (!gpu.Drain()) throw std::runtime_error("GPU timeout while rebuilding NR.");
+    for (size_t pass = 0; pass < hosts.size(); ++pass) {
+        if (hosts[pass] && (pass >= s.passes || hostModels[pass] != s.PassModel(unsigned(pass)).preset || resized))
+            hosts[pass].reset();
+    }
     spatialLayout = nextSpatial;
     runtime->ReleaseDlss(); privateDlss = false;
     resizeInput.Reset(); enlarged.Reset(); boundedDlss.Reset(); exposure.Reset();
@@ -371,38 +375,45 @@ bool BorrowCuts(const Settings& s, std::array<NrPassBorrow::Cut, Settings::MaxPa
 void Processor::Evaluate(ID3D12Resource* colour, ID3D12Resource* depthGuide, ID3D12Resource* motionGuide,
     ID3D12Resource* result, UINT w, UINT h, bool reset, unsigned pass) {
     auto* c = gpu.commands.Get();
-    // Tell the NVFP4 layer where the evaluation ends, whatever way this function is left.
-    struct Boundary { ID3D12GraphicsCommandList* list; ~Boundary() { NrFfnV2::EndEvaluation(list); NrSwin4::EndEvaluation(list); NrNet4::EndEvaluation(list); NrFp8::EndEvaluation(list); NrAmpere::EndEvaluation(list); } } boundary{c};
-    // The 4-bit kernels run where the pass's model is "Model A - NVFP4"; "Model A (Original)" and the others keep
-    // NVIDIA's. Model B has only the feed-forward as 4-bit, and that still follows its box alone.
+    struct Boundary {
+        ID3D12GraphicsCommandList* list;
+        ~Boundary() {
+            NrPassRuntime::End(list);
+            NrAmpere::EndEvaluation(list);
+            NrAmpere::UseSet(0);
+        }
+    } boundary{c};
     const unsigned chosen = runtime->RequestedModel(pass);
-    NrSwin4::Pause(!Settings::IsNvfp4(chosen)); NrNet4::Pause(!Settings::IsNvfp4(chosen));
-    NrFfnV2::Pause(!Settings::IsNvfp4(chosen) && chosen != 2);
-    // A pass-in-one model is the same kernels with its own set of weights.
-    // (NrSwin4::UseSet answers with the set it really took: the checker may override the model's own per evaluation.)
-    const unsigned selectedSet = NrSwin4::UseSet(Settings::Nvfp4Set(chosen) ? Settings::Nvfp4Set(chosen) : NrSwin4::kDefaultSet);
-    NrNet4::UseSet(selectedSet);
-    NrFfnV2::UseSet(selectedSet);
-    // An FP8 pass-in-one model: NVIDIA's kernels with our records. It must run wholly or not be shown at all.
-    // With NR_AMP=1 the FP8 model's records run on the Ampere set's kernels instead (NrFp8 is set 0 for it): every
-    // weighted launch must be ours (or explicitly left to NVIDIA by the development switches), or nothing is shown.
     const unsigned modelFp8Set = Settings::Fp8Set(chosen);
-    // An INT8 model runs on the own pass host: INT8 kernels and weights of ours, no NVIDIA runtime launch at all.
-    // NR_HOST=1 (development; by itself on RTX 30 and 40): an FP8 model runs there too.
-    const unsigned modelInt8Set = Settings::Int8Set(chosen);
-    if (modelInt8Set || (modelFp8Set && NrHost::Requested(gpu.device.Get()))) {
-        if (borrowEvaluation >= 0) throw std::runtime_error(std::format("NR pass {}: pass borrowing does not work with {}. Nothing was shown.", pass + 1, modelInt8Set ? "an INT8 model" : "the own pass host (NR_HOST=1)"));
-        NrAmpere::UseSet(0); NrFp8::UseSet(0);
+    const auto model = NrPassRuntime::Select(chosen, modelFp8Set && NrHost::Requested(gpu.device.Get()));
+    NrPassRuntime::BindFourBitWeights(model);
+    NrPassRuntime::Activate(model, c, chosen == 2);
+    const auto evaluate = [&](auto&& run) {
+        if (borrowEvaluation < 0) { run(); return; }
+        const unsigned evaluation = unsigned(borrowEvaluation++);
+        NrPassBorrow::BeginEvaluation(evaluation);
+        try { run(); }
+        catch (...) { NrPassBorrow::EndEvaluation(); throw; }
+        const auto outcome = NrPassBorrow::EndEvaluation();
+        if (evaluation < borrowOutcomes.size()) borrowOutcomes[evaluation] = outcome;
+    };
+    const bool isInt8 = Settings::IsInt8(chosen);
+    if (NrPassRuntime::UsesHost(model)) {
+        if (borrowEvaluation >= 0 && model.backend != NrPassRuntime::Backend::Nvfp4) throw std::runtime_error(std::format("NR pass {}: pass borrowing does not work with {}. Nothing was shown.", pass + 1, isInt8 ? "an INT8 model" : "the own pass host (NR_HOST=1)"));
+        NrAmpere::UseSet(0);
         const size_t slot = std::min<size_t>(pass, hosts.size() - 1);
         auto& host = hosts[slot];
-        const unsigned hostSet = modelInt8Set ? modelInt8Set : modelFp8Set;
+        const unsigned hostSet = model.weights;
         if (!host || host->Width() != w || host->Height() != h || host->Set() != hostSet || hostModels[slot] != chosen) {
-            host.reset();
+            if (host) gpu.lifetime.Retire([previous = std::move(host)] {});
             try {
                 const wchar_t* folder = _wgetenv(L"NR_INT8_ASSETS"); // Development override.
-                const auto options = modelInt8Set ? NrHost::Int8Options(folder && *folder ? std::filesystem::path(folder) : ExecutableDirectory() / L"nvfp4" / L"int8")
+                const wchar_t* fourBitFolder = _wgetenv(L"NR_NVFP4_ASSETS");
+                auto options = model.backend == NrPassRuntime::Backend::Nvfp4 ?
+                    NrHost::FourBitOptions(fourBitFolder && *fourBitFolder ? std::filesystem::path(fourBitFolder) : ExecutableDirectory() / L"nvfp4", true) :
+                    isInt8 ? NrHost::Int8Options(folder && *folder ? std::filesystem::path(folder) : ExecutableDirectory() / L"nvfp4" / L"int8")
                                                   : NrHost::FromEnvironment(ExecutableDirectory());
-                host = std::shared_ptr<NrHost::Host>(NrHost::Host::Create(gpu.device.Get(), options, w, h, hostSet));
+                host = NrPassRuntime::CreateTrackedHost(gpu.device.Get(), model, std::move(options), w, h);
                 hostModels[slot] = chosen;
             }
             catch (const std::exception& e) { throw std::runtime_error(std::format("NR pass {}: {}", pass + 1, e.what())); }
@@ -411,7 +422,7 @@ void Processor::Evaluate(ID3D12Resource* colour, ID3D12Resource* depthGuide, ID3
         NrHost::Settings hs;
         hs.style = tuning.style; hs.intensity = tuning.intensity; hs.structure = tuning.localStructure; hs.tone = tuning.localTone;
         hs.skin = tuning.skinStructure; hs.autoMask = tuning.autoMask; hs.mvScaleX = hs.mvScaleY = runtime->motionScale;
-        try { host->Evaluate(c, colour, motionGuide, result, hs, reset); }
+        try { evaluate([&] { host->Evaluate(c, colour, motionGuide, result, hs, reset); }); }
         catch (const std::exception& e) { throw std::runtime_error(std::format("NR pass {}: {}", pass + 1, e.what())); }
         return;
     }
@@ -428,8 +439,8 @@ void Processor::Evaluate(ID3D12Resource* colour, ID3D12Resource* depthGuide, ID3
     const unsigned fp8Set = ampereSet ? 0 : modelFp8Set;
     if (fp8Set && !NrFp8::SetComplete(fp8Set))
         throw std::runtime_error(std::format("NR pass {}: the FP8 model's files (nvfp4/fp8/fp8_set{}.*) are not loaded.", pass + 1, fp8Set));
-    NrFp8::UseSet(fp8Set);
-    const auto fp8Faults = NrFp8::Faults();
+    NrFp8::UseSet(fp8Set, c);
+    const auto fp8Faults = NrFp8::Faults(), fp8Completed = NrFp8::Completed();
     const auto checkFp8 = [&] {
         if (ampereSet) {
             NrAmpere::EndEvaluation(c);
@@ -442,14 +453,10 @@ void Processor::Evaluate(ID3D12Resource* colour, ID3D12Resource* depthGuide, ID3
         NrFp8::EndEvaluation(c);
         if (NrFp8::Faults() != fp8Faults)
             throw std::runtime_error(std::format("NR pass {}: the FP8 model could not run ({}). Nothing was shown.", pass + 1, NrFp8::Problem()));
+        if (NrFp8::Completed() == fp8Completed)
+            throw std::runtime_error(std::format("NR pass {}: the FP8 model recorded no evaluation on the selected command list.", pass + 1));
     };
-    if (borrowEvaluation < 0) { runtime->Evaluate(c, colour, depthGuide, motionGuide, result, w, h, reset, pass); checkFp8(); return; }
-    const unsigned evaluation = unsigned(borrowEvaluation++);
-    NrPassBorrow::BeginEvaluation(evaluation);
-    try { runtime->Evaluate(c, colour, depthGuide, motionGuide, result, w, h, reset, pass); }
-    catch (...) { NrPassBorrow::EndEvaluation(); throw; }
-    const auto outcome = NrPassBorrow::EndEvaluation();
-    if (evaluation < borrowOutcomes.size()) borrowOutcomes[evaluation] = outcome;
+    evaluate([&] { runtime->Evaluate(c, colour, depthGuide, motionGuide, result, w, h, reset, pass); });
     checkFp8();
 }
 ID3D12Resource* Processor::RunLegacy(ID3D12Resource* input, const Settings& s, bool hdr, bool resetHistory, float desktopWhitePoint, float frameTimeMs, int processedFps, int outputFps) {
@@ -583,7 +590,14 @@ ID3D12Resource* Processor::RunLegacy(ID3D12Resource* input, const Settings& s, b
         gpu.Time(GpuStage::NR);
         std::array<NrPassBorrow::Cut, Settings::MaxPasses> cuts{}; unsigned evaluations = 0;
         const bool borrowing = !externalAnswer && !modelStage && !reuseField && BorrowCuts(s, cuts, evaluations);
-        if (borrowing) { NrPassBorrow::BeginFrame(c, cuts.data(), evaluations); borrowEvaluation = 0; borrowEvaluations = evaluations; }
+        if (borrowing) {
+            bool native = false;
+            for (unsigned pass = 0; pass < std::min(s.passes, Settings::MaxPasses); ++pass)
+                native |= NrPassRuntime::Select(runtime->RequestedModel(pass)).backend == NrPassRuntime::Backend::Nvfp4;
+            NrPassBorrow::BeginFrame(c, cuts.data(), evaluations, native);
+            borrowEvaluation = 0;
+            borrowEvaluations = evaluations;
+        }
         const BorrowFrame borrowFrame{borrowing, borrowEvaluation};
         // Pass 1 evaluates first into result; later passes evaluate the clamped previous result from next.
         // A run of r re-apply passes evaluates nothing: one dispatch into extended extends the last evaluated

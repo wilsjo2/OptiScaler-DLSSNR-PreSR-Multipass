@@ -7,8 +7,9 @@ The optional [RTX 40 MFG unlock](docs/RTX40-MFG.md) requires an explicitly enabl
 ## Requirements
 
 - A 64-bit game using an OptiScaler D3D12 path, a supported D3D11/Vulkan bridge, or native Vulkan NR.
-- An NVIDIA driver whose installed NGX core supports NR (feature 18).
-- The complete OptiScaler package and a separately supplied `nvngx_dlssnr.dll`.
+- The complete OptiScaler package and an NVIDIA driver. Keep the bundled `OptiScaler/nvfp4` folder with its model files.
+- The D3D12 pass host runs INT8 on RTX 30, 40 and 50 series and NVFP4 on RTX 50 series. Hardware validation for this release used an RTX 5090.
+- NVIDIA models and in-game FP8 students require a separately supplied `nvngx_dlssnr.dll` and driver support for NGX feature 18.
 
 NR runs inside OptiScaler. No NR helper DLL is required; remove the obsolete `nvngx.dll_dlssnr.dll` when upgrading. Keep the package's ordinary backend dependencies.
 
@@ -31,7 +32,7 @@ Get-FileHash .\nvngx_dlssnr.dll -Algorithm SHA256
 
 1. Close the game and launcher; back up the existing OptiScaler files and INI.
 2. Extract the complete package beside the **real game executable**, including backend folders.
-3. Place `nvngx_dlssnr.dll` there and run `setup_windows.bat`. It selects a proxy name and creates an uninstaller.
+3. Run `setup_windows.bat` to select a proxy name and create an uninstaller. If you plan to use NVIDIA models or in-game FP8, also place `nvngx_dlssnr.dll` beside the executable.
 4. On upgrades, replace the **proxy the game loads**: adding `OptiScaler.dll` beside an old `dxgi.dll` does not update it. Preserve your INI and other mods' loaders.
 5. Press `Insert`, enable NR and start with one pass. For native Vulkan, enable NR in the INI before launch so device/swapchain support is prepared.
 

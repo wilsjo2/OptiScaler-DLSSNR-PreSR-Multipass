@@ -383,7 +383,7 @@ auto DlssNr_Dx12::State::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
     independentActive = independent;
     for (auto& model : nr.models)
         model.Collect();
-    // (The INT8 models run on the own pass host and need no NR runtime.)
+    // INT8 and NVFP4 passes use the native host.
     if (DlssNr::Profiles::NeedsRuntime(cfg, requestedPasses) &&
         ((!NVNGXProxy::IsDx12Inited() && !NVNGXProxy::InitDx12(device)) || !DlssNr::Proxy::Context::Available()))
     {
@@ -754,11 +754,13 @@ auto DlssNr_Dx12::State::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
     // Borrowing (shared resolution, D3D12 only): one cut per network evaluation; the first never borrows.
     NrPassBorrow::Cut cuts[DlssNr::MaxPassCount] {};
     unsigned int evaluations = 0;
-    bool borrowing = false;
+    bool borrowing = false, nativeBorrowPlan = false;
     for (unsigned int pass = 0; pass < effectivePasses; ++pass)
     {
         if (DlssNr::Profiles::PassReapplies(cfg, pass))
             continue;
+        const auto preset = DlssNr::Profiles::RequestedPreset(cfg, pass);
+        nativeBorrowPlan |= preset == DlssNr::Nvfp4::ModelANvfp4 || DlssNr::Nvfp4::IsPassInOne(preset);
         const auto choice = DlssNr::Profiles::PassBorrow(cfg, pass);
         const auto cut = evaluations == 0 ? NrPassBorrow::Cut::None
                                           : NrPassBorrow::ChooseCut(choice.transformer, choice.below, choice.level);
@@ -772,7 +774,7 @@ auto DlssNr_Dx12::State::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
         NrPassBorrow::Reset();
     }
     if (borrowing)
-        NrPassBorrow::BeginFrame(cmdList, cuts, evaluations);
+        NrPassBorrow::BeginFrame(cmdList, cuts, evaluations, nativeBorrowPlan);
     unsigned int evaluation = 0;
 
     // The 4-bit kernels and pass-in-one weight sets (model choices 4..6): loaded when a pass first asks for them.
@@ -871,7 +873,7 @@ auto DlssNr_Dx12::State::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
             if (borrowing)
                 NrPassBorrow::BeginEvaluation(evaluation);
             // Which kernels and weights this pass runs; told where the evaluation ends whatever its outcome.
-            DlssNr::Nvfp4::BeginEvaluation(DlssNr::Profiles::RequestedPreset(cfg, pass));
+            DlssNr::Nvfp4::BeginEvaluation(DlssNr::Profiles::RequestedPreset(cfg, pass), cmdList);
             result = static_cast<int>(nr.models[pass].Run(cmdList, device, modelFrame, PassSettings(cfg, pass),
                                                           frame.SubmissionEpoch, &evaluated));
             DlssNr::Nvfp4::EndEvaluation(cmdList);
@@ -964,7 +966,7 @@ auto DlssNr_Dx12::State::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
             bool evaluated = false;
             modelFrame.color = modelInput;
             modelFrame.output = nr.compareAnswer;
-            DlssNr::Nvfp4::BeginEvaluation(compareModel);
+            DlssNr::Nvfp4::BeginEvaluation(compareModel, cmdList);
             const auto compared =
                 compareContext.Run(cmdList, device, modelFrame, DlssNr::Profiles::CompareSettings(cfg),
                                    frame.SubmissionEpoch, &evaluated);

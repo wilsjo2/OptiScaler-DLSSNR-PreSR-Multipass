@@ -123,29 +123,26 @@ xess_result_t hk_xessDestroyContext(xess_context_handle_t hContext)
 {
     LOG_DEBUG("hContext: {}", (size_t) hContext);
 
-    if (!_contexts.contains(hContext))
+    auto params = _nvParams.extract(hContext);
+    if (params.empty())
         return XESS_RESULT_ERROR_INVALID_CONTEXT;
 
-    if (_d3d12InitParams.contains(hContext))
+    // A context owns parameters from creation. Its NGX feature is created lazily on the first execute.
+    if (auto feature = _contexts.extract(hContext); !feature.empty() && feature.mapped())
     {
-        NVSDK_NGX_D3D12_ReleaseFeature(_contexts[hContext]);
-        _d3d12InitParams.erase(hContext);
+        if (_d3d12InitParams.contains(hContext))
+            NVSDK_NGX_D3D12_ReleaseFeature(feature.mapped());
+        else if (_d3d11InitParams.contains(hContext))
+            NVSDK_NGX_D3D11_ReleaseFeature(feature.mapped());
+        else if (_vkInitParams.contains(hContext))
+            NVSDK_NGX_VULKAN_ReleaseFeature(feature.mapped());
     }
-
-    if (_d3d11InitParams.contains(hContext))
-    {
-        NVSDK_NGX_D3D11_ReleaseFeature(_contexts[hContext]);
-        _d3d11InitParams.erase(hContext);
-    }
-
-    if (_vkInitParams.contains(hContext))
-    {
-        NVSDK_NGX_VULKAN_ReleaseFeature(_contexts[hContext]);
-        _vkInitParams.erase(hContext);
-    }
-
-    _contexts.erase(hContext);
-    _nvParams.erase(hContext);
+    params.mapped().destroy(params.mapped().value);
+    _d3d12InitParams.erase(hContext);
+    _d3d11InitParams.erase(hContext);
+    _vkInitParams.erase(hContext);
+    _motionScales.erase(hContext);
+    _jitterScales.erase(hContext);
 
     return XESS_RESULT_SUCCESS;
 }
@@ -153,6 +150,9 @@ xess_result_t hk_xessDestroyContext(xess_context_handle_t hContext)
 xess_result_t hk_xessSetVelocityScale(xess_context_handle_t hContext, float x, float y)
 {
     LOG_DEBUG("hContext: {}, x: {}, y: {}", (size_t) hContext, x, y);
+
+    if (!_nvParams.contains(hContext))
+        return XESS_RESULT_ERROR_INVALID_CONTEXT;
 
     _motionScales[hContext] = { x, y };
 
@@ -173,7 +173,7 @@ xess_result_t hk_xessGetExposureMultiplier(xess_context_handle_t hContext, float
     if (!_nvParams.contains(hContext))
         return XESS_RESULT_ERROR_INVALID_CONTEXT;
 
-    if (_nvParams[hContext]->Get(NVSDK_NGX_Parameter_DLSS_Exposure_Scale, pScale) == NVSDK_NGX_Result_Success)
+    if (_nvParams[hContext].value->Get(NVSDK_NGX_Parameter_DLSS_Exposure_Scale, pScale) == NVSDK_NGX_Result_Success)
         return XESS_RESULT_SUCCESS;
 
     return XESS_RESULT_ERROR_UNKNOWN;
@@ -396,6 +396,9 @@ xess_result_t hk_xessSetJitterScale(xess_context_handle_t hContext, float x, flo
 {
     LOG_DEBUG("x: {}, y: {}", x, y);
 
+    if (!_nvParams.contains(hContext))
+        return XESS_RESULT_ERROR_INVALID_CONTEXT;
+
     _jitterScales[hContext] = { x, y };
 
     return XESS_RESULT_SUCCESS;
@@ -408,7 +411,7 @@ xess_result_t hk_xessSetExposureMultiplier(xess_context_handle_t hContext, float
     if (!_nvParams.contains(hContext))
         return XESS_RESULT_ERROR_INVALID_CONTEXT;
 
-    _nvParams[hContext]->Set(NVSDK_NGX_Parameter_DLSS_Exposure_Scale, scale);
+    _nvParams[hContext].value->Set(NVSDK_NGX_Parameter_DLSS_Exposure_Scale, scale);
 
     return XESS_RESULT_SUCCESS;
 }

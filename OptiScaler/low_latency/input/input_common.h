@@ -46,7 +46,7 @@ struct TimingData
 
 class InputCommon
 {
-    inline static std::atomic<std::shared_ptr<LowLatencyTech>> currently_active_tech;
+    static std::atomic<std::shared_ptr<LowLatencyTech>> currently_active_tech;
     inline static std::mutex create_tech_mutex {};
 
     inline static FrameReport frame_reports[FRAME_REPORTS_BUFFER_SIZE] {};

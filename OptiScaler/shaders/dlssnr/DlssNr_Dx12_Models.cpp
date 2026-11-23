@@ -23,10 +23,7 @@ bool DlssNr_Dx12::State::PrepareRunModels(ID3D12GraphicsCommandList* cmdList, ID
     const bool placementChanged =
         nr.width != 0 && (nr.beforeUpscale != frame.BeforeUpscale || nr.rayReconstruction != frame.RayReconstruction);
 
-    // Tuning changes require rebuilding the feature, but not its scratch textures.
-    const bool tuningChanged = !TuningMatchesFeature(cfg, requestedPasses);
-
-    if (resolutionChanged || placementChanged || (nr.models[0].HasFeature() && tuningChanged))
+    if (resolutionChanged || placementChanged)
     {
         // Parked rather than released: with frame generation the GPU can still be several frames
         // deep in work that references all of it.
@@ -36,23 +33,37 @@ bool DlssNr_Dx12::State::PrepareRunModels(ID3D12GraphicsCommandList* cmdList, ID
         nr.reset = true;
         modelRunning = false;
 
-        // Resolution and seam changes invalidate the scratch state. Tuning does not, and throwing
-        // resources away for it would mean a reallocation every time a slider moves.
-        if (resolutionChanged || placementChanged)
+        ParkNrResource(nr.output);
+        ParkNrResource(nr.passScratch);
+        ParkNrResource(nr.passClamp);
+        ParkNrResource(nr.colorCopy);
+        ParkNrResource(nr.hdrCopy);
+        ParkNrResource(nr.colorSmall);
+        ParkNrResource(nr.depthSmall);
+        ParkNrResource(nr.motionSmall);
+        ParkNrResource(nr.outputNative);
+        ParkNrResource(nr.activeColor);
+        ParkNrResource(nr.compareAnswer);
+        ParkNrResource(nr.compareColor);
+        nr.passScratchFailed = false;
+    }
+    else
+    {
+        // Check every active pass before preparing any of them. Downstream histories also depend on the edit.
+        bool changed = false;
+        for (unsigned pass = 0; pass < requestedPasses; ++pass)
+            if (!DlssNr::Profiles::PassReapplies(cfg, pass) && nr.models[pass].UpdateTuning(PassSettings(cfg, pass)))
+                changed = true;
+        if (changed)
         {
-            ParkNrResource(nr.output);
-            ParkNrResource(nr.passScratch);
-            ParkNrResource(nr.passClamp);
-            ParkNrResource(nr.colorCopy);
-            ParkNrResource(nr.hdrCopy);
-            ParkNrResource(nr.colorSmall);
-            ParkNrResource(nr.depthSmall);
-            ParkNrResource(nr.motionSmall);
-            ParkNrResource(nr.outputNative);
-            ParkNrResource(nr.activeColor);
-            ParkNrResource(nr.compareAnswer);
-            ParkNrResource(nr.compareColor);
-            nr.passScratchFailed = false;
+            for (unsigned pass = 0; pass < requestedPasses; ++pass)
+                if (nr.passCreateFailed[pass])
+                {
+                    nr.models[pass].RetryAfterFailure();
+                    nr.passCreateFailed[pass] = false;
+                }
+            nr.reset = true;
+            modelRunning = false;
         }
     }
 
@@ -198,7 +209,6 @@ bool DlssNr_Dx12::State::PrepareRunModels(ID3D12GraphicsCommandList* cmdList, ID
             }
             return false;
         }
-        nr.builtSettings[pass] = PassSettings(cfg, pass);
         if (!hadFeature && nr.models[pass].HasFeature())
             NrPassBorrow::Reset(); // A new feature has new kernels and tensors; record the template again.
         if (!ready)
@@ -253,20 +263,4 @@ auto DlssNr_Dx12::State::NgxResultName(unsigned int r) -> const char*
     default:
         return "unknown";
     }
-}
-
-auto DlssNr_Dx12::State::TuningMatchesFeature(const Config& cfg, unsigned int requestedPasses) -> bool
-{
-    for (unsigned int pass = 0; pass < requestedPasses; ++pass)
-    {
-        // A profile cannot be stale until its feature exists. This lets a user prepare pass 2 or 3
-        // while running fewer layers without needlessly rebuilding pass 1.
-        if (!nr.models[pass].HasFeature() || DlssNr::Profiles::PassReapplies(cfg, pass))
-            continue;
-
-        if (nr.builtSettings[pass] != PassSettings(cfg, pass))
-            return false;
-    }
-
-    return true;
 }

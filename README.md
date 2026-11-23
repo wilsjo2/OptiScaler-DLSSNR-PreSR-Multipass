@@ -47,8 +47,9 @@ The [Display Filter source and build instructions](standalone/NrCapture/README.m
 The [built-in RTX 40 MFG unlock](docs/RTX40-MFG.md) is an optional build feature, excluded by default and separate from the upstream NR proposal.
 
 Experimental NR adds pre/post-upscale and finished-picture processing, multipass tuning,
-model resolution, HDR/exposure controls and separate edit upscaling. It defaults off and
-uses a separately supplied `nvngx_dlssnr.dll` through the NVIDIA driver; no NR helper DLL.
+model resolution, HDR/exposure controls and separate edit upscaling. NR defaults off. On D3D12,
+the bundled INT8 and NVFP4 models run on the project's pass host. NVIDIA models and the in-game
+FP8 students require a separately supplied `nvngx_dlssnr.dll`.
 
 Optional [peripheral spatial compression](docs/NR-SPATIAL-COMPRESSION.md) reduces NR work near the screen edges while retaining more centre detail. It supports DX12 and native Vulkan and combines with Model resolution.
 

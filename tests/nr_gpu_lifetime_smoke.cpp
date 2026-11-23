@@ -11,6 +11,7 @@
 #include <vector>
 #include <Util.h>
 #include "../OptiScaler/dlssnr/DlssNr_GpuLifetime.h"
+#include "../standalone/NrCapture/nvfp4/NrWeightUpload.h"
 using Microsoft::WRL::ComPtr;
 static void check(HRESULT hr) { if (FAILED(hr)) throw std::runtime_error("D3D12 call failed"); }
 static void expect(bool yes, const char* why) { if (!yes) throw std::runtime_error(why); }
@@ -46,6 +47,52 @@ try
         expect(result == WAIT_OBJECT_0, "GPU did not drain");
     };
     auto wait = [&] { waitOn(queue.Get()); };
+    // Both native INT8 (COMMON) and the NVFP4/FP8 layers (UAV) read weights uploaded on a separate queue.
+    {
+        const auto buffer = [&](D3D12_HEAP_TYPE heapType, D3D12_RESOURCE_STATES state) {
+            D3D12_HEAP_PROPERTIES heap {};
+            heap.Type = heapType;
+            D3D12_RESOURCE_DESC resource {};
+            resource.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            resource.Width = 4;
+            resource.Height = 1;
+            resource.DepthOrArraySize = 1;
+            resource.MipLevels = 1;
+            resource.SampleDesc.Count = 1;
+            resource.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            if (heapType == D3D12_HEAP_TYPE_DEFAULT) resource.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            ComPtr<ID3D12Resource> result;
+            check(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &resource, state, nullptr, IID_PPV_ARGS(&result)));
+            return result;
+        };
+        auto source = buffer(D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+        auto readback = buffer(D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+        unsigned marker = 0;
+        for (auto state : { D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS }) {
+            auto target = buffer(D3D12_HEAP_TYPE_DEFAULT, state);
+            void* data = nullptr;
+            check(source->Map(0, nullptr, &data));
+            *static_cast<unsigned*>(data) = ++marker;
+            source->Unmap(0, nullptr);
+            NrWeightUpload::Copy(device.Get(), target.Get(), source.Get(), sizeof(marker), state);
+            ComPtr<ID3D12GraphicsCommandList> copy;
+            check(device->CreateCommandList(0, desc.Type, allocator.Get(), nullptr, IID_PPV_ARGS(&copy)));
+            if (state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+                D3D12_RESOURCE_BARRIER barrier {};
+                barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                barrier.Transition = { target.Get(), 0, state, D3D12_RESOURCE_STATE_COPY_SOURCE };
+                copy->ResourceBarrier(1, &barrier);
+            }
+            copy->CopyBufferRegion(readback.Get(), 0, target.Get(), 0, sizeof(marker));
+            check(copy->Close());
+            ID3D12CommandList* copies[] { copy.Get() };
+            queue->ExecuteCommandLists(1, copies);
+            wait();
+            check(readback->Map(0, nullptr, &data));
+            expect(*static_cast<unsigned*>(data) == marker, "NR weight upload returned before the copy completed");
+            readback->Unmap(0, nullptr);
+        }
+    }
     // Readiness must survive collection, but never accept discarded or unsubmitted work; and once submission
     // notifications are known to arrive, a recording that closed without one is reported as discarded.
     {

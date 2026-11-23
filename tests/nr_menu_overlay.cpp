@@ -6,6 +6,9 @@
 #include <cstdio>
 #include <stdexcept>
 #include <vector>
+#include "../OptiScaler/dlssnr/NrNvfp4.h"
+
+unsigned DlssNr::Nvfp4::ComparisonShown() { return 0; }
 
 template <typename T> struct Setting
 {
@@ -16,7 +19,7 @@ struct Config
 {
     Setting<bool> DisableSplash { true }, ShowFps, DlssNrEnabled { true }, DlssNrSpatialCompression { true };
     Setting<bool> DlssNrSpatialShowCenter, DlssNrSpatialShowWork, DlssNrCompareTags { true }, DlssNrCompareSwap;
-    Setting<uint32_t> DlssNrCompare;
+    Setting<uint32_t> DlssNrCompare, DlssNrPreset, DlssNrDebugView;
     Setting<float> DlssNrWorkingScale { 1 }, DlssNrCompareSplit { .5f }, DlssNrTagScale { 1 };
     static Config* Instance()
     {

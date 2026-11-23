@@ -71,7 +71,8 @@ void* WrapInterface(uint32_t id, void* original);
 // One frame's chain of NGX evaluations, all recorded on `list` by the calling thread.
 // cuts[i] is the cut for the i-th network evaluation of the frame. Passes that re-apply instead of evaluating are not
 // counted. cuts[0] must be Cut::None. evaluations may be 1 (nothing to borrow; the module stays transparent).
-void BeginFrame(ID3D12GraphicsCommandList* list, const Cut* cuts, unsigned evaluations);
+void BeginFrame(ID3D12GraphicsCommandList* list, const Cut* cuts, unsigned evaluations,
+                bool includesNativePlan = false);
 void BeginEvaluation(unsigned evaluation); // immediately before that evaluation's NGX evaluate call
 enum class Outcome : uint8_t
 {

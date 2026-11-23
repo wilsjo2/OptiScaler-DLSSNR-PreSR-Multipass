@@ -1,10 +1,11 @@
 // amp_common.cuh: shared helpers of the Ampere (sm_86) FP16 replacement kernels of the DLSS-NR FP8 network (amp_*.cu).
 //
-// Every helper here uses only instructions that exist on sm_86 (RTX 30). Include with
+// By default the helpers use only instructions available on sm_86. The NVFP4 host builds its FP8 layers
+// with NR_NATIVE_FP8=1 on sm_120 to use hardware E4M3 conversion and matrix multiplication. Include with
 //     #include "amp_common.cuh"
 // and compile with --include-path=<nvfp4/kernels> (amp_legal.py and amp_common_test.py pass it), --fmad=false.
 // The same source is built for sm_86 (the legality proof and the RTX 30 build) and for sm_120 (not sm_120a) to run on
-// the lab's RTX 5090.
+// RTX 50 hardware.
 //
 // Phase A numeric target: reproduce NVIDIA's FP8 kernels' arithmetic as closely as Ampere allows.
 //   * e4m3 -> f16 decode is exact for every code, in integer code plus one f16 multiply by 2^8 (no .ftz, so e4m3
@@ -36,6 +37,10 @@
 //     m16n8k16 fragments apply and no relabelling is needed; the relabelling matters only when e4m3 fragments that
 //     were loaded in NVIDIA's k32 layout are decoded in registers.
 #pragma once
+
+#ifndef NR_NATIVE_FP8
+#define NR_NATIVE_FP8 0
+#endif
 
 typedef unsigned int u32;
 typedef unsigned long long u64;
@@ -95,21 +100,38 @@ AMP_INLINE u32 amp_e4m3x2_to_h2_scaled(u32 pair)
     return (y & 0x80008000u) | ((y >> 1) & 0x3F803F80u);
 }
 // two codes -> float16 pair, exact for every code except the NaN codes (they give +-480)
-AMP_INLINE u32 amp_e4m3x2_to_h2_finite(u32 pair) { return amp_h2_mul(amp_e4m3x2_to_h2_scaled(pair), AMP_H2_256); }
+AMP_INLINE u32 amp_e4m3x2_to_h2_finite(u32 pair) {
+#if NR_NATIVE_FP8
+    u32 h;
+    asm("cvt.rn.f16x2.e4m3x2 %0, %1;" : "=r"(h) : "h"(u16(pair)));
+    return h;
+#else
+ return amp_h2_mul(amp_e4m3x2_to_h2_scaled(pair), AMP_H2_256);
+#endif
+}
 // two codes -> float16 pair, identical to cvt.rn.f16x2.e4m3x2 for all 65536 code pairs
 AMP_INLINE u32 amp_e4m3x2_to_h2(u32 pair)
 {
+#if NR_NATIVE_FP8
+    return amp_e4m3x2_to_h2_finite(pair);
+#else
     const u32 y = amp_prmt(pair, 0u, 0x1404u);
     const u32 h = amp_h2_mul((y & 0x80008000u) | ((y >> 1) & 0x3F803F80u), AMP_H2_256);
     const u32 n = (((y & 0x7F007F00u) + 0x01000100u) >> 15) & 0x00010001u;   // 1 in a half whose code is 0x7F / 0xFF
     const u32 nan = n * 0xFFFFu;
     return (h & ~nan) | (n * AMP_NAN_H);
+#endif
 }
 // four codes (byte 0 first) -> two float16 pairs: lo = bytes 0, 1; hi = bytes 2, 3
 AMP_INLINE void amp_e4m3x4_to_h2x2_finite(u32 w, u32& lo, u32& hi)
 {
+#if NR_NATIVE_FP8
+    lo = amp_e4m3x2_to_h2_finite(w);
+    hi = amp_e4m3x2_to_h2_finite(w >> 16);
+#else
     lo = amp_h2_mul((amp_prmt(w, 0u, 0x1404u) & 0x80008000u) | ((amp_prmt(w, 0u, 0x1404u) >> 1) & 0x3F803F80u), AMP_H2_256);
     hi = amp_h2_mul((amp_prmt(w, 0u, 0x3424u) & 0x80008000u) | ((amp_prmt(w, 0u, 0x3424u) >> 1) & 0x3F803F80u), AMP_H2_256);
+#endif
 }
 AMP_INLINE void amp_e4m3x4_to_h2x2(u32 w, u32& lo, u32& hi)
 {
@@ -134,6 +156,11 @@ AMP_INLINE void amp_e4m3x4_to_f32(u32 w, float* v)
 // float16 pair -> two codes in the low 16 bits (low half -> byte 0), as cvt.rn.satfinite.e4m3x2.f16x2.
 AMP_INLINE u32 amp_h2_to_e4m3x2(u32 h)
 {
+#if NR_NATIVE_FP8
+    u16 codes;
+    asm("cvt.rn.satfinite.e4m3x2.f16x2 %0, %1;" : "=h"(codes) : "r"(h));
+    return codes;
+#else
     const u32 mag = h & 0x7FFF7FFFu;
     // |x| >= 464 (and inf) saturates to 448, and 448 <= |x| < 464 rounds to 448: clamping |x| to 448 first is the same.
     // min.f16x2 returns the other operand for a NaN half; NaN halves are fixed up below.
@@ -150,6 +177,7 @@ AMP_INLINE u32 amp_h2_to_e4m3x2(u32 h)
     code |= nan * AMP_NAN_E4M3;
     code |= (h >> 8) & 0x00800080u & ~(nan * 0x80u);                  // sign (none on NaN)
     return amp_prmt(code, 0u, 0x4420u);                               // bytes 0 and 2 -> bytes 0 and 1
+#endif
 }
 // ---- faster forms (BRIEF-11), sm_86 min/max.xorsign.abs -------------------------------------------------------------
 // amp_h2_q8: the f16 pair of the e4m3 rounding of an f16 pair (= the finite decode of amp_h2_to_e4m3x2), 6 operations:
@@ -192,7 +220,14 @@ AMP_INLINE u32 amp_h2_to_e4m3x2_fast(u32 h)
 // bytes 0 and 2 of a (codes of pair a) and of b -> one word: a.byte0, a.byte2, b.byte0, b.byte2
 AMP_INLINE u32 amp_e4m3_pack(u32 a, u32 b) { return amp_prmt(a, b, 0x6420u); }
 // two f16 pairs -> four codes (lo pair -> bytes 0, 1), the fast form of amp_h2x2_to_e4m3x4
-AMP_INLINE u32 amp_h2x2_to_e4m3x4_fast(u32 lo, u32 hi) { return amp_e4m3_pack(amp_h2_to_e4m3x2_fast(lo), amp_h2_to_e4m3x2_fast(hi)); }
+AMP_INLINE u32 amp_h2x2_to_e4m3x4_fast(u32 lo, u32 hi)
+{
+#if NR_NATIVE_FP8
+    return amp_join(u16(amp_h2_to_e4m3x2(lo)), u16(amp_h2_to_e4m3x2(hi)));
+#else
+    return amp_e4m3_pack(amp_h2_to_e4m3x2_fast(lo), amp_h2_to_e4m3x2_fast(hi));
+#endif
+}
 
 // float32 -> one code (in the low 8 bits), rounded once, as cvt.rn.satfinite.e4m3x2.f32
 AMP_INLINE u32 amp_f32_to_e4m3(float x)
@@ -212,7 +247,15 @@ AMP_INLINE u32 amp_f32_to_e4m3(float x)
     return code | ((u >> 24) & 0x80u);
 }
 // two floats -> two codes (lo -> byte 0), as  cvt.rn.satfinite.e4m3x2.f32 d, hi, lo
-AMP_INLINE u32 amp_f32x2_to_e4m3x2(float lo, float hi) { return amp_f32_to_e4m3(lo) | (amp_f32_to_e4m3(hi) << 8); }
+AMP_INLINE u32 amp_f32x2_to_e4m3x2(float lo, float hi) {
+#if NR_NATIVE_FP8
+    u16 codes;
+    asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(codes) : "f"(hi), "f"(lo));
+    return codes;
+#else
+ return amp_f32_to_e4m3(lo) | (amp_f32_to_e4m3(hi) << 8);
+#endif
+}
 // four floats -> four codes (a -> byte 0), each rounded once
 AMP_INLINE u32 amp_f32x4_to_e4m3x4(float a, float b, float c, float d)
 {

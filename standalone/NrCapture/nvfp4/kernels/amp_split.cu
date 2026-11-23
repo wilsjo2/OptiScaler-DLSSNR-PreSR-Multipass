@@ -61,7 +61,7 @@
 #include "amp_common.cuh"
 
 #ifndef AMP_HW_REF
-#define AMP_HW_REF 0
+#define AMP_HW_REF NR_NATIVE_FP8
 #endif
 #ifndef AMP_F32ACC
 #define AMP_F32ACC 0

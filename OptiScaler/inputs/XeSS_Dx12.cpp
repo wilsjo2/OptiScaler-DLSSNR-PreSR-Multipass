@@ -20,7 +20,7 @@ static bool CreateDLSSContext(xess_context_handle_t handle, ID3D12GraphicsComman
         return false;
 
     NVSDK_NGX_Handle* nvHandle = nullptr;
-    auto params = _nvParams[handle];
+    auto params = _nvParams[handle].value;
     auto initParams = &_d3d12InitParams[handle];
 
     UINT initFlags = 0;
@@ -123,7 +123,7 @@ xess_result_t hk_xessD3D12CreateContext(ID3D12Device* pDevice, xess_context_hand
     if (NVSDK_NGX_D3D12_GetCapabilityParameters(&params) != NVSDK_NGX_Result_Success)
         return XESS_RESULT_ERROR_INVALID_ARGUMENT;
 
-    _nvParams[*phContext] = params;
+    _nvParams[*phContext] = { params, NVSDK_NGX_D3D12_DestroyParameters };
     _motionScales[*phContext] = { 1.0, 1.0 };
 
     return XESS_RESULT_SUCCESS;
@@ -174,7 +174,7 @@ xess_result_t hk_xessD3D12Execute(xess_context_handle_t hContext, ID3D12Graphics
     if (!_contexts.contains(hContext) && !CreateDLSSContext(hContext, pCommandList, pExecParams))
         return XESS_RESULT_ERROR_UNKNOWN;
 
-    NVSDK_NGX_Parameter* params = _nvParams[hContext];
+    NVSDK_NGX_Parameter* params = _nvParams[hContext].value;
     NVSDK_NGX_Handle* handle = _contexts[hContext];
     xess_d3d12_init_params_t* initParams = &_d3d12InitParams[hContext];
 
