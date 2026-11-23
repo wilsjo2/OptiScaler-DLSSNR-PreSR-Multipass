@@ -31,6 +31,7 @@ enum class FGNvngxReplacement
 unsigned calls0, calls1, fgCalls, liveNr, destroyedNr, liveAtShutdown, parentDestructions;
 bool ready = true;
 int stopResult = 0;
+bool suppliedShutdownState = false;
 struct FG
 {
     void Deactivate() {}
@@ -56,18 +57,21 @@ int RealShutdown()
     liveAtShutdown = liveNr;
     return stopResult;
 }
-int RealShutdown1(ID3D12Device*)
+int RealShutdown1(ID3D12Device*, unsigned int* shutdownState)
 {
     ++calls1;
+    suppliedShutdownState = shutdownState && *shutdownState == 0;
+    if (shutdownState)
+        *shutdownState = 1;
     liveAtShutdown = liveNr;
     return stopResult;
 }
 using PFN_D3D12_Shutdown = int (*)(void);
-using PFN_D3D12_Shutdown1 = int (*)(ID3D12Device*);
+using PFN_D3D12_DriverShutdown1 = int (*)(ID3D12Device*, unsigned int*);
 struct NgxModule
 {
     PFN_D3D12_Shutdown D3D12_Shutdown;
-    PFN_D3D12_Shutdown1 D3D12_Shutdown1;
+    PFN_D3D12_DriverShutdown1 D3D12_Shutdown1;
 };
 struct NVNGXProxy
 {
@@ -187,6 +191,7 @@ void reset()
     unloaded = logged = closedLogger = 0;
     ready = true;
     stopResult = 0;
+    suppliedShutdownState = false;
     shutdown = false;
     State::Instance() = {};
     State::Instance().modulesToFree.push_back(reinterpret_cast<void*>(4));
@@ -210,10 +215,12 @@ int main()
     reset();
     NVSDK_NGX_D3D12_Shutdown1(&device);
     expect(calls1 == 1 && calls0 == 0, "device shutdown called both exports");
+    expect(suppliedShutdownState, "private shutdown export did not receive initialized output storage");
     reset();
     NVNGXProxy::_module.D3D12_Shutdown = nullptr;
     NVSDK_NGX_D3D12_Shutdown();
     expect(calls1 == 1 && calls0 == 0, "single-export runtime fallback failed");
+    expect(suppliedShutdownState, "shutdown fallback did not receive initialized output storage");
     reset();
     NVNGXProxy::_module.D3D12_Shutdown1 = nullptr;
     NVSDK_NGX_D3D12_Shutdown1(&device);

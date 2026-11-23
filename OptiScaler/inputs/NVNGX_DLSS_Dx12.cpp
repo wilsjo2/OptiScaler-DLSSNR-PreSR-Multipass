@@ -417,13 +417,14 @@ static NVSDK_NGX_Result ShutdownDx12(ID3D12Device* requestedDevice)
         LOG_INFO("NGX D3D12 shutdown: NR drained; stopping the NVIDIA runtime");
         const auto stop = NVNGXProxy::D3D12_Shutdown();
         const auto stopDevice = NVNGXProxy::D3D12_Shutdown1();
+        unsigned int shutdownState = 0;
         // Choose exactly one entry point, including runtimes exposing only one variant.
         if (requestedDevice && stopDevice)
-            result = stopDevice(requestedDevice);
+            result = stopDevice(requestedDevice, &shutdownState);
         else if (stop)
             result = stop();
         else if (stopDevice)
-            result = stopDevice(requestedDevice);
+            result = stopDevice(requestedDevice, &shutdownState);
         else
             result = NVSDK_NGX_Result_Fail;
         if (NVSDK_NGX_FAILED(result))

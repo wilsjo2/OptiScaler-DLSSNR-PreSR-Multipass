@@ -226,7 +226,8 @@ typedef NVSDK_NGX_Result (*PFN_D3D11_Init_Ext)(unsigned long long InApplicationI
                                                ID3D11Device* InDevice, NVSDK_NGX_Version InSDKVersion,
                                                const NVSDK_NGX_FeatureCommonInfo* InFeatureInfo);
 typedef NVSDK_NGX_Result (*PFN_D3D11_Shutdown)(void);
-typedef NVSDK_NGX_Result (*PFN_D3D11_Shutdown1)(ID3D11Device* InDevice);
+// The private NGX driver export takes an output word that the public SDK wrapper supplies.
+typedef NVSDK_NGX_Result (*PFN_D3D11_DriverShutdown1)(ID3D11Device* InDevice, unsigned int* OutShutdownState);
 typedef NVSDK_NGX_Result (*PFN_D3D11_GetParameters)(NVSDK_NGX_Parameter** OutParameters);
 typedef NVSDK_NGX_Result (*PFN_D3D11_AllocateParameters)(NVSDK_NGX_Parameter** OutParameters);
 typedef NVSDK_NGX_Result (*PFN_D3D11_GetCapabilityParameters)(NVSDK_NGX_Parameter** OutParameters);
@@ -256,6 +257,7 @@ typedef NVSDK_NGX_Result (*PFN_D3D12_Init_Ext)(unsigned long long InApplicationI
                                                ID3D12Device* InDevice, NVSDK_NGX_Version InSDKVersion,
                                                const NVSDK_NGX_FeatureCommonInfo* InFeatureInfo);
 typedef NVSDK_NGX_Result (*PFN_D3D12_Shutdown)(void);
+typedef NVSDK_NGX_Result (*PFN_D3D12_DriverShutdown1)(ID3D12Device* InDevice, unsigned int* OutShutdownState);
 typedef NVSDK_NGX_Result (*PFN_D3D12_Shutdown1)(ID3D12Device* InDevice);
 typedef NVSDK_NGX_Result (*PFN_D3D12_GetParameters)(NVSDK_NGX_Parameter** OutParameters);
 typedef NVSDK_NGX_Result (*PFN_D3D12_AllocateParameters)(NVSDK_NGX_Parameter** OutParameters);
@@ -310,6 +312,7 @@ typedef NVSDK_NGX_Result (*PFN_VULKAN_Init_ProjectID)(const char* InProjectId, N
                                                       NVSDK_NGX_Version InSDKVersion,
                                                       const NVSDK_NGX_FeatureCommonInfo* InFeatureInfo);
 typedef NVSDK_NGX_Result (*PFN_VULKAN_Shutdown)(void);
+typedef NVSDK_NGX_Result (*PFN_VULKAN_DriverShutdown1)(VkDevice InDevice, unsigned int* OutShutdownState);
 typedef NVSDK_NGX_Result (*PFN_VULKAN_Shutdown1)(VkDevice InDevice);
 typedef NVSDK_NGX_Result (*PFN_VULKAN_GetParameters)(NVSDK_NGX_Parameter** OutParameters);
 typedef NVSDK_NGX_Result (*PFN_VULKAN_AllocateParameters)(NVSDK_NGX_Parameter** OutParameters);
@@ -360,7 +363,7 @@ struct NvngxModule
     PFN_D3D11_Init_ProjectID D3D11_Init_ProjectID = nullptr;
     PFN_D3D11_Init_Ext D3D11_Init_Ext = nullptr;
     PFN_D3D11_Shutdown D3D11_Shutdown = nullptr;
-    PFN_D3D11_Shutdown1 D3D11_Shutdown1 = nullptr;
+    PFN_D3D11_DriverShutdown1 D3D11_Shutdown1 = nullptr;
     PFN_D3D11_GetParameters D3D11_GetParameters = nullptr;
     PFN_D3D11_AllocateParameters D3D11_AllocateParameters = nullptr;
     PFN_D3D11_GetCapabilityParameters D3D11_GetCapabilityParameters = nullptr;
@@ -375,7 +378,7 @@ struct NvngxModule
     PFN_D3D12_Init_ProjectID D3D12_Init_ProjectID = nullptr;
     PFN_D3D12_Init_Ext D3D12_Init_Ext = nullptr;
     PFN_D3D12_Shutdown D3D12_Shutdown = nullptr;
-    PFN_D3D12_Shutdown1 D3D12_Shutdown1 = nullptr;
+    PFN_D3D12_DriverShutdown1 D3D12_Shutdown1 = nullptr;
     PFN_D3D12_GetParameters D3D12_GetParameters = nullptr;
     PFN_D3D12_AllocateParameters D3D12_AllocateParameters = nullptr;
     PFN_D3D12_GetCapabilityParameters D3D12_GetCapabilityParameters = nullptr;
@@ -393,7 +396,7 @@ struct NvngxModule
     PFN_VULKAN_Init_Ext2 VULKAN_Init_Ext2 = nullptr;
     PFN_VULKAN_Init_ProjectID_Ext VULKAN_Init_ProjectID_Ext = nullptr;
     PFN_VULKAN_Shutdown VULKAN_Shutdown = nullptr;
-    PFN_VULKAN_Shutdown1 VULKAN_Shutdown1 = nullptr;
+    PFN_VULKAN_DriverShutdown1 VULKAN_Shutdown1 = nullptr;
     PFN_VULKAN_GetParameters VULKAN_GetParameters = nullptr;
     PFN_VULKAN_AllocateParameters VULKAN_AllocateParameters = nullptr;
     PFN_VULKAN_GetCapabilityParameters VULKAN_GetCapabilityParameters = nullptr;
@@ -521,8 +524,8 @@ class NVNGXProxy
                 (PFN_D3D11_Init_Ext) KernelBaseProxy::GetProcAddress_()(_module.dll, "NVSDK_NGX_D3D11_Init_Ext");
             _module.D3D11_Shutdown =
                 (PFN_D3D11_Shutdown) KernelBaseProxy::GetProcAddress_()(_module.dll, "NVSDK_NGX_D3D11_Shutdown");
-            _module.D3D11_Shutdown1 =
-                (PFN_D3D11_Shutdown1) KernelBaseProxy::GetProcAddress_()(_module.dll, "NVSDK_NGX_D3D11_Shutdown1");
+            _module.D3D11_Shutdown1 = (PFN_D3D11_DriverShutdown1) KernelBaseProxy::GetProcAddress_()(
+                _module.dll, "NVSDK_NGX_D3D11_Shutdown1");
             _module.D3D11_GetParameters = (PFN_D3D11_GetParameters) KernelBaseProxy::GetProcAddress_()(
                 _module.dll, "NVSDK_NGX_D3D11_GetParameters");
             _module.D3D11_AllocateParameters = (PFN_D3D11_AllocateParameters) KernelBaseProxy::GetProcAddress_()(
@@ -552,8 +555,8 @@ class NVNGXProxy
                 (PFN_D3D12_Init_Ext) KernelBaseProxy::GetProcAddress_()(_module.dll, "NVSDK_NGX_D3D12_Init_Ext");
             _module.D3D12_Shutdown =
                 (PFN_D3D12_Shutdown) KernelBaseProxy::GetProcAddress_()(_module.dll, "NVSDK_NGX_D3D12_Shutdown");
-            _module.D3D12_Shutdown1 =
-                (PFN_D3D12_Shutdown1) KernelBaseProxy::GetProcAddress_()(_module.dll, "NVSDK_NGX_D3D12_Shutdown1");
+            _module.D3D12_Shutdown1 = (PFN_D3D12_DriverShutdown1) KernelBaseProxy::GetProcAddress_()(
+                _module.dll, "NVSDK_NGX_D3D12_Shutdown1");
             _module.D3D12_GetParameters = (PFN_D3D12_GetParameters) KernelBaseProxy::GetProcAddress_()(
                 _module.dll, "NVSDK_NGX_D3D12_GetParameters");
             _module.D3D12_AllocateParameters = (PFN_D3D12_AllocateParameters) KernelBaseProxy::GetProcAddress_()(
@@ -589,8 +592,8 @@ class NVNGXProxy
                 _module.dll, "NVSDK_NGX_VULKAN_Init_ProjectID");
             _module.VULKAN_Shutdown =
                 (PFN_VULKAN_Shutdown) KernelBaseProxy::GetProcAddress_()(_module.dll, "NVSDK_NGX_VULKAN_Shutdown");
-            _module.VULKAN_Shutdown1 =
-                (PFN_VULKAN_Shutdown1) KernelBaseProxy::GetProcAddress_()(_module.dll, "NVSDK_NGX_VULKAN_Shutdown1");
+            _module.VULKAN_Shutdown1 = (PFN_VULKAN_DriverShutdown1) KernelBaseProxy::GetProcAddress_()(
+                _module.dll, "NVSDK_NGX_VULKAN_Shutdown1");
             _module.VULKAN_GetParameters = (PFN_VULKAN_GetParameters) KernelBaseProxy::GetProcAddress_()(
                 _module.dll, "NVSDK_NGX_VULKAN_GetParameters");
             _module.VULKAN_AllocateParameters = (PFN_VULKAN_AllocateParameters) KernelBaseProxy::GetProcAddress_()(
@@ -764,7 +767,7 @@ class NVNGXProxy
         return _module.D3D11_Shutdown;
     }
 
-    static PFN_D3D11_Shutdown1 D3D11_Shutdown1()
+    static PFN_D3D11_DriverShutdown1 D3D11_Shutdown1()
     {
         if (!_dx11Inited)
             return nullptr;
@@ -874,7 +877,7 @@ class NVNGXProxy
         return _module.D3D12_Shutdown;
     }
 
-    static PFN_D3D12_Shutdown1 D3D12_Shutdown1()
+    static PFN_D3D12_DriverShutdown1 D3D12_Shutdown1()
     {
         if (!_dx12Inited)
             return nullptr;
@@ -1007,7 +1010,7 @@ class NVNGXProxy
         return _module.VULKAN_Shutdown;
     }
 
-    static PFN_VULKAN_Shutdown1 VULKAN_Shutdown1()
+    static PFN_VULKAN_DriverShutdown1 VULKAN_Shutdown1()
     {
         if (!_vulkanInited)
             return nullptr;
