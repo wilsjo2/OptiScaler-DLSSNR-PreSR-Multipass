@@ -2429,8 +2429,9 @@ void MenuCommon::RenderMainMenuHeaderMessages(RenderMenuContext& ctx)
 
             std::string joinedUpscalers(joined.begin(), joined.end());
 
-            ImGui::Text("Please select %s as upscaler from game\noptions and load a save game "
-                        "to enable Opti settings.\nUpscalers don't always work in menus.",
+            ImGui::Text("Waiting for a compatible upscaler input.\n"
+                        "If offered in the game options, select %s.\n"
+                        "Load a save to activate it. Some games need an upscaler mod.",
                         joinedUpscalers.c_str());
 
             if (config->UseHQFont.value_or_default())
@@ -2438,6 +2439,9 @@ void MenuCommon::RenderMainMenuHeaderMessages(RenderMenuContext& ctx)
             else
                 ImGui::SetWindowFontScale(menuResScale);
 
+            ImGui::Spacing();
+            ImGui::TextLinkOpenURL("Check game compatibility and setup",
+                                   "https://github.com/optiscaler/OptiScaler/wiki/Compatibility-List");
             ImGui::Spacing();
 
             if (primaryGpu.dlssCapable)
