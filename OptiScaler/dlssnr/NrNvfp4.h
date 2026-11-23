@@ -116,6 +116,8 @@ void* WrapNvapi(unsigned id, void* original);
 // Before a pass's feature is created and before a frame's evaluations: whether any pass wants a 4-bit model. Loads the
 // layers the first time one does; they stay loaded (and idle) afterwards.
 void Configure(bool wanted, const std::filesystem::path& assets);
+// Check a signed-kernel FP8 preset before creating its NVIDIA carrier feature.
+std::string Fp8SetupProblem(unsigned preset);
 // Around every evaluation of the NR model recorded on `list`, whatever the pass's model is.
 bool BeginEvaluation(unsigned requestedPreset, ID3D12GraphicsCommandList* commands);
 void EndEvaluation(ID3D12GraphicsCommandList* list);

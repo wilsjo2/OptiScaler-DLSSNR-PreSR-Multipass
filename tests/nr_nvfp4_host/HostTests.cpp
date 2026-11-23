@@ -237,7 +237,10 @@ using namespace DlssNr::Nvfp4;
 bool Pass(unsigned preset, unsigned long long swinFaults = 0, unsigned long long netFaults = 0,
           unsigned long long ffnFaults = 0, bool whole = true)
 {
-    BeginEvaluation(preset, nullptr);
+    if (!BeginEvaluation(preset, nullptr)) {
+        EndEvaluation(nullptr);
+        return OursRan(whole);
+    }
     if (preset == ModelANvfp4 || IsPassInOne(preset))
         RunHost(CreateHost(nullptr, preset, 640, 360, L"assets"), nullptr, {});
     Mock::Evaluate(swinFaults, netFaults, ffnFaults, preset == ModelANvfp4 || IsPassInOne(preset));
@@ -288,9 +291,8 @@ int main()
                          : layer == &Mock::net ? "vit4/vit4_set13.bin"
                                                : "modelA/ffn_v2_set13.bin";
         const auto work = Mock::swin.work + Mock::net.work + Mock::ffn.work;
-        BeginEvaluation(ModelTwoDouble, nullptr);
+        CHECK(!BeginEvaluation(ModelTwoDouble, nullptr));
         CHECK(AllPaused());
-        Mock::Evaluate();
         EndEvaluation(nullptr);
         CHECK(!OursRan(true) && !Running());
         CHECK(Mock::swin.work + Mock::net.work + Mock::ffn.work == work);
@@ -350,6 +352,7 @@ int main()
     CHECK(!OursRan(true) && Contains(Problem(), "did not see"));
     // A missing set: nothing of ours is asked for, the pass is refused, the reason names the files.
     Mock::fp8.missingSet = 2;
+    CHECK(Contains(Fp8SetupProblem(ModelFp8Triple), "fp8_set2") && Fp8SetupProblem(ModelFp8Double).empty());
     CHECK(!Pass(ModelFp8Triple) && Contains(Problem(), "fp8/fp8_set2"));
     CHECK(Pass(ModelFp8Double));
     Mock::fp8.missingSet = 0;

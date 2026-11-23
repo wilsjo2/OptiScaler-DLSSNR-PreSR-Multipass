@@ -22,9 +22,13 @@ std::shared_ptr<CompatibilityRuntime> CompatibilityRuntime::TryOpen(ID3D12Device
     {
         if (!visited.insert(Util::ToLower(std::filesystem::absolute(path).lexically_normal().wstring())).second)
             continue;
-        if (auto runtime = Open(path / L"nvngx_dlssnr.dll", device, NVNGXProxy::D3D12_GetCapabilityParameters(),
-                                NVNGXProxy::D3D12_DestroyParameters(), State::Instance().NVNGX_ApplicationDataPath))
-            return runtime;
+        const auto candidate = path / L"nvngx_dlssnr.dll";
+        std::error_code error;
+        const auto status = std::filesystem::status(candidate, error);
+        if (status.type() == std::filesystem::file_type::not_found) continue;
+        // The first installed NR DLL is the selected provider. Surface its load failure.
+        return Open(candidate, device, NVNGXProxy::D3D12_GetCapabilityParameters(),
+                    NVNGXProxy::D3D12_DestroyParameters(), State::Instance().NVNGX_ApplicationDataPath);
     }
     LOG_INFO("NR compatibility: no supported direct runtime available; preserving driver failure");
     return {};

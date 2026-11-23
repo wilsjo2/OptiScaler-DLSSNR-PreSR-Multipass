@@ -178,7 +178,19 @@ bool DlssNr_Dx12::State::PrepareRunModels(ID3D12GraphicsCommandList* cmdList, ID
         if (DlssNr::Profiles::PassReapplies(cfg, pass))
             continue;
         if (nr.passCreateFailed[pass])
-            break;
+            return false;
+        const auto preset = DlssNr::Profiles::RequestedPreset(cfg, pass);
+        if (DlssNr::Nvfp4::IsFp8(preset) && !nr.models[pass].HasFeature())
+        {
+            const auto problem = DlssNr::Nvfp4::Fp8SetupProblem(preset);
+            if (!problem.empty())
+            {
+                DlssNr::Nvfp4::Refuse(problem.c_str());
+                modelRunning = false;
+                nr.reset = true;
+                return false;
+            }
+        }
         bool ready = false;
         const bool hadFeature = nr.models[pass].HasFeature();
         const auto prepared = nr.models[pass].Prepare(cmdList, device, workWidth, workHeight, PassSettings(cfg, pass),

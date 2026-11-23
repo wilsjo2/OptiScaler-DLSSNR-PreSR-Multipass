@@ -251,6 +251,23 @@ void Configure(bool wanted, const std::filesystem::path& assets)
         Say("FAILED to load, so a pass that asks for a 4-bit model is not applied: " + gEnableProblem);
 }
 
+namespace {
+std::string Fp8AssetProblem(unsigned set)
+{
+    if (!gOn) return "the FP8 models were not loaded";
+    if (!gFp8Problem.empty()) return gFp8Problem;
+    std::string missing;
+    if (!NrFp8::SetComplete(set, &missing)) return "FP8 model unavailable: " + missing;
+    return {};
+}
+}
+
+std::string Fp8SetupProblem(unsigned preset)
+{
+    std::lock_guard guard(gMutex);
+    return Fp8AssetProblem(Fp8Set(preset));
+}
+
 bool BeginEvaluation(unsigned requestedPreset, ID3D12GraphicsCommandList* commands)
 {
     std::lock_guard guard(gMutex);
@@ -270,12 +287,8 @@ bool BeginEvaluation(unsigned requestedPreset, ID3D12GraphicsCommandList* comman
     if (gFp8)
     {
         // NVIDIA's kernels with our records: no 4-bit kernel runs.
-        gSetMissing.clear();
-        const unsigned set = model.weights;
-        std::string file;
-        if (gOn && gFp8Problem.empty() && !NrFp8::SetComplete(set, &file))
-            gSetMissing = "a weight file of this model is missing (OptiScaler/nvfp4/" + file + ")";
-        if (!gOn || !gSetMissing.empty() || !gFp8Problem.empty()) return false;
+        gSetMissing = Fp8AssetProblem(model.weights);
+        if (!gSetMissing.empty()) return false;
         NrPassRuntime::Activate(model, commands);
         gFp8Faults = NrFp8::Faults();
         gFp8Completed = NrFp8::Completed();

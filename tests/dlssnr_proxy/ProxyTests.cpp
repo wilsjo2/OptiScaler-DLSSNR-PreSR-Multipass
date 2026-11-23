@@ -337,7 +337,7 @@ int main()
     const auto attempts = CompatibilityMock::opens;
     CompatibilityMock::createResult = NVSDK_NGX_Result_Success;
     Mock::createResult = NVSDK_NGX_Result_Fail;
-    proxy.RetryAfterFailure();
+    settings.preset = 1; // An explicit model change recovers a failed creation in this same context.
     assert(run() == NVSDK_NGX_Result_Success && !evaluated);
     proxy.Release();
     proxy.ResetRecording(&commands);

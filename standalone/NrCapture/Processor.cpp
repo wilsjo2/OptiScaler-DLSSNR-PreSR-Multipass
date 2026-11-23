@@ -185,6 +185,16 @@ void Processor::ResizeLegacy(UINT w, UINT h, const Settings& s) {
     }
     if (composeOnly) runtime->Release();
     else {
+        for (unsigned pass = 0; pass < s.passes; ++pass) {
+            if (s.Shortcut(pass).reapply) continue;
+            const unsigned preset = s.PassModel(pass).preset;
+            const unsigned set = Settings::Fp8Set(preset);
+            if (!set || NrHost::Requested(gpu.device.Get())) continue;
+            ApplyFp8(true);
+            std::string missing;
+            if (!NrFp8::SetComplete(set, &missing))
+                throw std::runtime_error(std::format("NR pass {}: FP8 model {} unavailable: {}", pass + 1, preset, missing));
+        }
         gpu.Begin();
         const auto created = runtime->Create(gpu.commands.Get(), spatialLayout.active ? spatialLayout.modelW : mw,
             spatialLayout.active ? spatialLayout.modelH : mh, s.model, s.passes, s.passOverrides, s.ReapplyMask());

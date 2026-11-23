@@ -151,7 +151,7 @@ void Context::RetryAfterFailure() { _impl->RetireState(); }
 
 bool Context::Impl::UpdateTuning(const ModelSettings& settings)
 {
-    if ((!state.feature && !state.hostModel) || state.settings == settings)
+    if ((!state.feature && !state.hostModel && !state.failed) || state.settings == settings)
         return false;
     if (state.hostModel && !state.hostFailed && state.settings.requested == settings.requested)
     {
@@ -173,13 +173,20 @@ unsigned int Context::Impl::Prepare(ID3D12GraphicsCommandList* cmdList, ID3D12De
     lifetime.Collect();
     if (!cmdList || !device || !width || !height)
         return 0;
-    if ((state.feature || state.hostModel) &&
+    if ((state.feature || state.hostModel || state.failed) &&
         (state.device != device || state.width != width || state.height != height))
         RetireState();
     else
         UpdateTuning(settings);
     if (state.failed)
         return 0;
+    const auto rememberFailure = [&] {
+        state.failed = true;
+        state.settings = settings;
+        state.device = device;
+        state.width = width;
+        state.height = height;
+    };
     if (DlssNr::Nvfp4::UsesNativeHost(settings.requested))
     {
         // No NGX feature: the whole pass runs on the own pass host, which is ready as soon as it is made.
@@ -215,7 +222,7 @@ unsigned int Context::Impl::Prepare(ID3D12GraphicsCommandList* cmdList, ID3D12De
         RetireState();
         if (discards >= kMaxDiscards)
         {
-            state.failed = true;
+            rememberFailure();
             LOG_ERROR("DLSS-NR: the feature's setup was discarded {} times in a row; NR is off until Retry or a "
                       "settings change", discards);
             return (unsigned int) NVSDK_NGX_Result_Fail;
@@ -233,7 +240,7 @@ unsigned int Context::Impl::Prepare(ID3D12GraphicsCommandList* cmdList, ID3D12De
         if (allocated != NVSDK_NGX_Result_Success || state.params == nullptr)
         {
             DestroyState(state);
-            state.failed = true;
+            rememberFailure();
             LOG_ERROR("DLSS-NR (driver): the NGX core refused its capability parameters");
             return (unsigned int) (allocated == NVSDK_NGX_Result_Success ? NVSDK_NGX_Result_Fail : allocated);
         }
@@ -269,7 +276,7 @@ unsigned int Context::Impl::Prepare(ID3D12GraphicsCommandList* cmdList, ID3D12De
         if (created != NVSDK_NGX_Result_Success || state.feature == nullptr)
         {
             RetireState();
-            state.failed = true;
+            rememberFailure();
             LOG_ERROR("DLSS-NR: CreateFeature(18) failed 0x{:X}", (unsigned int) created);
             return (unsigned int) (created == NVSDK_NGX_Result_Success ? NVSDK_NGX_Result_Fail : created);
         }
