@@ -334,7 +334,7 @@ class StreamlineProxy
         if (_isD3D12Inited)
             return true;
 
-        if (_nativeDlssgRejected)
+        if (_nativeDlssgRejected && State::Instance().activeFgNvngx == FGNvngxReplacement::None)
             return false;
 
         if (!StreamlineProxy::LoadStreamline())
@@ -454,6 +454,9 @@ class StreamlineProxy
             reflexConst.useMarkersToOptimize = false;
             _isD3D12Inited = _slReflexSetOptions(reflexConst) == sl::Result::eOk;
         }
+
+        if (!_isD3D12Inited)
+            ShutdownD3D12();
 
         return _isD3D12Inited;
     }

@@ -83,9 +83,8 @@ bool DLSSG_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQ
         return false;
     }
 
-    if (!StreamlineProxy::IsD3D12Inited() &&
-        (State::Instance().currentD3D12Device == nullptr ||
-         !StreamlineProxy::InitWithD3D12(State::Instance().currentD3D12Device)))
+    auto* device = State::Instance().currentD3D12Device;
+    if (!StreamlineProxy::IsD3D12Inited() && (device == nullptr || !StreamlineProxy::InitWithD3D12(device)))
     {
         return false;
     }
@@ -195,9 +194,8 @@ bool DLSSG_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* cmd
         return false;
     }
 
-    if (!StreamlineProxy::IsD3D12Inited() &&
-        (State::Instance().currentD3D12Device == nullptr ||
-         !StreamlineProxy::InitWithD3D12(State::Instance().currentD3D12Device)))
+    auto* device = State::Instance().currentD3D12Device;
+    if (!StreamlineProxy::IsD3D12Inited() && (device == nullptr || !StreamlineProxy::InitWithD3D12(device)))
     {
         return false;
     }
