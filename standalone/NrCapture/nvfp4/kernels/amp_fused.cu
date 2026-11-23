@@ -10,8 +10,8 @@
 // done by the software round-to-nearest-even satfinite of amp_common.cuh. Nothing else differs, so the outputs agree with
 // NVIDIA's kernel except where the k16 pair rounds its float16 accumulator differently from the k32 instruction.
 //
-// The sm_120 NVFP4 host uses NR_NATIVE_FP8=1 for its native E4M3 layers. The 64-channel variants
-// use --maxrregcount=96 and the 32-channel upsample uses 160, measured on RTX 5090.
+// The sm_120 NVFP4 host builds its 32- and 64-channel E4M3 kernels with NR_NATIVE_FP8=1
+// and a 168-register limit.
 // AMP_HW_REF selects the same k32 arithmetic for individual reference builds.
 //
 // Switches the hardware reference settles (defaults = what it showed):
@@ -292,7 +292,14 @@ AMP_INLINE AF afrag_v(const amp_v4& v) { return afrag(v.x, v.y, v.z, v.w); }
 
 // ---- small helpers ---------------------------------------------------------------------------------------------------
 AMP_INLINE u32 e2(u32 h) { return amp_h2_to_e4m3x2(h); }                    // float16 pair -> two codes (low 16 bits)
-AMP_INLINE u32 e4(u32 lo, u32 hi) { return e2(lo) | (e2(hi) << 16); }
+AMP_INLINE u32 e4(u32 lo, u32 hi)
+{
+#if NR_NATIVE_FP8
+    return amp_native_e4m3x4(lo, hi);
+#else
+    return e2(lo) | (e2(hi) << 16);
+#endif
+}
 // accumulator (4 n-fragments x rows g, g + 8) -> the 4 A-operand words
 AMP_INLINE void pack_a(const u32 (*acc)[2], u32* w)
 {
@@ -391,6 +398,22 @@ AMP_INLINE u32 den_reduce(u32 A, u32 B, u32 Cc, u32 D, u32 L)
 // POOL (ds): the pooled 4x4 tokens, [K block NB][512 B].
 #define BLK(s, kb) (((s) * NB + (kb)) * 512u)
 
+// A single warp owns the complete narrow window. Only wait/publish and global padding
+// stores need synchronization when intermediate values stay in the owning lane.
+#if NR_NATIVE_FP8 && HEADS == 1
+#define NR_SINGLE_WARP 1
+#define NR_TILE_BARRIER() ((void)0)
+#define NR_MLP_LOOP _Pragma("unroll")
+#else
+#define NR_SINGLE_WARP 0
+#define NR_TILE_BARRIER() __syncthreads()
+#define NR_MLP_LOOP _Pragma("unroll 1")
+#endif
+#if NR_NATIVE_FP8 && HEADS <= 2
+#define NR_CHANNEL_LOOP _Pragma("unroll")
+#else
+#define NR_CHANNEL_LOOP _Pragma("unroll 1")
+#endif
 extern "C" __global__ void amp_fused_swin(Params p)
 {
     __shared__ __align__(16) u8 WIN[4u * NB * 512u];
@@ -408,7 +431,11 @@ extern "C" __global__ void amp_fused_swin(Params p)
 #endif
 #endif
 #if HEADS == 1 && VARIANT == 3
-    __shared__ __align__(16) u8 XF[4u * 2u * 32u * 16u];      // the float16 blend (the single-head residual reads it)
+#if NR_NATIVE_FP8
+    amp_v4 residual[4][2];                      // each lane reads back its own unrounded blend
+#else
+    __shared__ __align__(16) u8 XF[4u * 2u * 32u * 16u];
+#endif
 #endif
 #if NR_NATIVE_FP8 && HEADS == 1
     // A lane owns these four tiles throughout the single-head block.
@@ -419,7 +446,7 @@ extern "C" __global__ void amp_fused_swin(Params p)
 #define LOAD_WIN(tile, k) lds(WIN + BLK(tile, k) + lane * 16u)
 #define STORE_WIN(tile, k, v) sts(WIN + BLK(tile, k) + lane * 16u, v)
 #endif
-#if NR_NATIVE_FP8 && HEADS == 1 && (VARIANT == 1 || VARIANT == 3)
+#if NR_NATIVE_FP8 && HEADS == 1
     amp_v4 localContext[4];
 #define LOAD_CTX(tile, k) localContext[tile]
 #define STORE_CTX(tile, k, v) localContext[tile] = amp_v4{v[0], v[1], v[2], v[3]}
@@ -427,7 +454,8 @@ extern "C" __global__ void amp_fused_swin(Params p)
 #define LOAD_CTX(tile, k) lds(CTX + BLK(tile, k) + lane * 16u)
 #define STORE_CTX(tile, k, v) sts(CTX + BLK(tile, k) + lane * 16u, v)
 #endif
-    const u32 lane = threadIdx.x & 31u, w = threadIdx.y, g = lane >> 2, t = lane & 3u;
+    const u32 lane = threadIdx.x & 31u, g = lane >> 2, t = lane & 3u;
+    const u32 w = NR_SINGLE_WARP ? 0u : threadIdx.y;
     const bool leader = (threadIdx.x | threadIdx.y) == 0u;
     const int x0 = p.sx + 8 * (int)blockIdx.x, y0 = p.sy + 8 * (int)blockIdx.y;
     const int TW = p.W >> 2, TH = p.H >> 2, tx0 = x0 >> 2, ty0 = y0 >> 2;
@@ -467,6 +495,10 @@ extern "C" __global__ void amp_fused_swin(Params p)
 #else
         const int cr = (((p.H + 1) >> 1) + 3) & ~3, cc = (((p.W + 1) >> 1) + 3) & ~3;
 #endif
+#if NR_SINGLE_WARP
+        amp_v4 coarse[2];
+#pragma unroll
+#endif
         for (u32 kb = w; kb < 2u * NB; kb += NB) {
             u32 a[4];
 #pragma unroll
@@ -476,21 +508,29 @@ extern "C" __global__ void amp_fused_swin(Params p)
                 const bool in = cy >= 0 && cy < cr && cx >= 0 && cx < cc;
                 a[i] = in ? amp_load_cg32(p.in + ((u64)(grp * (u32)cr + (u32)cy) * (u32)cc + (u32)cx) * 16u + t * 4u) : 0u;
             }
+#if NR_SINGLE_WARP
+            coarse[kb] = {a[0], a[1], a[2], a[3]};
+#else
             sts(CTX + kb * 512u + lane * 16u, a);
+#endif
         }
-        __syncthreads();
+        NR_TILE_BARRIER();
         // 2C -> C projection: warp w's 32 channels, K blocks in order, accumulator from 0
         u32 pr[4][2];
         ZERO4x2(pr)
         for (u32 kb = 0; kb < 2u * NB; ++kb) {
             BF b[4];
             bfrag2(rec + R_RESAMPLE + kb * (32u * C) + w * 1024u, lane, b);
+#if NR_SINGLE_WARP
+            const AF a = afrag_v(coarse[kb]);
+#else
             const AF a = afrag_v(lds(CTX + kb * 512u + lane * 16u));
+#endif
 #pragma unroll
             for (u32 j = 0; j < 4; ++j) mma(pr[j], a, b[j]);
         }
 #if NR_NATIVE_FP8 && HEADS == 2
-        __syncthreads(); // Every warp has read the coarse tiles before WIN reuses them.
+        NR_TILE_BARRIER(); // Every warp has read the coarse tiles before WIN reuses them.
 #endif
         // skip (tile layout) * gain + the replicated projection
         u32 gain[4];
@@ -536,7 +576,11 @@ extern "C" __global__ void amp_fused_swin(Params p)
 #pragma unroll
             for (u32 r = 0; r < 2; ++r) {
                 const u32 v[4] = {bl[0][r], bl[1][r], bl[2][r], bl[3][r]};
+#if NR_SINGLE_WARP
+                residual[s][r] = {v[0], v[1], v[2], v[3]};
+#else
                 sts(XF + ((s * 2u + r) * 32u + lane) * 16u, v);
+#endif
             }
 #endif
         }
@@ -565,7 +609,7 @@ extern "C" __global__ void amp_fused_swin(Params p)
         STORE_WIN(s, w, xw);
     }
 #endif
-    __syncthreads();
+    NR_TILE_BARRIER();
 
     // ---- MLP ----------------------------------------------------------------------------------------------------------
     // macc: the mid projection's accumulator (multi-head), or the contraction's (single head, seeded with the residual)
@@ -579,7 +623,11 @@ extern "C" __global__ void amp_fused_swin(Params p)
 #if VARIANT == 3
 #pragma unroll
         for (u32 r = 0; r < 2; ++r) {
+#if NR_SINGLE_WARP
+            const amp_v4 v = residual[s][r];
+#else
             const amp_v4 v = lds(XF + ((s * 2u + r) * 32u + lane) * 16u);
+#endif
             const u32 bl[4] = {v.x, v.y, v.z, v.w};
 #pragma unroll
             for (u32 j = 0; j < 4; ++j) macc[s][j][r] = amp_h2_mul(bl[j], rsw[j]);
@@ -597,13 +645,13 @@ extern "C" __global__ void amp_fused_swin(Params p)
 #pragma unroll
     for (u32 s = 0; s < 4; ++s) ZERO4x2(macc[s])
 #endif
-#pragma unroll 1
+NR_MLP_LOOP
     for (u32 pass = 0; pass < 4; ++pass) {
         u32 eacc[4][4][2];
 #pragma unroll
         for (u32 s = 0; s < 4; ++s) ZERO4x2(eacc[s])
         const u8* const we = rec + R_EXPAND + w * (NB * 4096u) + pass * 1024u;
-#pragma unroll 1
+NR_CHANNEL_LOOP
         for (u32 kb = 0; kb < NB; ++kb) {
             BF b[4];
             bfrag2(we + kb * 4096u, lane, b);
@@ -649,15 +697,15 @@ extern "C" __global__ void amp_fused_swin(Params p)
 #pragma unroll
             for (u32 r = 0; r < 2; ++r) yacc[s][j][r] = amp_h2_mul(pair_h(xw, j, r), rsw[j]);
     }
-    __syncthreads();                            // everyone is done with x
+    NR_TILE_BARRIER();                            // everyone is done with x
 #pragma unroll
     for (u32 s = 0; s < 4; ++s) {
         u32 mw[4];
         pack_a(macc[s], mw);
         STORE_WIN(s, w, mw);
     }
-    __syncthreads();
-#pragma unroll 1
+    NR_TILE_BARRIER();
+NR_CHANNEL_LOOP
     for (u32 kb = 0; kb < NB; ++kb) {
         BF b[4];
         bfrag2(rec + R_CONTRACT + kb * (NB * 1024u) + w * 1024u, lane, b);
@@ -668,7 +716,7 @@ extern "C" __global__ void amp_fused_swin(Params p)
             for (u32 j = 0; j < 4; ++j) mma(yacc[s][j], a, b[j]);
         }
     }
-    __syncthreads();                            // everyone is done with the mid output
+    NR_TILE_BARRIER();                            // everyone is done with the mid output
 #endif
     // y -> e4m3 -> WIN (the QKV input; the multi-head attention residual reads it back)
 #pragma unroll
@@ -687,18 +735,18 @@ extern "C" __global__ void amp_fused_swin(Params p)
 #pragma unroll
         for (u32 j = 0; j < 4; ++j) { yacc[s][j][0] = amp_h2_mul(yacc[s][j][0], ars[j]); yacc[s][j][1] = amp_h2_mul(yacc[s][j][1], ars[j]); }
 #endif
-    __syncthreads();
+    NR_TILE_BARRIER();
 
     // ---- QKV of head w: K, V, then Q, each over all K blocks of y ----------------------------------------------------
     u32 kw[4][4], vw[4][4], qw[4][4];           // e4m3 words: K and Q as A operands, V transposed (B words per tile, nf)
     const u8* const wqkv = rec + R_QKV + w * 3072u;
-#pragma unroll 1
+NR_CHANNEL_LOOP
     for (u32 m = 0; m < 3; ++m) {               // m 0: K (slices 2, 3), 1: V (4, 5), 2: Q (0, 1)
         const u32 slice = m == 0 ? 2u : (m == 1 ? 4u : 0u);
         u32 acc[4][4][2];
 #pragma unroll
         for (u32 s = 0; s < 4; ++s) ZERO4x2(acc[s])
-#pragma unroll 1
+NR_CHANNEL_LOOP
         for (u32 kb = 0; kb < NB; ++kb) {
             BF b[4];
             bfrag2(wqkv + kb * (NB * 3072u) + slice * 512u, lane, b);
@@ -730,14 +778,14 @@ extern "C" __global__ void amp_fused_swin(Params p)
     amp_v4 residualY[4];
 #pragma unroll
     for (u32 tile = 0; tile < 4; ++tile) residualY[tile] = LOAD_WIN(tile, w);
-    __syncthreads(); // Finish QKV and save the residual before CTX overwrites WIN.
+    NR_TILE_BARRIER(); // Finish QKV and save the residual before CTX overwrites WIN.
 #endif
     // ---- attention, two query tiles at a time ---------------------------------------------------------------------------
     const u8* const wbias = rec + R_BIAS + w * 8192u;
-#if NR_NATIVE_FP8 && HEADS == 1 && (VARIANT == 1 || VARIANT == 3)
+#if NR_NATIVE_FP8 && HEADS == 1
 #pragma unroll
 #else
-#pragma unroll 1
+NR_CHANNEL_LOOP
 #endif
     for (u32 gp = 0; gp < 2; ++gp) {
         u32 n[2][8][2];                         // logits -> numerators, [query tile][key fragment][row]
@@ -839,8 +887,8 @@ extern "C" __global__ void amp_fused_swin(Params p)
         }
     }
 #endif
-    __syncthreads();                            // all contexts are in CTX
-#pragma unroll 1
+    NR_TILE_BARRIER();                            // all contexts are in CTX
+NR_CHANNEL_LOOP
     for (u32 kb = 0; kb < NB; ++kb) {
         BF b[4];
         bfrag2(rec + R_OUT + kb * (NB * 1024u) + w * 1024u, lane, b);
@@ -900,20 +948,26 @@ extern "C" __global__ void amp_fused_swin(Params p)
             }
         u32 pw[4];
         pack_a(pool, pw);
+#if !NR_SINGLE_WARP
         sts(POOL + w * 512u + lane * 16u, pw);
-        __syncthreads();
+#endif
+        NR_TILE_BARRIER();
         const int hH = (p.H + 1) >> 1, hW = (p.W + 1) >> 1, vr = (hH + 3) & ~3, vc = (hW + 3) & ~3;
         const int px = (x0 >> 1) + (int)((ci & 1u) * 2u + ((g >> 1) & 1u));
-#pragma unroll 1
+NR_CHANNEL_LOOP
         for (u32 half = 0; half < 2; ++half) {
             const u32 sl0 = half ? 2u * NB + 2u * w : 2u * w;
             u32 racc[4][2];
             ZERO4x2(racc)
-#pragma unroll 1
+NR_CHANNEL_LOOP
             for (u32 kb = 0; kb < NB; ++kb) {
                 BF b[4];
                 bfrag2(rec + R_RESAMPLE + kb * (64u * C) + sl0 * 512u, lane, b);
+#if NR_SINGLE_WARP
+                const AF a = afrag4(pw);
+#else
                 const AF a = afrag_v(lds(POOL + kb * 512u + lane * 16u));
+#endif
 #pragma unroll
                 for (u32 j = 0; j < 4; ++j) mma(racc[j], a, b[j]);
             }
@@ -933,7 +987,11 @@ extern "C" __global__ void amp_fused_swin(Params p)
         // zeros in the padding of the pooled view when the runtime's dims exceed the half size: each window clears the
         // padding pixels of its own 4x4 pooled block after its stores; window (0, 0) also the pixels no window covers
         if (p.ds_out && (p.d0 > hH || p.d1 > hW)) {
+#if NR_SINGLE_WARP
+            __syncwarp();
+#else
             __syncthreads();
+#endif
             const int R = p.d0, Cn = p.d1;
             const u32 groups = 2u * C / 16u, tid = threadIdx.y * 32u + threadIdx.x, nt = 32u * NB;
             for (u32 i = tid; i < 16u * groups * 4u; i += nt) {
@@ -966,6 +1024,10 @@ extern "C" __global__ void amp_fused_swin(Params p)
 #endif
 }
 
+#undef NR_SINGLE_WARP
+#undef NR_TILE_BARRIER
+#undef NR_MLP_LOOP
+#undef NR_CHANNEL_LOOP
 #undef LOAD_WIN
 #undef STORE_WIN
 #undef LOAD_CTX

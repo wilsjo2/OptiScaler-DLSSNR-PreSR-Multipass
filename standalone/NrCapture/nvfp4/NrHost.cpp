@@ -838,7 +838,7 @@ std::unique_ptr<Host> Host::Create(ID3D12Device* device, const Options& options,
     i->plan = ReadPlan(options.plan);
     if (options.kernels.empty()) Fail("no kernel folders (NR_HOST_ASSETS)");
     // Kernel folders and their codes; the architecture rule.
-    Choices choices;
+    Choices choices, mixedChoices;
     std::map<int, const KernelChoice*> kernelOf;
     std::set<std::string> codes;
     for (const auto& [folder, code0] : options.kernels) {
@@ -857,7 +857,7 @@ std::unique_ptr<Host> Host::Create(ID3D12Device* device, const Options& options,
         ReadFolder(folder, code, choices);
     }
     if (options.mixedOriginal && set == 0)
-        ReadFolder(options.plan.parent_path() / "mixed", "sm120", choices);
+        ReadFolder(options.plan.parent_path() / "mixed", "sm120", mixedChoices);
     for (const auto& c : codes) i->kindText += (i->kindText.empty() ? "" : "+") + c;
     // The launches of this layout and their kernels.
     const std::string layout = options.layout == 3108 ? "3108" : "3109";
@@ -877,15 +877,50 @@ std::unique_ptr<Host> Host::Create(ID3D12Device* device, const Options& options,
             NrSwin4::BindNative(*op, driver, device, l.name, set, block);
             NrFfnV2::BindNative(*op, driver, device, l.name, set, block);
         }
-        const auto found = choices.find(l.idx);
-        if (l.fourBit && found == choices.end()) continue; // Selected four-bit layer supplies its kernel.
-        if (found == choices.end()) Fail("no kernel for launch " + std::to_string(l.idx) + " (" + l.name + ") in the kernel folders");
+        const bool optional = !choices.contains(l.idx) && mixedChoices.contains(l.idx);
+        const auto& available = optional ? mixedChoices : choices;
+        const auto found = available.find(l.idx);
+        if (l.fourBit && found == available.end()) continue; // Selected four-bit layer supplies its kernel.
+        if (found == available.end()) Fail("no kernel for launch " + std::to_string(l.idx) + " (" + l.name + ") in the kernel folders");
         const KernelChoice* pick = nullptr;
         for (const auto& c : found->second) if (!c.params || c.params == l.params) { if (pick && pick->params == l.params) continue; pick = &c; if (c.params == l.params) break; }
         if (!pick) Fail("launch " + std::to_string(l.idx) + ": no kernel takes the " + std::to_string(l.params) + "-byte parameter block");
         if (!pick->name.empty() && pick->name != l.name) Fail("launch " + std::to_string(l.idx) + ": the manifest names " + pick->name + ", the plan " + l.name + " (" + pick->where + ")");
         kernelOf[l.idx] = pick;
-        l.dispatch.hFunction = FunctionFor(device, *pick);
+        if (optional) {
+            // The four-bit dispatchers ask for this kernel only when the selected layer uses FP8.
+            // Keep its weights out of the GPU allocation until that first request.
+            const auto field = std::find_if(l.fields.begin(), l.fields.end(), [](const Field& f) { return f.code == Code::Record; });
+            const int recordOffset = field == l.fields.end() ? -1 : int(field->off);
+            l.fourBit->firstFallback = [owner = i.get(), &l, kernel = *pick, recordOffset](
+                ID3D12GraphicsCommandList* list, const NVAPI_CU_KERNEL_LAUNCH_PARAMS& incoming) {
+                auto& op = *l.fourBit;
+                std::vector<unsigned char> forwarded;
+                auto launch = op.base;
+                launch.pParams = incoming.pParams;
+                if (recordOffset >= 0 && !op.record) {
+                    if (!owner->records)
+                        owner->records = RecordsFor(owner->device.Get(), owner->options.plan.parent_path(), "mixed_set", 1);
+                    const auto rec = owner->records->offsets.find(l.idx);
+                    if (rec == owner->records->offsets.end() || rec->second.second != l.name)
+                        Fail("missing trained FP8 equivalent for launch " + std::to_string(l.idx));
+                    const uint64_t address = owner->records->buffer->GetGPUVirtualAddress() + rec->second.first;
+                    // An advanced layer may have already made a copy with rewired input/output addresses.
+                    if (incoming.pParams != l.parameters.data()) {
+                        const auto bytes = static_cast<const unsigned char*>(incoming.pParams);
+                        forwarded.assign(bytes, bytes + incoming.paramSize);
+                        memcpy(forwarded.data() + recordOffset, &address, sizeof address);
+                        launch.pParams = forwarded.data();
+                    }
+                    memcpy(l.parameters.data() + recordOffset, &address, sizeof address);
+                    op.record = address;
+                }
+                launch.hFunction = op.base.hFunction = FunctionFor(owner->device.Get(), kernel);
+                return op.driver(list, &launch, 1);
+            };
+        } else {
+            l.dispatch.hFunction = FunctionFor(device, *pick);
+        }
         if (!pick->prepare.empty()) {
             KernelChoice prep = *pick;
             prep.entry = pick->prepare;
@@ -895,20 +930,7 @@ std::unique_ptr<Host> Host::Create(ID3D12Device* device, const Options& options,
     std::sort(i->order.begin(), i->order.end(), [](const PlanLaunch* a, const PlanLaunch* b) { return a->idx < b->idx; });
     // Records: every weighted launch must have one, under the plan's kernel name.
     if (!options.fourBit) i->records = RecordsFor(device, options.records, options.recordsName, set);
-    else if (options.mixedOriginal && set == 0) {
-        // Standalone exposes per-layer precision on Original. Its FP8 kernels consume the FP8 representation of the
-        // same trained four-bit checkpoint. Pass-in-one presets always use their own four-bit transformer.
-        i->records = RecordsFor(device, options.plan.parent_path(), "mixed_set", 1);
-        for (auto* l : i->order) {
-            if (l->fourBit->record) continue;
-            for (const auto& field : l->fields) if (field.code == Code::Record) {
-                const auto r = i->records->offsets.find(l->idx);
-                if (r == i->records->offsets.end() || r->second.second != l->name)
-                    Fail("missing trained FP8 equivalent for launch " + std::to_string(l->idx));
-                l->fourBit->record = i->records->buffer->GetGPUVirtualAddress() + r->second.first;
-            }
-        }
-    }
+
     for (const auto* l : i->order)
         for (const auto& f : l->fields)
             if (!options.fourBit && f.code == Code::Record) {

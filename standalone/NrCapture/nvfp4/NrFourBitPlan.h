@@ -2,6 +2,7 @@
 #include <dxgi1_6.h>
 #include <d3d12.h>
 #include <nvapi.h>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -26,6 +27,7 @@ struct Operation {
     std::shared_ptr<NrFfnV2::NativeTarget> ffn;
     NVAPI_CU_KERNEL_LAUNCH_PARAMS base{};
     Launch driver = nullptr;
+    std::function<NvAPI_Status(ID3D12GraphicsCommandList*, const NVAPI_CU_KERNEL_LAUNCH_PARAMS&)> firstFallback;
     unsigned weightSet = ~0u;
     int swinSlot = -1;
     uint64_t record = 0, blend = 0;
@@ -44,7 +46,8 @@ inline NvAPI_Status Submit(ID3D12GraphicsCommandList* list, const NVAPI_CU_KERNE
     if (count != 1 || !kernels) return NVAPI_INVALID_ARGUMENT;
     if (kernels->hFunction) return current->driver(list, kernels, count);
     auto base = current->base;
-    if (!base.hFunction || base.paramSize != kernels->paramSize) return NVAPI_ERROR;
+    if (base.paramSize != kernels->paramSize) return NVAPI_ERROR;
+    if (!base.hFunction) return current->firstFallback ? current->firstFallback(list, *kernels) : NVAPI_ERROR;
     base.pParams = kernels->pParams;
     return current->driver(list, &base, 1);
 }

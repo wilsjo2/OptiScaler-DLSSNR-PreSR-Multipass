@@ -217,6 +217,17 @@ AMP_INLINE u32 amp_h2_to_e4m3x2_fast(u32 h)
     const u32 mag = sum + ((sum >> 7) & 0x007F007Fu);
     return mag | ((h >> 8) & 0x00800080u);
 }
+#if NR_NATIVE_FP8
+// The high pair can merge directly into the converted low pair on Blackwell.
+AMP_INLINE u32 amp_native_e4m3x4(u32 lo, u32 hi)
+{
+    u32 packed;
+    asm("{ .reg .b16 low, high; cvt.rn.satfinite.e4m3x2.f16x2 low, %1; "
+        "cvt.rn.satfinite.e4m3x2.f16x2 high, %2; mov.b32 %0, {low, high}; }"
+        : "=r"(packed) : "r"(lo), "r"(hi));
+    return packed;
+}
+#endif
 // bytes 0 and 2 of a (codes of pair a) and of b -> one word: a.byte0, a.byte2, b.byte0, b.byte2
 AMP_INLINE u32 amp_e4m3_pack(u32 a, u32 b) { return amp_prmt(a, b, 0x6420u); }
 // two f16 pairs -> four codes (lo pair -> bytes 0, 1), the fast form of amp_h2x2_to_e4m3x4

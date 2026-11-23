@@ -129,6 +129,8 @@ NR_INLINE u32 h2_min(u32 a, u32 b) { return amp_h2_min(a, b); }
 #endif
 #if AMP_TIME_NOCODEC
 NR_INLINE u32 enc(u32 lo, u32 hi) { return amp_prmt(lo, hi, 0x6420u); }
+#elif NR_NATIVE_FP8
+NR_INLINE u32 enc(u32 lo, u32 hi) { return amp_native_e4m3x4(lo, hi); }
 #else
 #ifndef ENC_FAST                 // 1: amp_common.cuh's fast encoder (identical codes for every non-NaN value)
 #define ENC_FAST 1
