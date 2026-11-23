@@ -84,7 +84,7 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : 
     void _RefreshCachedSwapchainDesc();
     UINT _GetDx11BackBufferIndexForPresent() const;
     void _AdvanceFakeBackBufferIndex();
-    bool _WaitForInteropCopyOnPresentQueue();
+    bool _WaitForInteropCopyOnPresentQueue(ID3D12CommandQueue* presentQueue);
 
     IDXGISwapChain* _real = nullptr;
     IDXGISwapChain1* _real1 = nullptr;

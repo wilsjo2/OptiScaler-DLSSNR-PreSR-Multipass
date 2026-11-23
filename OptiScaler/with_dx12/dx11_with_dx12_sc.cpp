@@ -393,15 +393,15 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
     if (!_CopyDx11SharedToDx12FGBackBuffer(dx11Index))
         return DXGI_ERROR_DEVICE_REMOVED;
 
-    if (!_WaitForInteropCopyOnPresentQueue())
+    const bool fgHookedPresenter =
+        State::Instance().currentFGSwapchain == _fgSwapChain && !FGHooks::IsDx12InteropPresentSC(_fgSwapChain);
+    auto* presentQueue = fgHookedPresenter && _fg != nullptr ? _fg->GetCommandQueue() : _dx12CommandQueue;
+    if (!_WaitForInteropCopyOnPresentQueue(presentQueue))
         return DXGI_ERROR_DEVICE_REMOVED;
 
     // The bridge has already copied the final DX11 image to this DX12 backbuffer.
     // Run on the presenting queue after its copy wait, including when FG is paused.
-    DlssNr::ApplyToFinishedPicture(_fgSwapChain, _fg->GetCommandQueue());
-
-    const bool fgHookedPresenter =
-        State::Instance().currentFGSwapchain == _fgSwapChain && !FGHooks::IsDx12InteropPresentSC(_fgSwapChain);
+    DlssNr::ApplyToFinishedPicture(_fgSwapChain, presentQueue);
 
     // The game-facing DX11 swapchain is never presented in this wrapper.
     // For a plain external DX12 presenter, draw Opti's overlay here.
@@ -1254,15 +1254,15 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
     return true;
 }
 
-bool Dx11wDx12SC::_WaitForInteropCopyOnPresentQueue()
+bool Dx11wDx12SC::_WaitForInteropCopyOnPresentQueue(ID3D12CommandQueue* presentQueue)
 {
-    if (_fg == nullptr || _copyFence == nullptr)
+    if (presentQueue == nullptr || _copyFence == nullptr)
         return false;
 
     if (_lastInteropCopyFenceValue == 0)
         return true;
 
-    auto result = _fg->GetCommandQueue()->Wait(_copyFence, _lastInteropCopyFenceValue);
+    auto result = presentQueue->Wait(_copyFence, _lastInteropCopyFenceValue);
     if (FAILED(result))
     {
         LOG_ERROR("present queue Wait on interop copy fence failed: {:X}", (UINT) result);

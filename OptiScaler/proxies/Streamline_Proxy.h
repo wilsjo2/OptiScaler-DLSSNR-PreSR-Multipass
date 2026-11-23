@@ -334,6 +334,9 @@ class StreamlineProxy
         if (_isD3D12Inited)
             return true;
 
+        if (_nativeDlssgRejected)
+            return false;
+
         if (!StreamlineProxy::LoadStreamline())
             return false;
 
@@ -411,49 +414,45 @@ class StreamlineProxy
         _isD3D12Requested = true;
         auto initResult = StreamlineProxy::Init()(pref, sl::kSDKVersion);
 
-        sl::AdapterInfo adapterInfo {};
-        if (StreamlineProxy::IsFeatureSupported()(sl::kFeatureDLSS_G, adapterInfo) != sl::Result::eOk)
+        auto supportResult = sl::Result::eErrorMissingOrInvalidAPI;
+        if (initResult == sl::Result::eOk && _slIsFeatureSupported != nullptr)
         {
-            if (State::Instance().activeFgNvngx == FGNvngxReplacement::None)
-            {
-                Config::Instance()->FGNvngxReplacement = FGNvngxReplacement::Nukems;
-                Config::Instance()->SaveIni();
-
-                MessageBoxW(NULL,
-                            L"You've tried to use real DLSSG, but it's not supported\n"
-                            "Opti will try to use a replacement, restart the game",
-                            L"No DLSSG Support", MB_ICONWARNING | MB_OK);
-
-                std::exit(1);
-            }
-            else
-            {
-                LOG_ERROR("FG Nvngx replacement was selected but SL failed to init DLSSG");
-            }
+            sl::AdapterInfo adapterInfo {};
+            supportResult = _slIsFeatureSupported(sl::kFeatureDLSS_G, adapterInfo);
         }
 
         State::EnableChecks(owner);
 
-        if (initResult == sl::Result::eOk)
+        if (initResult != sl::Result::eOk)
         {
-            if (State::Instance().gameQuirks & GameQuirk::CreateSLOnThe2ndDevice)
-            {
-                // slSetD3DDevice moved to hkD3D12CreateDevice
-                _isD3D12Inited = true;
-            }
-            else
-            {
-                auto result = SetD3DDeviceAndBind(device);
-                if (result == sl::Result::eOk)
-                {
-                    auto reflexConst = sl::ReflexOptions {};
-                    reflexConst.mode = sl::ReflexMode::eOff;
-                    reflexConst.useMarkersToOptimize = false;
+            _isD3D12Requested = false;
+            LOG_ERROR("Streamline D3D12 initialization failed: {}", (int) initResult);
+            return false;
+        }
+        _ownsD3D12Streamline = true;
 
-                    result = _slReflexSetOptions(reflexConst);
-                    _isD3D12Inited = result == sl::Result::eOk;
-                }
-            }
+        if (supportResult != sl::Result::eOk && State::Instance().activeFgNvngx == FGNvngxReplacement::None)
+        {
+            _nativeDlssgRejected = true;
+            LOG_ERROR("Native DLSS-G is unavailable for this session (Streamline result: {})", (int) supportResult);
+            ShutdownD3D12();
+            return false;
+        }
+
+        if (supportResult != sl::Result::eOk)
+            LOG_ERROR("FG Nvngx replacement was selected but SL failed to init DLSSG: {}", (int) supportResult);
+
+        if (State::Instance().gameQuirks & GameQuirk::CreateSLOnThe2ndDevice)
+        {
+            // slSetD3DDevice moved to hkD3D12CreateDevice
+            _isD3D12Inited = true;
+        }
+        else if (SetD3DDeviceAndBind(device) == sl::Result::eOk)
+        {
+            auto reflexConst = sl::ReflexOptions {};
+            reflexConst.mode = sl::ReflexMode::eOff;
+            reflexConst.useMarkersToOptimize = false;
+            _isD3D12Inited = _slReflexSetOptions(reflexConst) == sl::Result::eOk;
         }
 
         return _isD3D12Inited;
@@ -502,8 +501,19 @@ class StreamlineProxy
 
     static bool IsD3D12Inited() { return _isD3D12Inited; }
 
+    static void ShutdownD3D12()
+    {
+        if (!_ownsD3D12Streamline)
+            return;
+
+        _ownsD3D12Streamline = false;
+        _isD3D12Inited = false;
+        _isD3D12Requested = false;
+        if (_slShutdown != nullptr)
+            _slShutdown();
+    }
+
     static PFN_slInit Init() { return _slInit; }
-    static PFN_slShutdown Shutdown() { return _slShutdown; }
     static PFN_slIsFeatureSupported IsFeatureSupported() { return _slIsFeatureSupported; }
     static PFN_slIsFeatureLoaded IsFeatureLoaded() { return _slIsFeatureLoaded; }
     static PFN_slSetFeatureLoaded SetFeatureLoaded() { return _slSetFeatureLoaded; }
@@ -544,6 +554,8 @@ class StreamlineProxy
     inline static bool _isD3D11Inited = false;
     inline static bool _isD3D12Inited = false;
     inline static bool _isD3D12Requested = false;
+    inline static bool _ownsD3D12Streamline = false;
+    inline static bool _nativeDlssgRejected = false;
 
     // Interposer
     inline static PFN_slInit _slInit = nullptr;

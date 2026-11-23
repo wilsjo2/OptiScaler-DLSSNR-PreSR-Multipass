@@ -83,13 +83,11 @@ bool DLSSG_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQ
         return false;
     }
 
-    if (!StreamlineProxy::IsD3D12Inited())
+    if (!StreamlineProxy::IsD3D12Inited() &&
+        (State::Instance().currentD3D12Device == nullptr ||
+         !StreamlineProxy::InitWithD3D12(State::Instance().currentD3D12Device)))
     {
-        if (State::Instance().currentD3D12Device != nullptr &&
-            !StreamlineProxy::InitWithD3D12(State::Instance().currentD3D12Device))
-        {
-            return false;
-        }
+        return false;
     }
 
     _width = desc->BufferDesc.Width;
@@ -197,13 +195,11 @@ bool DLSSG_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* cmd
         return false;
     }
 
-    if (!StreamlineProxy::IsD3D12Inited())
+    if (!StreamlineProxy::IsD3D12Inited() &&
+        (State::Instance().currentD3D12Device == nullptr ||
+         !StreamlineProxy::InitWithD3D12(State::Instance().currentD3D12Device)))
     {
-        if (State::Instance().currentD3D12Device != nullptr &&
-            !StreamlineProxy::InitWithD3D12(State::Instance().currentD3D12Device))
-        {
-            return false;
-        }
+        return false;
     }
 
     _width = desc->Width;
@@ -334,7 +330,7 @@ bool DLSSG_Dx12::Shutdown()
     DestroyFGContext();
 
     if (State::Instance().isShuttingDown)
-        StreamlineProxy::Shutdown()();
+        StreamlineProxy::ShutdownD3D12();
 
     return true;
 }
@@ -599,8 +595,7 @@ void DLSSG_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConstants)
 
     auto& state = State::Instance();
 
-    // If needed hooks are missing or XeFG proxy is not inited or FG swapchain is not created
-    if (!StreamlineProxy::LoadStreamline() || state.currentFGSwapchain == nullptr)
+    if (!StreamlineProxy::IsD3D12Inited() || _swapChain == nullptr)
         return;
 
     if (state.isShuttingDown)
