@@ -37,6 +37,8 @@ void RuntimePathCheck() {
     chosen(old / L"runtime" / L"nvngx_dlssnr.dll", old / L"Runtime" / L"NVNGX_DLSSNR.dll", old / L"runtime" / L"nvngx_dlssnr.dll");
     chosen(old / L"runtime" / L"nvngx_dlssnr.dll", custom, bundled);
     chosen(old / L"runtime" / L"nvngx_dlssnr.dll", root / L"missing" / L"nvngx_dlssnr.dll", bundled);
+    const auto missing = root / L"missing" / L"nvngx_dlssnr.dll";
+    chosen(missing, missing, missing); // Keep an explicit selection even with a valid bundled model.
     // A user-chosen DLL in a runtime folder without a package executable still wins.
     const auto tools = root / L"tools" / L"runtime" / L"nvngx_dlssnr.dll";
     std::filesystem::create_directories(tools.parent_path()); std::ofstream(tools).put('x');

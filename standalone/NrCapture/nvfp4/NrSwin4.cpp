@@ -139,6 +139,7 @@ struct Manifest {
     struct Record { bool present = false; uint64_t offset = 0, bytes = 0; };
     struct LevelRecord { bool thin = false; bool present = false; unsigned stages = 0, hidden = 0, blocks = 4; uint64_t offset = 0, bytes = 0; };
     struct Set {
+        std::string failure;
         bool present = false;
         std::vector<unsigned char> blob, fp8;
         uint64_t skip = 0;
@@ -333,7 +334,7 @@ void LoadManifest(State& s) {
         for (bool present : seen) if (!present) throw std::runtime_error("the NVFP4 manifest does not describe 44 fused blocks");
         if (m.runtimeSha.size() != 64) throw std::runtime_error("the NVFP4 manifest does not name the runtime its weights were made from");
         // The further sets are optional. Their 4-bit records share the manifest, so a file has to be swin4.bin's size.
-        for (unsigned n = 1; n < kMaxSets; ++n) {
+        const auto readSet = [&](unsigned n) {
             auto& set = m.sets[n];
             const std::string stem = n == 1 ? "swin4_trained" : "swin4_set" + std::to_string(n);
             std::error_code missing;
@@ -345,7 +346,7 @@ void LoadManifest(State& s) {
                 set.present = true;
             }
             std::ifstream notes(s.options.assets / (stem + ".txt"));
-            if (!notes) continue;
+            if (!notes) return;
             set.present = true;
             for (std::string line; std::getline(notes, line);) {
                 std::istringstream in(line);
@@ -479,6 +480,13 @@ void LoadManifest(State& s) {
                     }
                     if (set.skip & (((1ull<<r.blocks)-1) << block)) throw std::runtime_error(stem + ": Level4 conflicts with ordinary skip");
                 }
+            }
+        };
+        for (unsigned n = 1; n < kMaxSets; ++n) {
+            try { readSet(n); }
+            catch (const std::exception& e) {
+                m.sets[n] = {};
+                m.sets[n].failure = e.what();
             }
         }
         m.loaded = true;
@@ -1081,9 +1089,10 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
                 return Submit(s, commands, &own, 1);
             }
         } catch (const std::exception& error) {
-            Notice(s, std::string("the input / output block kept the runtime's weights: ") + error.what());
-            if(list && list->thinPreUsed) return NVAPI_ERROR;
+            Notice(s, std::string("input/output block failed: ") + error.what());
+            return NrFourBitPlan::Reject(error.what());
         } catch (...) {
+            return NrFourBitPlan::Reject("input/output block failed");
         }
         if(list && list->thinPreUsed && kind.post) { Notice(s,"Thin4 POST missing after Thin4 PRE; evaluation refused"); return NVAPI_ERROR; }
         if (s.enabled && !NrFourBitPlan::Paused(s.paused)) ++s.ioPassed;       // the runtime's own weights run this input / output block (Faults())
@@ -1171,9 +1180,8 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
             return runtimes();
         }
         if (!RuntimeMatches(s)) {
-            Notice(s, "off: no NR runtime is loaded");
             ++s.passed;
-            return runtimes();
+            return NrFourBitPlan::Reject("no NR runtime is loaded");
         }
         Replace(s, commands, target->device, *k, kind, unsigned(number));
         Track(list, *k, kind, f, plain);
@@ -1185,18 +1193,12 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
         }
         return NVAPI_OK;
     } catch (const std::exception& error) {
-        // Nothing of ours was recorded for this launch: the runtime's own kernel runs.
-        Notice(s, std::string("a block was left to the runtime: ") + error.what());
-        const auto status = FlushLevel(s, commands, list);
-        if (status != NVAPI_OK) return status;
+        Notice(s, std::string("fused block failed: ") + error.what());
         ++s.passed;
-        return runtimes();
+        return NrFourBitPlan::Reject(error.what());
     } catch (...) {
-        Notice(s, "a block was left to the runtime: unknown error");
-        const auto status = FlushLevel(s, commands, list);
-        if (status != NVAPI_OK) return status;
         ++s.passed;
-        return runtimes();
+        return NrFourBitPlan::Reject("fused block failed");
     }
 }
 
@@ -1346,8 +1348,12 @@ bool SetComplete(unsigned set, std::string* missing) {
         const auto& chosen = s.manifest.sets[n];
         complete = chosen.present && !chosen.fp8.empty() && (!chosen.blob.empty() || (n == 1 && s.manifest.trainedIsFirst));
     }
-    if (!complete && missing)
-        *missing = !s.manifest.loaded ? "swin4/swin4.txt" : n == 1 ? "swin4/swin4_trained.*" : "swin4/swin4_set" + std::to_string(n) + ".*";
+    if (!complete && missing) {
+        const std::string stem = n == 1 ? "swin4_trained" : "swin4_set" + std::to_string(n);
+        if (!s.manifest.loaded) *missing = s.manifest.failure.empty() ? "swin4/swin4.txt" : s.manifest.failure;
+        else if (n < kMaxSets && !s.manifest.sets[n].failure.empty()) *missing = s.manifest.sets[n].failure;
+        else *missing = "swin4/" + stem + ".*";
+    }
     return complete;
 }
 

@@ -51,6 +51,7 @@ struct Entry {
     uint32_t blend = 0;                                     // offset of the history blend weight pointer (0: none)
 };
 struct Set {
+    std::string failure;
     bool present = false;
     unsigned weighted = 0;
     std::vector<Entry> launches;                            // one per launch of an evaluation
@@ -256,7 +257,7 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
     if (!l.index) return s.launch(commands, kernels, count);
     const unsigned first = l.index;
     l.index += kernels ? count : 1;
-    if (l.failed) return s.launch(commands, kernels, count);
+    if (l.failed) return NVAPI_ERROR;
     const Set& set = s.sets[l.set];
     try {
         if (!kernels || count == 0) throw std::runtime_error("launch " + std::to_string(first) + " has no kernel");
@@ -302,11 +303,9 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
         ++s.replaced;
         return status;
     } catch (const std::exception& error) {
-        // The launch keeps the runtime's record: a launch left out would leave the kernels after it waiting for flags
-        // that never come. The evaluation is a fault (Finish), and its picture must not be shown.
         l.failed = true;
         l.reason = error.what();
-        return s.launch(commands, kernels, count);
+        return NVAPI_ERROR;
     }
 }
 }   // namespace
@@ -341,10 +340,9 @@ void Enable(const Options& options) {
     for (unsigned n = 1; n < kMaxSets; ++n) {
         std::error_code missing;
         if (!fs::exists(options.assets / ("fp8_set" + std::to_string(n) + ".txt"), missing)) continue;
-        sets[n] = ReadSet(options.assets, n);           // throws: a set that is there must be readable
-        ++found;
+        try { sets[n] = ReadSet(options.assets, n); ++found; }
+        catch (const std::exception& e) { sets[n].failure = e.what(); }
     }
-    if (!found) throw std::runtime_error("no FP8 model in " + options.assets.string() + " (fp8_set<n>.txt / .bin)");
     s.sets = std::move(sets);
     s.options = options;
     for (auto& [device, d] : s.devices)
@@ -384,7 +382,10 @@ bool SetComplete(unsigned set, std::string* missing) {
     auto& s = S();
     std::lock_guard guard(s.mutex);
     const bool complete = s.enabled && set > 0 && set < kMaxSets && s.sets[set].present;
-    if (!complete && missing) *missing = "fp8/fp8_set" + std::to_string(set) + ".txt and .bin";
+    if (!complete && missing) {
+        *missing = set < kMaxSets && !s.sets[set].failure.empty() ? s.sets[set].failure
+            : "fp8/fp8_set" + std::to_string(set) + ".txt and .bin";
+    }
     return complete;
 }
 

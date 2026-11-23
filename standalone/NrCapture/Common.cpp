@@ -78,6 +78,10 @@ std::filesystem::path ResolveRuntimePath(const std::filesystem::path& saved, con
         return std::filesystem::is_regular_file(path, error);
     };
     const auto selected = (saved.is_absolute() ? saved : directory / saved).lexically_normal();
+    if (!chosen.empty()) {
+        const auto explicitPath = (chosen.is_absolute() ? chosen : directory / chosen).lexically_normal();
+        if (!_wcsicmp(selected.c_str(), explicitPath.c_str())) return selected;
+    }
     const auto bundled = directory / L"runtime" / L"nvngx_dlssnr.dll";
     const auto adjacent = directory / L"nvngx_dlssnr.dll";
     // Another package's bundled runtime (<package>/runtime/nvngx_dlssnr.dll beside its own display_filter.exe)

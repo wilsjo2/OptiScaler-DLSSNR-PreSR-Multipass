@@ -28,6 +28,7 @@ struct Operation {
     NVAPI_CU_KERNEL_LAUNCH_PARAMS base{};
     Launch driver = nullptr;
     std::function<NvAPI_Status(ID3D12GraphicsCommandList*, const NVAPI_CU_KERNEL_LAUNCH_PARAMS&)> firstFallback;
+    mutable std::string failure;
     unsigned weightSet = ~0u;
     int swinSlot = -1;
     uint64_t record = 0, blend = 0;
@@ -35,11 +36,15 @@ struct Operation {
 // A null function is a logical operation. Only this CPU pipeline receives one. The last
 // stage resolves an explicit base kernel or rejects the operation before driver submission.
 inline thread_local const Operation* current = nullptr;
+inline NvAPI_Status Reject(const char* reason) {
+    if (current) current->failure = reason;
+    return NVAPI_ERROR;
+}
 inline unsigned WeightSet(unsigned fallback) { return current ? current->weightSet : fallback; }
 inline bool Paused(bool paused) { return !current && paused; }
 struct Scope {
     const Operation* previous;
-    explicit Scope(const Operation& operation) : previous(current) { current = &operation; }
+    explicit Scope(const Operation& operation) : previous(current) { operation.failure.clear(); current = &operation; }
     ~Scope() { current = previous; }
 };
 inline NvAPI_Status Submit(ID3D12GraphicsCommandList* list, const NVAPI_CU_KERNEL_LAUNCH_PARAMS* kernels, NvU32 count) {
@@ -47,7 +52,11 @@ inline NvAPI_Status Submit(ID3D12GraphicsCommandList* list, const NVAPI_CU_KERNE
     if (kernels->hFunction) return current->driver(list, kernels, count);
     auto base = current->base;
     if (base.paramSize != kernels->paramSize) return NVAPI_ERROR;
-    if (!base.hFunction) return current->firstFallback ? current->firstFallback(list, *kernels) : NVAPI_ERROR;
+    if (!base.hFunction) {
+        if (!current->firstFallback) return Reject("no kernel for the selected precision");
+        try { return current->firstFallback(list, *kernels); }
+        catch (const std::exception& e) { return Reject(e.what()); }
+    }
     base.pParams = kernels->pParams;
     return current->driver(list, &base, 1);
 }

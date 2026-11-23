@@ -251,7 +251,7 @@ void Configure(bool wanted, const std::filesystem::path& assets)
         Say("FAILED to load, so a pass that asks for a 4-bit model is not applied: " + gEnableProblem);
 }
 
-void BeginEvaluation(unsigned requestedPreset, ID3D12GraphicsCommandList* commands)
+bool BeginEvaluation(unsigned requestedPreset, ID3D12GraphicsCommandList* commands)
 {
     std::lock_guard guard(gMutex);
     gEvaluatingPreset = requestedPreset;
@@ -265,7 +265,7 @@ void BeginEvaluation(unsigned requestedPreset, ID3D12GraphicsCommandList* comman
         // The whole pass runs on the own pass host: none of the layers has anything to do.
         NrPassRuntime::Activate(model, commands);
         gSetMissing.clear();
-        return;
+        return true;
     }
     if (gFp8)
     {
@@ -275,11 +275,11 @@ void BeginEvaluation(unsigned requestedPreset, ID3D12GraphicsCommandList* comman
         std::string file;
         if (gOn && gFp8Problem.empty() && !NrFp8::SetComplete(set, &file))
             gSetMissing = "a weight file of this model is missing (OptiScaler/nvfp4/" + file + ")";
-        NrPassRuntime::Activate(gSetMissing.empty() && gFp8Problem.empty() ? model : NrPassRuntime::Select(0),
-                                commands);
+        if (!gOn || !gSetMissing.empty() || !gFp8Problem.empty()) return false;
+        NrPassRuntime::Activate(model, commands);
         gFp8Faults = NrFp8::Faults();
         gFp8Completed = NrFp8::Completed();
-        return;
+        return true;
     }
     const auto taken = NrPassRuntime::BindFourBitWeights(model);
     gSetMissing.clear();
@@ -293,10 +293,10 @@ void BeginEvaluation(unsigned requestedPreset, ID3D12GraphicsCommandList* comman
             !NrFfnV2::SetComplete(taken, &file))
             gSetMissing = "a weight file of this model is missing or incomplete (OptiScaler/nvfp4/" + file + ")";
     }
-    // Keep an incomplete model inactive. RunHost and OursRan report the missing weight file.
-    NrPassRuntime::Activate(gSetMissing.empty() ? model : NrPassRuntime::Select(0), commands);
-    if (gOurs && gOn)
-        gBefore = Read();
+    if (gOurs && (!gOn || !gSetMissing.empty() || !gEnableProblem.empty())) return false;
+    NrPassRuntime::Activate(model, commands);
+    if (gOurs) gBefore = Read();
+    return true;
 }
 
 void EndEvaluation(ID3D12GraphicsCommandList* list) { NrPassRuntime::End(list); }
@@ -346,8 +346,6 @@ bool OursRan(bool whole)
             why = "split blocks and transformer: " + NrNet4::Status(false);
         else if (whole && now.ffn <= gBefore.ffn)
             why = "feed-forward: " + NrFfnV2::Status(false);
-        else if (NrFfnV2::Failed())
-            why = "a feed-forward pair failed half-way";
         // Our kernels ran, but not all of the pass: a launch that was left to the runtime's kernel and weights, or run
         // with another weight set, makes the picture a mix of two models.
         else if (now.swinFaults > gBefore.swinFaults)

@@ -873,9 +873,10 @@ auto DlssNr_Dx12::State::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
             if (borrowing)
                 NrPassBorrow::BeginEvaluation(evaluation);
             // Which kernels and weights this pass runs; told where the evaluation ends whatever its outcome.
-            DlssNr::Nvfp4::BeginEvaluation(DlssNr::Profiles::RequestedPreset(cfg, pass), cmdList);
-            result = static_cast<int>(nr.models[pass].Run(cmdList, device, modelFrame, PassSettings(cfg, pass),
-                                                          frame.SubmissionEpoch, &evaluated));
+            const bool ready = DlssNr::Nvfp4::BeginEvaluation(DlssNr::Profiles::RequestedPreset(cfg, pass), cmdList);
+            result = ready ? static_cast<int>(nr.models[pass].Run(cmdList, device, modelFrame, PassSettings(cfg, pass),
+                                                                  frame.SubmissionEpoch, &evaluated))
+                           : NVSDK_NGX_Result_Fail;
             DlssNr::Nvfp4::EndEvaluation(cmdList);
             // A borrowed part of an evaluation runs no kernels of its own.
             const bool wholeEvaluation =
@@ -883,10 +884,14 @@ auto DlssNr_Dx12::State::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
             const auto outcome = borrowing ? NrPassBorrow::EndEvaluation() : NrPassBorrow::Outcome::Native;
             ++evaluation;
             modelRunning = evaluated && result == NVSDK_NGX_Result_Success;
-            if (!evaluated || result != NVSDK_NGX_Result_Success)
-                break;
-            if (!DlssNr::Nvfp4::OursRan(wholeEvaluation))
+            if ((!ready || evaluated) && !DlssNr::Nvfp4::OursRan(wholeEvaluation))
+            {
                 nvfp4Rejected = true;
+                finalAnswer = nullptr;
+                break;
+            }
+            if (!modelRunning)
+                break;
             if (outcome == NrPassBorrow::Outcome::Dropped)
             {
                 // The rest of this evaluation's kernels never ran: passOutput is stale and this feature's history is
@@ -966,10 +971,11 @@ auto DlssNr_Dx12::State::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
             bool evaluated = false;
             modelFrame.color = modelInput;
             modelFrame.output = nr.compareAnswer;
-            DlssNr::Nvfp4::BeginEvaluation(compareModel, cmdList);
-            const auto compared =
-                compareContext.Run(cmdList, device, modelFrame, DlssNr::Profiles::CompareSettings(cfg),
-                                   frame.SubmissionEpoch, &evaluated);
+            const bool ready = DlssNr::Nvfp4::BeginEvaluation(compareModel, cmdList);
+            const auto compared = ready ? compareContext.Run(cmdList, device, modelFrame, DlssNr::Profiles::CompareSettings(cfg),
+                                                              frame.SubmissionEpoch, &evaluated)
+                                        : NVSDK_NGX_Result_Fail;
+            if (!ready) DlssNr::Nvfp4::OursRan(true);
             DlssNr::Nvfp4::EndEvaluation(cmdList);
             if (!hadFeature && compareContext.HasFeature())
                 NrPassBorrow::Reset();
@@ -1028,9 +1034,8 @@ auto DlssNr_Dx12::State::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Resource*
     nr.reset = clampFailed || finalAnswer == nullptr;
     if (nvfp4Rejected)
     {
-        // The answer is, at least in part, the runtime's own model's. It is not shown: the picture stays unprocessed
-        // and the histories start again, so the first frame our kernels do run starts clean.
-        ReportSkipOnce("a pass asked for a 4-bit model that did not run; there is no fallback to the original model");
+        // Invalidate the entire chain, including any earlier successful pass.
+        ReportSkipOnce("the selected NR model could not run; leaving the frame unprocessed");
         finalAnswer = nullptr;
         nr.reset = true;
         modelRunning = false;

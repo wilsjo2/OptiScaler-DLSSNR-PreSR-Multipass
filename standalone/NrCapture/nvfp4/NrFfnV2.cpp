@@ -162,7 +162,7 @@ using Target = NativeTarget;
 
 struct State {
     std::recursive_mutex mutex;
-    bool enabled = false, broken = false, failed = false;
+    bool enabled = false, failed = false;
     bool paused = false;                        // Pause(): this evaluation is the runtime's
     Options options;
     std::array<bool, 2> modelFiles{true, true}; // a model's folder is in the asset folder (a package may leave Model B's out)
@@ -334,8 +334,10 @@ void LoadWeights(ModelWeights& m, ID3D12Device* device, const fs::path& root) {
         for (unsigned n = 2; n < setAt.size(); ++n) {
             const fs::path file = root / ("ffn_v2_set" + std::to_string(n) + ".bin");
             if (std::error_code ignored; !fs::exists(file, ignored)) continue;
+            std::error_code error;
+            if (fs::file_size(file, error) != first || error) continue; // SetAt rejects this specific numbered set.
             const auto more = ReadAsset(file);
-            if (more.size() != first) throw std::runtime_error(file.filename().string() + " has another size than ffn_v2.bin");
+            if (more.size() != first) continue;
             setAt[n] = (blob.size() + 255) / 256 * 256;
             blob.resize(setAt[n]);
             blob.insert(blob.end(), more.begin(), more.end());
@@ -412,11 +414,15 @@ struct PartialParams { ContractParams p; uint64_t partial; };
 static_assert(sizeof(ContractParams) == 88 && sizeof(PartialParams) == 96);
 #pragma pack(pop)
 
-// Where the records of the set asked for start in the weights of a model. A numbered set without a file, or trained
-// records asked for and absent, runs the next best as before, and is counted (Faults()).
-uint64_t SetAt(State& s, const ModelWeights& weights, const Options& opt) {
-    if (NrFourBitPlan::WeightSet(s.passSet) < weights.setAt.size() && weights.setAt[NrFourBitPlan::WeightSet(s.passSet)]) return weights.setAt[NrFourBitPlan::WeightSet(s.passSet)];
-    if (NrFourBitPlan::WeightSet(s.passSet) < weights.setAt.size() || (opt.trained && !weights.trained && !weights.trainedIsFirst)) ++s.faults;
+uint64_t SetAt(const State& s, const ModelWeights& weights, const Options& opt) {
+    const auto set = NrFourBitPlan::WeightSet(s.passSet);
+    if (set != kDefaultSet) {
+        if (set >= weights.setAt.size() || !weights.setAt[set])
+            throw std::runtime_error("missing ffn_v2_set" + std::to_string(set) + ".bin");
+        return weights.setAt[set];
+    }
+    if (opt.trained && !weights.trained && !weights.trainedIsFirst)
+        throw std::runtime_error("missing ffn_v2_trained.bin");
     return opt.trained ? weights.trained : 0;
 }
 
@@ -447,7 +453,8 @@ int RecordExpand(ID3D12GraphicsCommandList* commands, ID3D12Device* device, cons
     auto& buffers = session.blocks[block];
     const auto& w = weights.blocks[block];
     const auto& opt = s.options;
-    // Allocate before the first launch so allocation failure can safely keep the FP8 pair.
+    const uint64_t set = SetAt(s, weights, opt);
+    // Validate records and reserve scratch before submitting the first kernel of the pair.
     if (SmallContract(weights, tokens, opt) && weights.smallSplit) {
         const uint64_t bytes = uint64_t(weights.smallSplit) * (8 * tiles) * 256 * 64 * sizeof(float);
         if (!buffers.partial.resource) buffers.partial = Allocate(device, bytes);
@@ -461,7 +468,6 @@ int RecordExpand(ID3D12GraphicsCommandList* commands, ID3D12Device* device, cons
                           tokens, w.tx, generation};
     LaunchKernel(commands, d.pack, &pack, sizeof pack, tiles * 8, 16, 0);
     if ((opt.barriers & 2) || !chained) Barrier(commands);
-    const uint64_t set = SetAt(s, weights, opt);
     const ExpandParams expand{buffers.xq.Address(), weights.weights.Address() + set + w.w1, buffers.hq.Address(), session.FlagAddress(block, tiles, true),
                               chained ? session.FlagAddress(block, tiles, false) : 0, tokens, w.out1, w.th,
                               opt.expandGroups, opt.expandHalves, generation};
@@ -534,11 +540,14 @@ NvAPI_Status __cdecl CreateFunction(ID3D12Device* device, NVDX_ObjectHandle modu
 // Which model the evaluation that has just reached its first expand belongs to; -1 leaves it to the runtime.
 int ChooseModel(State& s, const ListState& list) {
     if (!s.enabled || NrFourBitPlan::Paused(s.paused)) return -1;
-    if (NrFourBitPlan::current) return !s.options.modelFolders || s.modelFiles[0] ? 0 : -1;
+    if (NrFourBitPlan::current) {
+        if (s.options.modelFolders && !s.modelFiles[0]) throw std::runtime_error("missing modelA/ffn_v2.txt");
+        return 0;
+    }
     if (!s.options.modelFolders) return 0;
     for (int model = 0; model < 2; ++model)
         if (list.counting && (list.told ? list.told : list.launches) == kFirstExpand[model]) {
-            if (!s.modelFiles[model]) return -1;    // no 4-bit files for this model here: its passes are the runtime's own
+            if (!s.modelFiles[model]) throw std::runtime_error(model ? "missing modelB/ffn_v2.txt" : "missing modelA/ffn_v2.txt");
             if (RuntimeCarries(s, model)) return model;
             Notice(s, "off: no NR runtime is loaded");
             return -1;
@@ -549,30 +558,19 @@ int ChooseModel(State& s, const ListState& list) {
 
 // Something went wrong while a feed-forward launch was being replaced. The state is settled before anything is
 // reported, so that a failure to report cannot change what happens to the launch.
-NvAPI_Status Fail(State& s, ListState& list, ID3D12GraphicsCommandList* commands, const NVAPI_CU_KERNEL_LAUNCH_PARAMS* kernels, NvU32 count,
-                  const char* what) noexcept {
-    const bool half = list.pending.active;
+NvAPI_Status Fail(State& s, ListState& list, const char* what) {
     ++s.faults;
-    s.enabled = false;
-    list.replacing = false;
-    list.pending.active = false;
-    if (!half) {
-        // Nothing of this pair was replaced (our pack alone is harmless): the runtime's own kernels carry on.
-        Say(s, "off, the runtime's own kernels are in use: ", what);
-        return Submit(s, commands, kernels, count);
-    }
-    // The runtime's contract would wait for an expand that never ran. Launch nothing more of this evaluation.
     s.failed = true;
-    const bool boundary = list.counting;
-    if (boundary) list.dropping = true; else s.broken = true;      // broken: no evaluation boundary to resume at
-    Say(s, "failed half-way through a pair, switched off: ", what);
-    return boundary ? NVAPI_OK : NVAPI_ERROR;
+    list.replacing = false;
+    list.dropping = true;
+    list.pending.active = false;
+    Say(s, "feed-forward evaluation stopped: ", what);
+    return NrFourBitPlan::Reject(what);
 }
 
 NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_KERNEL_LAUNCH_PARAMS* kernels, NvU32 count) {
     auto& s = S();
     std::lock_guard guard(s.mutex);
-    if (s.broken) return NVAPI_ERROR;
     Kind kind = Other;
     const Target* target = nullptr;
     if (NrFourBitPlan::current && kernels && count == 1 && !kernels->hFunction) {
@@ -592,7 +590,7 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
     }
     auto known = s.lists.find(commands);
     if (known != s.lists.end()) {
-        if (known->second.dropping) return NVAPI_OK;
+        if (known->second.dropping) return NVAPI_ERROR;
         ++known->second.launches;
     }
     if (kind == Other) return Submit(s, commands, kernels, count);
@@ -615,11 +613,12 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
                     memcpy(dims, static_cast<const char*>(kernels->pParams) + 64, 8);
                     const uint64_t size = uint64_t(dims[0]) * dims[1];
                     std::string text;
-                    if ((list.sourceTokens ? list.sourceTokens : size) < s.options.minTokens) {
+                    const auto minTokens = NrFourBitPlan::current ? s.options.nativeMinTokens : s.options.minTokens;
+                    if ((list.sourceTokens ? list.sourceTokens : size) < minTokens) {
                         // Small frames leave most of the GPU idle either way; the three NVFP4 launches then cost as much as
                         // the two they replace, so the result would change for nothing.
                         char megapixels[32];
-                        snprintf(megapixels, sizeof megapixels, "%.1f", s.options.minTokens * 3840.0 / 1e6);
+                        snprintf(megapixels, sizeof megapixels, "%.1f", minTokens * 3840.0 / 1e6);
                         text = std::string("off at this resolution: only faster from ") + megapixels + " megapixels up";
                     } else if (!s.sessions.count({target->device, size})) {
                         // Buffers of a size stay until ReleaseDevice() (recorded command lists refer to them), so the
@@ -627,7 +626,7 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
                         size_t held = 0;
                         for (const auto& entry : s.sessions) held += entry.first.first == target->device;
                         for (const auto& entry : s.retired) held += entry.device == target->device;
-                        if (held >= kMaxSessions) text = "off at this resolution: too many frame sizes since the session started";
+                        if (held >= kMaxSessions) throw std::runtime_error("feed-forward allocation limit reached for this device");
                     }
                     if (!text.empty()) {
                         list.replacing = false;
@@ -673,9 +672,9 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
         }
         return NVAPI_OK;
     } catch (const std::exception& error) {
-        return Fail(s, list, commands, kernels, count, error.what());
+        return Fail(s, list, error.what());
     } catch (...) {
-        return Fail(s, list, commands, kernels, count, "unknown error");
+        return Fail(s, list, "unknown error");
     }
 }
 
@@ -773,8 +772,8 @@ void Enable(const Options& options) {
     if (const wchar_t* v = _wgetenv(L"NR_FFN_DEBUG_BARRIERS")) s.options.barriers = unsigned(wcstoul(v, nullptr, 0)) & 15u;
     if (const wchar_t* v = _wgetenv(L"NR_FFN_DEBUG_CHAINED")) s.options.chained = *v != L'0';
     s.failed = false;
-    s.enabled = !s.broken;
-    s.status = s.broken ? "failed; restart to use it again" : "on, waiting for the model's next transformer pass";
+    s.enabled = true;
+    s.status = "on, waiting for the model's next transformer pass";
     s.notice.clear();
     s.lastReplaced = 0;
 }
@@ -819,6 +818,10 @@ void UseSet(unsigned set) {
 bool SetComplete(unsigned set, std::string* missing) {
     auto& s = S();
     std::lock_guard guard(s.mutex);
+    if (!s.enabled || !s.modelFiles[0]) {
+        if (missing) *missing = "modelA/ffn_v2.txt";
+        return false;
+    }
     const bool numbered = set != kDefaultSet;
     const bool complete = numbered ? set < s.setFile.size() && s.setFile[set] : !s.options.trained || s.trainedFile;
     if (!complete && missing)
@@ -901,7 +904,7 @@ std::string Status(bool counters) {
         bool loaded = false, found = false;
         for (const auto& [device, d] : s.devices)
             for (const auto& m : d.models) if (m.ready) { loaded = true; found = found || m.trained != 0 || m.trainedIsFirst; }
-        if (loaded) status += found ? ", trained weights" : ", trained weights not found (the first set is in use)";
+        if (loaded) status += found ? ", trained weights" : ", trained weights missing";
     }
     if (s.smallContracts) status += ", small-map contracts " + std::to_string(s.smallContracts);
     if (!counters) return status;
@@ -911,6 +914,6 @@ std::string Status(bool counters) {
 bool Failed() {
     auto& s = S();
     std::lock_guard guard(s.mutex);
-    return s.failed || s.broken;
+    return s.failed;
 }
 }   // namespace NrFfnV2

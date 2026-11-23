@@ -117,7 +117,7 @@ void* WrapNvapi(unsigned id, void* original);
 // layers the first time one does; they stay loaded (and idle) afterwards.
 void Configure(bool wanted, const std::filesystem::path& assets);
 // Around every evaluation of the NR model recorded on `list`, whatever the pass's model is.
-void BeginEvaluation(unsigned requestedPreset, ID3D12GraphicsCommandList* commands);
+bool BeginEvaluation(unsigned requestedPreset, ID3D12GraphicsCommandList* commands);
 void EndEvaluation(ID3D12GraphicsCommandList* list);
 // True when the requested model completed. Borrowed work is excluded from the expected per-pass layer counts.
 bool OursRan(bool whole);

@@ -539,10 +539,9 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
     ListState& l = found->second;
     const unsigned first = l.index;
     l.index += kernels ? count : 1;
-    if (l.failed) return s.launch(commands, kernels, count);
+    if (l.failed) return NVAPI_ERROR;
     const Set& set = s.sets[l.set];
     unsigned char edited[kMaxParams];
-    bool haveEdited = false;
     NVAPI_CU_KERNEL_LAUNCH_PARAMS theirs{};                    // the runtime's kernel and shape with our record
     try {
         if (!kernels || count == 0) throw std::runtime_error("launch " + std::to_string(first) + " has no kernel");
@@ -589,7 +588,6 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
         }
         theirs = *kernels;
         theirs.pParams = edited;
-        haveEdited = true;
         const Plan& p = PlanFor(s, first, kernels->paramSize);
         if (Leave(s.options, first) || (!p.present && s.options.leaveMissing)) {
             const auto status = s.launch(commands, &theirs, 1);
@@ -618,11 +616,9 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
         ++l.ours; ++s.ours;
         return status;
     } catch (const std::exception& error) {
-        // Something is still launched in its place: a launch left out would leave the kernels after it waiting for flags
-        // that never come. The evaluation is a fault (Finish), and its picture must not be shown.
         l.failed = true;
         l.reason = error.what();
-        return haveEdited ? s.launch(commands, &theirs, 1) : s.launch(commands, kernels, count);
+        return NVAPI_ERROR;
     }
 }
 

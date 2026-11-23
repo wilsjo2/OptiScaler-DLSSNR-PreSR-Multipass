@@ -11,10 +11,7 @@ struct ID3D12GraphicsCommandList;
 // contract launches are swallowed and three kernels of ours (pack, expand, contract) are recorded instead.
 // Kernel source: nvfp4/kernels/ffn_v2.cu.
 //
-// Whatever goes wrong before a pair is replaced leaves the runtime's own kernels in use. A failure between the two
-// halves of a pair cannot fall back (the runtime's contract would wait for an expand that never ran), so the rest of
-// that evaluation's launches are dropped, one frame's result is lost, and the replacement stays off until the next
-// Enable().
+// A failed launch ends that evaluation. Further launches on that list are refused until its next boundary.
 namespace NrFfnV2 {
 struct Options {
     // modelFolders false: the folder with ffn_v2.cubin, ffn_v2.bin and ffn_v2.txt of the model in use (probes).
@@ -35,7 +32,7 @@ struct Options {
     // Evaluations with fewer tokens (width x height / 3840) are left to the runtime's own kernels; 0: no limit.
     // Measured on an RTX 5090: the replacement is slower below about 1600 tokens, level up to 1920 and 18 us per
     // pair faster at 2160 (4K).
-    unsigned minTokens = 0;
+    unsigned minTokens = 0, nativeMinTokens = 0;
     // true: the weights of ffn_v2_trained.bin (the layout and scalars of ffn_v2.bin, other 4-bit codes) where that file
     // sits beside ffn_v2.bin. Both sets are loaded, so this switches at the next evaluation.
     bool trained = false;
@@ -58,23 +55,20 @@ void ReleaseDevice(ID3D12Device* device);
 void EndEvaluation(ID3D12GraphicsCommandList* commands) noexcept;
 std::string Status(bool counters = false);  // one line for a status display; counters: pairs replaced so far
 void SetLog(void (*log)(const char* line));   // where status changes are reported; standard error by default
-bool Failed();                              // a pair failed half-way since the last Enable(); see above
+bool Failed();                              // a feed-forward launch failed since the last Enable()
 // For a layer above this one that leaves launches of the runtime out (the blocks a pass-in-one model does without), so
 // that this layer still knows where it is in the model. RuntimeLaunches: the number of launches the runtime has made in
 // this evaluation, the one passed down next included (the model is recognised by that number at the transformer's
 // first expand). SkipPair: the runtime's next feed-forward pair was left out; the pair after it is the next block's.
 void RuntimeLaunches(ID3D12GraphicsCommandList* commands, unsigned launches, unsigned sourceTokens = 0);
 // The numbered set of the evaluations recorded from now on (a pass-in-one model: 2..7): its own pairs, when the asset
-// folder has <model folder>/ffn_v2_set<n>.bin (the layout of ffn_v2.bin). kDefaultSet, or a set without that file:
-// the first set or the trained one, as Options::trained says.
+// folder has <model folder>/ffn_v2_set<n>.bin. Only kDefaultSet selects records according to Options::trained.
 constexpr unsigned kDefaultSet = ~0u;
 void UseSet(unsigned set);
 // Whether the file of `set` for Model A is in the asset folder (kDefaultSet: ffn_v2_trained.bin where Options::trained
 // asks for it), so that an evaluation with that set runs no other weights in its place. On false, *missing names it.
 bool SetComplete(unsigned set, std::string* missing = nullptr);
-// Since the start: replacements that failed (the kernels of the runtime carried on, or the evaluation was dropped),
-// contracts left to the runtime, and pairs run with other weights than the set asked for. A host that asked for a
-// model of ours compares the value before and after an evaluation: any increase means it is not wholly that model.
+// Cumulative failed replacements and unexpected pass-through contracts.
 unsigned long long Faults();
 unsigned long long CompletedWork();
 // Buffers are kept per frame size (token count), and recorded command lists refer to them. For hosts that can tell

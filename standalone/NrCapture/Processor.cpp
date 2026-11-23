@@ -271,12 +271,13 @@ void ApplyNvfp4(bool wanted, bool trained, bool everySize) {
     NrFfnV2::Options options; options.modelFolders = true; options.trained = trained;
     const wchar_t* folder = _wgetenv(L"NR_NVFP4_ASSETS"); // Development override.
     options.assets = folder && *folder ? std::filesystem::path(folder) : ExecutableDirectory() / L"nvfp4";
-    // Below about 4K the replacement saves nothing (it is slower at 1440p), so those sizes keep the runtime's kernels.
+    // NVIDIA Model B retains its measured size threshold. Native NVFP4 uses the selected precision at every size.
     const wchar_t* least = _wgetenv(L"NR_NVFP4_MIN_TOKENS"); // Development override.
     // A pass-in-one model's feed-forward records are its own: the runtime's kernels would run NVIDIA's weights in their place.
     options.minTokens = least && *least ? unsigned(wcstoul(least, nullptr, 10)) : everySize ? 0 : 2000;
+    options.nativeMinTokens = least && *least ? options.minTokens : 0;
     try { NrFfnV2::Enable(options); Log(std::string("NVFP4 feed-forward: on, ") + (trained ? "trained" : "first") + " weights, assets " + Narrow(options.assets.wstring())); }
-    catch (const std::exception& e) { Log(std::string("NVFP4 feed-forward unavailable: ") + e.what()); }
+    catch (const std::exception& e) { NrFfnV2::Disable(); Log(std::string("NVFP4 feed-forward unavailable: ") + e.what()); }
 }
 std::string Nvfp4Status() { return NrFfnV2::Status(); }
 void ReleaseNvfp4(ID3D12Device* device) { NrFfnV2::ReleaseDevice(device); NrSwin4::ReleaseDevice(device); NrNet4::ReleaseDevice(device); NrFp8::ReleaseDevice(device); NrAmpere::ReleaseDevice(device); NrHost::ReleaseDevice(device); }
@@ -386,7 +387,18 @@ void Processor::Evaluate(ID3D12Resource* colour, ID3D12Resource* depthGuide, ID3
     const unsigned chosen = runtime->RequestedModel(pass);
     const unsigned modelFp8Set = Settings::Fp8Set(chosen);
     const auto model = NrPassRuntime::Select(chosen, modelFp8Set && NrHost::Requested(gpu.device.Get()));
-    NrPassRuntime::BindFourBitWeights(model);
+    const unsigned selected = NrPassRuntime::BindFourBitWeights(model);
+    if (model.backend == NrPassRuntime::Backend::Nvfp4) {
+        std::string missing;
+        bool complete = NrSwin4::SetComplete(selected, &missing);
+        {
+            std::lock_guard guard(nvfp4NetMutex);
+            if (complete && (nvfp4NetMasks[0] || nvfp4NetMasks[1] || nvfp4NetMasks[2]))
+                complete = NrNet4::SetComplete(selected, &missing);
+        }
+        if (complete && nvfp4Applied.load() > 0) complete = NrFfnV2::SetComplete(selected, &missing);
+        if (!complete) throw std::runtime_error(std::format("NR pass {}: model {} unavailable: {}.", pass + 1, chosen, missing));
+    }
     NrPassRuntime::Activate(model, c, chosen == 2);
     const auto evaluate = [&](auto&& run) {
         if (borrowEvaluation < 0) { run(); return; }
@@ -437,8 +449,9 @@ void Processor::Evaluate(ID3D12Resource* colour, ID3D12Resource* depthGuide, ID3
     NrAmpere::UseSet(ampereSet);
     const auto ampereFaults = NrAmpere::Faults(), ampereRan = NrAmpere::Completed() + NrAmpere::Partial();
     const unsigned fp8Set = ampereSet ? 0 : modelFp8Set;
-    if (fp8Set && !NrFp8::SetComplete(fp8Set))
-        throw std::runtime_error(std::format("NR pass {}: the FP8 model's files (nvfp4/fp8/fp8_set{}.*) are not loaded.", pass + 1, fp8Set));
+    std::string missing;
+    if (fp8Set && !NrFp8::SetComplete(fp8Set, &missing))
+        throw std::runtime_error(std::format("NR pass {}: FP8 model {} unavailable: {}", pass + 1, chosen, missing));
     NrFp8::UseSet(fp8Set, c);
     const auto fp8Faults = NrFp8::Faults(), fp8Completed = NrFp8::Completed();
     const auto checkFp8 = [&] {

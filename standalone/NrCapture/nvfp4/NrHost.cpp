@@ -1261,7 +1261,10 @@ void Host::Evaluate(ID3D12GraphicsCommandList* commands, ID3D12Resource* colour,
         } else {
             status = launch(commands, &p, 1);
         }
-        if (status != NVAPI_OK) NvCheck(status, "launch " + std::to_string(l->idx) + " (" + l->name + ")");
+        if (status != NVAPI_OK) {
+            const auto detail = l->fourBit && !l->fourBit->failure.empty() ? ": " + l->fourBit->failure : "";
+            NvCheck(status, "launch " + std::to_string(l->idx) + " (" + l->name + ")" + detail);
+        }
         if (timed) { commands->EndQuery(m.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, query++); m.timedLaunches[timingSlot].push_back(l); }
     }
     if (timed)

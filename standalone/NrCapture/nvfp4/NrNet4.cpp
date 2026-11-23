@@ -229,7 +229,6 @@ struct State {
     std::array<uint64_t,2> sideRuns{};
     std::array<bool, kFamilies> active{};       // a launch of the family was replaced since the last Enable()
     std::array<uint64_t, kFamilies> replaced{}, passed{};
-    uint64_t substituted = 0;                   // launches of ours that ran other records than the set asked for (Faults())
     std::array<std::array<uint64_t, kMaxGroups>, kFamilies> perGroup{};
     uint64_t learnt = 0;
     std::wstring runtimePath;
@@ -610,9 +609,14 @@ void Replace(State& s, ID3D12GraphicsCommandList* commands, ID3D12Device* device
                 if (theirsAt) memcpy(ours + c.dst + (kBlendParam - c.src), &own, 8);
             }
     uint64_t records = s.options.family[family].trained ? d.weights[family].trained : 0;
-    if (NrFourBitPlan::WeightSet(s.passSet) < kMaxSets && s.sets[NrFourBitPlan::WeightSet(s.passSet)].present && d.weights[family].setAt[NrFourBitPlan::WeightSet(s.passSet)]) records = d.weights[family].setAt[NrFourBitPlan::WeightSet(s.passSet)];
-    else if (family != PrePost && (NrFourBitPlan::WeightSet(s.passSet) < kMaxSets || (s.options.family[family].trained && !records && !s.manifest[family].trainedIsFirst)))
-        ++s.substituted;                        // the set asked for (or the trained records) has no file for this family
+    const unsigned set = NrFourBitPlan::WeightSet(s.passSet);
+    if (set != kDefaultSet && family != PrePost) {
+        if (set >= kMaxSets || !s.sets[set].present || !d.weights[family].setAt[set])
+            throw std::runtime_error(std::string(kFamilyName[family]) + "4_set" + std::to_string(set) + ".bin is missing");
+        records = d.weights[family].setAt[set];
+    } else if (s.options.family[family].trained && !records && !s.manifest[family].trainedIsFirst) {
+        throw std::runtime_error(std::string(kFamilyName[family]) + "4_trained.bin is missing");
+    }
     const uint64_t record = d.weights[family].buffer.Address() + records + slot.offset;
     memcpy(ours + slot.w, &record, 8);
     memcpy(ours + slot.options, &options, 4);
@@ -965,8 +969,7 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
             if (action==1) kernels=&pooled;
         } catch (const std::exception& error) {
             Notice(s,std::string("pool failure: ")+error.what());
-            // Never fall back to full-token launches after a pooled stream started.
-            if (list->pool.active) return NVAPI_ERROR;
+            return NrFourBitPlan::Reject(error.what());
         }
     }
     // The layers below never see a launch that a layer above them left out: the feed-forward layer recognises the model
@@ -1059,19 +1062,12 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
         }
         return NVAPI_OK;
     } catch (const std::exception& error) {
-        // Nothing of ours was recorded for this launch: the runtime's own kernel runs.
-        if(list && list->side.active) { Notice(s,std::string("Side4 failed after suppression: ")+error.what());return NVAPI_ERROR; }
-        if (list && number >= 0) list->family[f].state[number] = 1;
-        Notice(s, std::string(kFamilyName[f]) + (forced ? ": a launch was left to the runtime after a kernel of ours had written its own format for it (this frame's picture is wrong): "
-                                                        : ": a launch was left to the runtime: ") + error.what());
+        Notice(s, std::string(kFamilyName[f]) + ": " + error.what());
         ++s.passed[f];
-        return Submit(s, commands, kernels, count);
+        return NrFourBitPlan::Reject(error.what());
     } catch (...) {
-        if(list && list->side.active)return NVAPI_ERROR;
-        if (list && number >= 0) list->family[f].state[number] = 1;
-        Notice(s, std::string(kFamilyName[f]) + ": a launch was left to the runtime: unknown error");
         ++s.passed[f];
-        return Submit(s, commands, kernels, count);
+        return NrFourBitPlan::Reject("network layer failed");
     }
 }
 
@@ -1248,12 +1244,12 @@ bool SetComplete(unsigned set, std::string* missing) {
     auto& s = S();
     std::lock_guard guard(s.mutex);
     for (unsigned f = 0; f < kFamilies; ++f) {
-        if (f == PrePost || !s.options.family[f].groups) continue;
+        if (!s.options.family[f].groups) continue;
         const auto& m = s.manifest[f];
         const std::string stem = std::string(kFamilyName[f]) + "4";
-        bool complete = m.loaded;
+        bool complete = s.enabled && m.loaded;
         std::string file = stem + ".txt";
-        if (complete && set == kDefaultSet) {
+        if (complete && (set == kDefaultSet || f == PrePost)) {
             complete = !s.options.family[f].trained || !m.trained.empty() || m.trainedIsFirst;
             file = stem + "_trained.bin";
         } else if (complete) {
@@ -1278,7 +1274,7 @@ unsigned long long CompletedWork() {
 unsigned long long Faults() {
     auto& s = S();
     std::lock_guard guard(s.mutex);
-    unsigned long long faults = s.substituted;
+    unsigned long long faults = 0;
     for (const auto passed : s.passed) faults += passed;
     return faults;
 }
@@ -1350,7 +1346,7 @@ std::string Status(bool counters) {
         if (!m.loaded) status += "unavailable (" + m.failure + ")";
         else if (!s.enabled) status += "off";
         else status += std::string(s.active[f] ? "active" : s.options.byOrder ? "waiting for the next evaluation" : "waiting to recognise Model A") + " (" + Groups(f, groups) + ")";
-        if (m.loaded && s.options.family[f].trained) status += m.trained.empty() && !m.trainedIsFirst ? ", trained weights not found (the first set is in use)" : ", trained weights";
+        if (m.loaded && s.options.family[f].trained) status += m.trained.empty() && !m.trainedIsFirst ? ", trained weights missing" : ", trained weights";
         if (counters && m.loaded) {
             status += " replaced " + std::to_string(s.replaced[f]) + " [";
             bool first = true;
