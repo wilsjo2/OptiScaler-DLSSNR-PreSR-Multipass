@@ -1131,11 +1131,13 @@ bool Dx11wDx12SC::_WaitForCopyAllocator(UINT slot)
     }
 
     const auto fenceValue = _copyAllocatorFenceValues[slot];
-
-    if (fenceValue == 0)
-        return true;
-
     const auto completedValue = _copyFence->GetCompletedValue();
+    if (completedValue == UINT64_MAX)
+    {
+        LOG_ERROR("D3D12 device removed before reusing copy allocator {}", slot);
+        return false;
+    }
+
     if (completedValue >= fenceValue)
         return true;
 
@@ -1148,10 +1150,17 @@ bool Dx11wDx12SC::_WaitForCopyAllocator(UINT slot)
     }
 
     const auto waitResult = WaitForSingleObject(_copyFenceEvent, 5000);
+    const auto completedAfter = _copyFence->GetCompletedValue();
+    if (completedAfter == UINT64_MAX)
+    {
+        LOG_ERROR("D3D12 device removed while waiting for copy allocator {}", slot);
+        return false;
+    }
+
     if (waitResult != WAIT_OBJECT_0)
     {
         LOG_ERROR("copy allocator fence wait failed. slot {}, fence {}, completed {}, waitResult {:X}", slot,
-                  fenceValue, _copyFence->GetCompletedValue(), waitResult);
+                  fenceValue, completedAfter, waitResult);
         return false;
     }
 

@@ -160,6 +160,12 @@ bool IFeature_Dx11wDx12::ProcessDx11Textures(const NVSDK_NGX_Parameter* InParame
 
     const auto allocatorFenceValue = Dx12CommandAllocatorFenceValue[commandFrame];
     const auto completedBefore = Dx12Fence->GetCompletedValue();
+    if (completedBefore == UINT64_MAX)
+    {
+        LOG_ERROR("D3D12 device removed before reusing upscaler allocator {}", commandFrame);
+        return false;
+    }
+
     if (allocatorFenceValue != 0 && completedBefore < allocatorFenceValue)
     {
         result = Dx12Fence->SetEventOnCompletion(allocatorFenceValue, Dx12FenceEvent);
@@ -174,6 +180,11 @@ bool IFeature_Dx11wDx12::ProcessDx11Textures(const NVSDK_NGX_Parameter* InParame
         const auto waitResult = WaitForSingleObject(Dx12FenceEvent, 5000);
         const auto waitMs = Util::MillisecondsNow() - waitStart;
         const auto completedAfter = Dx12Fence->GetCompletedValue();
+        if (completedAfter == UINT64_MAX)
+        {
+            LOG_ERROR("D3D12 device removed while waiting for upscaler allocator {}", commandFrame);
+            return false;
+        }
 
         if (waitMs > 0.25)
         {
