@@ -519,7 +519,19 @@ VkResult VulkanSpoofing::hkvkCreateDevice(VkPhysicalDevice physicalDevice, VkDev
             newExtensionList.push_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
         }
 
-        if (vkDeviceExtensions.contains(std::string(VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME)))
+        // The legacy and KHR buffer address extensions are mutually exclusive. A game using
+        // the promoted Vulkan 1.2 feature also needs the modern address path.
+        bool modernAddresses = std::any_of(newExtensionList.begin(), newExtensionList.end(), [](const char* name) {
+            return std::strcmp(name, VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME) == 0;
+        });
+        for (auto* node = static_cast<const VkBaseInStructure*>(pCreateInfo->pNext); node; node = node->pNext)
+        {
+            if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES ||
+                (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES &&
+                 reinterpret_cast<const VkPhysicalDeviceVulkan12Features*>(node)->bufferDeviceAddress))
+                modernAddresses = true;
+        }
+        if (!modernAddresses && vkDeviceExtensions.contains(std::string(VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME)))
         {
             LOG_DEBUG("  Adding {}", VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
             newExtensionList.push_back(VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);

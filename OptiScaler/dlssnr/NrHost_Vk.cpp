@@ -60,6 +60,7 @@ struct VulkanHost::Impl : NrLayer::Context
     PFN_vkCmdCuLaunchKernelNVX launch;
     PFN_vkGetImageViewHandle64NVX viewHandle;
     PFN_vkGetBufferDeviceAddressKHR bufferAddress;
+    bool legacyAddress;
     std::vector<VkCuModuleNVX> modules;
     std::vector<VkCuFunctionNVX> functions;
     ModelPlan<Launch> plan;
@@ -80,7 +81,11 @@ struct VulkanHost::Impl : NrLayer::Context
         destroyFunction = Proc<PFN_vkDestroyCuFunctionNVX>(d, "vkDestroyCuFunctionNVX");
         launch = Proc<PFN_vkCmdCuLaunchKernelNVX>(d, "vkCmdCuLaunchKernelNVX");
         viewHandle = Proc<PFN_vkGetImageViewHandle64NVX>(d, "vkGetImageViewHandle64NVX");
-        bufferAddress = Proc<PFN_vkGetBufferDeviceAddressKHR>(d, "vkGetBufferDeviceAddressKHR");
+        bufferAddress =
+            reinterpret_cast<PFN_vkGetBufferDeviceAddressKHR>(vkGetDeviceProcAddr(d, "vkGetBufferDeviceAddressKHR"));
+        legacyAddress = !bufferAddress;
+        if (legacyAddress)
+            bufferAddress = Proc<PFN_vkGetBufferDeviceAddressEXT>(d, "vkGetBufferDeviceAddressEXT");
     }
     ~Impl()
     {
@@ -107,7 +112,7 @@ struct VulkanHost::Impl : NrLayer::Context
         vkGetBufferMemoryRequirements(device, storage->buffer, &req);
         VkMemoryAllocateFlagsInfo flags { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO };
         flags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
-        VkMemoryAllocateInfo ai { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &flags };
+        VkMemoryAllocateInfo ai { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, legacyAddress ? nullptr : &flags };
         ai.allocationSize = req.size;
         VkMemoryPropertyFlags host =
             mapped ? VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT : 0;

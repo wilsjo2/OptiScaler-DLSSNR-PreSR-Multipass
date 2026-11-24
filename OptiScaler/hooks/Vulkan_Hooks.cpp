@@ -200,6 +200,7 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
     // not start.
     DlssNr::VkExt::Merged nrExtensions;
     VkPhysicalDeviceBufferDeviceAddressFeatures addresses { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES };
+    VkPhysicalDeviceBufferDeviceAddressFeaturesEXT legacyAddresses { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_EXT };
     bool hostReady = false;
 
     if (Config::Instance()->DlssNrEnabled.value_or_default())
@@ -247,21 +248,24 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
             localCreteInfo.ppEnabledExtensionNames = nrExtensions.names.data();
             localCreteInfo.enabledExtensionCount = (uint32_t) nrExtensions.names.size();
         }
+        const bool legacy = DlssNr::VkExt::ListHas(localCreteInfo.ppEnabledExtensionNames, localCreteInfo.enabledExtensionCount,
+                                                    VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
         if (o_vkGetPhysicalDeviceFeatures2 &&
-            DlssNr::VkExt::ListHas(localCreteInfo.ppEnabledExtensionNames, localCreteInfo.enabledExtensionCount,
-                                   VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME) &&
+            (legacy || DlssNr::VkExt::ListHas(localCreteInfo.ppEnabledExtensionNames, localCreteInfo.enabledExtensionCount,
+                                              VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME)) &&
             DlssNr::VkExt::Contains(supported, VK_NVX_BINARY_IMPORT_EXTENSION_NAME, 2) &&
             DlssNr::VkExt::Contains(supported, VK_NVX_IMAGE_VIEW_HANDLE_EXTENSION_NAME, 3) &&
             DlssNr::VkExt::Contains(supported, "VK_NV_cuda_kernel_launch"))
         {
-            VkPhysicalDeviceFeatures2 support { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &addresses };
+            void* feature = legacy ? static_cast<void*>(&legacyAddresses) : static_cast<void*>(&addresses);
+            VkPhysicalDeviceFeatures2 support { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, feature };
             o_vkGetPhysicalDeviceFeatures2(physicalDevice, &support);
-            hostReady = addresses.bufferDeviceAddress;
+            hostReady = legacy ? legacyAddresses.bufferDeviceAddress : addresses.bufferDeviceAddress;
             // Preserve feature choices already supplied by the game and never duplicate a promoted feature struct.
             bool supplied = false;
             for (auto* node = static_cast<const VkBaseInStructure*>(localCreteInfo.pNext); node; node = node->pNext)
             {
-                if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES)
+                if (!legacy && node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES)
                 {
                     supplied = true;
                     hostReady &= reinterpret_cast<const VkPhysicalDeviceVulkan12Features*>(node)->bufferDeviceAddress != 0;
@@ -271,12 +275,18 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
                     supplied = true;
                     hostReady &= reinterpret_cast<const VkPhysicalDeviceBufferDeviceAddressFeatures*>(node)->bufferDeviceAddress != 0;
                 }
+                else if (node->sType == legacyAddresses.sType)
+                {
+                    supplied = true;
+                    hostReady &= reinterpret_cast<const VkPhysicalDeviceBufferDeviceAddressFeaturesEXT*>(node)->bufferDeviceAddress != 0;
+                }
             }
             if (hostReady && !supplied)
             {
                 addresses.bufferDeviceAddressCaptureReplay = addresses.bufferDeviceAddressMultiDevice = VK_FALSE;
-                addresses.pNext = const_cast<void*>(localCreteInfo.pNext);
-                localCreteInfo.pNext = &addresses;
+                legacyAddresses.bufferDeviceAddressCaptureReplay = legacyAddresses.bufferDeviceAddressMultiDevice = VK_FALSE;
+                addresses.pNext = legacyAddresses.pNext = const_cast<void*>(localCreteInfo.pNext);
+                localCreteInfo.pNext = feature;
             }
         }
     }
