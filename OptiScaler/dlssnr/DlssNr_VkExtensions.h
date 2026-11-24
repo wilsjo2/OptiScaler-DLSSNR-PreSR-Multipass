@@ -8,6 +8,8 @@
 #include <string_view>
 #include <vector>
 #include <algorithm>
+#include <mutex>
+#include <unordered_set>
 
 namespace DlssNr::VkExt
 {
@@ -20,47 +22,58 @@ inline const char* const kDevice[] = {
     VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
 };
 
+inline std::mutex hostDeviceMutex;
+inline std::unordered_set<VkDevice> hostDevices;
+inline void RecordHostDevice(VkDevice device, bool ready)
+{
+    std::lock_guard lock(hostDeviceMutex);
+    if (ready) hostDevices.insert(device);
+    else hostDevices.erase(device);
+}
+inline bool HostDeviceReady(VkDevice device)
+{
+    std::lock_guard lock(hostDeviceMutex);
+    return hostDevices.contains(device);
+}
+
 // Own the pointer array until vkCreateDevice returns; the names themselves are borrowed.
 struct Merged
 {
     std::vector<const char*> names;
 };
 
-inline std::vector<std::string> SupportedDeviceExtensions(PFN_vkGetInstanceProcAddr getInstanceProcAddr,
+inline std::vector<VkExtensionProperties> SupportedDeviceExtensions(PFN_vkGetInstanceProcAddr getInstanceProcAddr,
                                                           VkInstance instance, VkPhysicalDevice physicalDevice)
 {
-    std::vector<std::string> out;
 
     if (getInstanceProcAddr == nullptr || physicalDevice == VK_NULL_HANDLE)
-        return out;
+        return {};
 
     auto enumerate = (PFN_vkEnumerateDeviceExtensionProperties) getInstanceProcAddr(
         instance, "vkEnumerateDeviceExtensionProperties");
 
     if (enumerate == nullptr)
-        return out;
+        return {};
 
     uint32_t count = 0;
 
     if (enumerate(physicalDevice, nullptr, &count, nullptr) != VK_SUCCESS || count == 0)
-        return out;
+        return {};
 
     std::vector<VkExtensionProperties> props(count);
 
     if (enumerate(physicalDevice, nullptr, &count, props.data()) != VK_SUCCESS)
-        return out;
+        return {};
 
-    out.reserve(count);
-
-    for (const auto& p : props)
-        out.emplace_back(p.extensionName);
-
-    return out;
+    props.resize(count);
+    return props;
 }
 
-inline bool Contains(const std::vector<std::string>& haystack, const char* needle)
+inline bool Contains(const std::vector<VkExtensionProperties>& extensions, std::string_view name, uint32_t revision = 1)
 {
-    return std::find(haystack.begin(), haystack.end(), needle) != haystack.end();
+    return std::any_of(extensions.begin(), extensions.end(), [&](const auto& ext) {
+        return name == ext.extensionName && ext.specVersion >= revision;
+    });
 }
 
 inline bool ListHas(const char* const* list, uint32_t count, const char* needle)

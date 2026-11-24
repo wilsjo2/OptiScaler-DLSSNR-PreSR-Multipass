@@ -17,9 +17,7 @@
 // Game FP8 selects signed Model A and substitutes the selected FP8 weight records.
 // Assets: <OptiScaler.dll's folder>/OptiScaler/nvfp4, laid out as the Display Filter package's nvfp4 folder.
 //
-// NO FALLBACK. A pass that asks for one of these and does not get it (files missing, another runtime build, the Vulkan
-// path, a layer that did not recognise the model) is never shown as a plain Model A pass: OursRan() says so, the
-// caller leaves the picture unprocessed, and Problem() gives the reason for the menu and the log.
+// When a requested model fails, the caller leaves the picture unprocessed and reports the reason in the menu and log.
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -123,7 +121,7 @@ bool BeginEvaluation(unsigned requestedPreset, ID3D12GraphicsCommandList* comman
 void EndEvaluation(ID3D12GraphicsCommandList* list);
 // True when the requested model completed. Borrowed work is excluded from the expected per-pass layer counts.
 bool OursRan(bool whole);
-// A path that cannot run a 4-bit model at all (Vulkan) says so here instead of running the runtime's own.
+// Publish a setup failure before a D3D12 evaluation can run.
 void Refuse(const char* reason);
 // Why a pass that asks for a 4-bit model is not being applied; empty while it runs or while it is still starting.
 std::string Problem();

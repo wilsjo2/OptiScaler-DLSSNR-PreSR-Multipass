@@ -33,6 +33,7 @@ static HWND _hwnd = nullptr;
 
 static std::mutex _vkPresentMutex;
 
+static PFN_vkDestroyDevice o_vkDestroyDevice = nullptr;
 PFN_vkCreateDevice o_vkCreateDevice = nullptr;
 PFN_vkCreateInstance o_vkCreateInstance = nullptr;
 PFN_vkCreateWin32SurfaceKHR o_vkCreateWin32SurfaceKHR = nullptr;
@@ -155,6 +156,12 @@ static VkResult hkvkCreateInstance(const VkInstanceCreateInfo* pCreateInfo, cons
     return result;
 }
 
+static VKAPI_ATTR void VKAPI_CALL hkvkDestroyDevice(VkDevice device, const VkAllocationCallbacks* allocator)
+{
+    DlssNr::VkExt::RecordHostDevice(device, false);
+    o_vkDestroyDevice(device, allocator);
+}
+
 VALIDATE_HOOK(hkvkCreateDevice, PFN_vkCreateDevice)
 static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo* pCreateInfo,
                                  const VkAllocationCallbacks* pAllocator, VkDevice* pDevice)
@@ -192,13 +199,16 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
     // offers -- asking for an extension a driver does not have makes vkCreateDevice fail and the game
     // not start.
     DlssNr::VkExt::Merged nrExtensions;
+    VkPhysicalDeviceBufferDeviceAddressFeatures addresses { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES };
+    bool hostReady = false;
 
     if (Config::Instance()->DlssNrEnabled.value_or_default())
     {
         const auto supported = DlssNr::VkExt::SupportedDeviceExtensions(
             o_vkGetInstanceProcAddr, State::Instance().VulkanInstance, physicalDevice);
 
-        nrExtensions.names.assign(localCreteInfo.ppEnabledExtensionNames,
+        if (localCreteInfo.enabledExtensionCount)
+            nrExtensions.names.assign(localCreteInfo.ppEnabledExtensionNames,
                                   localCreteInfo.ppEnabledExtensionNames + localCreteInfo.enabledExtensionCount);
 
         std::string present, added, missing;
@@ -208,6 +218,10 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
             const bool already = DlssNr::VkExt::ListHas(localCreteInfo.ppEnabledExtensionNames,
                                                         localCreteInfo.enabledExtensionCount, want);
 
+            if (!strcmp(want, VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME) &&
+                DlssNr::VkExt::ListHas(localCreteInfo.ppEnabledExtensionNames, localCreteInfo.enabledExtensionCount,
+                                       VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME))
+                continue;
             if (already)
                 present += std::string(present.empty() ? "" : ", ") + want;
             else if (!DlssNr::VkExt::Contains(supported, want))
@@ -233,9 +247,43 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
             localCreteInfo.ppEnabledExtensionNames = nrExtensions.names.data();
             localCreteInfo.enabledExtensionCount = (uint32_t) nrExtensions.names.size();
         }
+        if (o_vkGetPhysicalDeviceFeatures2 &&
+            DlssNr::VkExt::ListHas(localCreteInfo.ppEnabledExtensionNames, localCreteInfo.enabledExtensionCount,
+                                   VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME) &&
+            DlssNr::VkExt::Contains(supported, VK_NVX_BINARY_IMPORT_EXTENSION_NAME, 2) &&
+            DlssNr::VkExt::Contains(supported, VK_NVX_IMAGE_VIEW_HANDLE_EXTENSION_NAME, 3) &&
+            DlssNr::VkExt::Contains(supported, "VK_NV_cuda_kernel_launch"))
+        {
+            VkPhysicalDeviceFeatures2 support { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &addresses };
+            o_vkGetPhysicalDeviceFeatures2(physicalDevice, &support);
+            hostReady = addresses.bufferDeviceAddress;
+            // Preserve feature choices already supplied by the game and never duplicate a promoted feature struct.
+            bool supplied = false;
+            for (auto* node = static_cast<const VkBaseInStructure*>(localCreteInfo.pNext); node; node = node->pNext)
+            {
+                if (node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES)
+                {
+                    supplied = true;
+                    hostReady &= reinterpret_cast<const VkPhysicalDeviceVulkan12Features*>(node)->bufferDeviceAddress != 0;
+                }
+                else if (node->sType == addresses.sType)
+                {
+                    supplied = true;
+                    hostReady &= reinterpret_cast<const VkPhysicalDeviceBufferDeviceAddressFeatures*>(node)->bufferDeviceAddress != 0;
+                }
+            }
+            if (hostReady && !supplied)
+            {
+                addresses.bufferDeviceAddressCaptureReplay = addresses.bufferDeviceAddressMultiDevice = VK_FALSE;
+                addresses.pNext = const_cast<void*>(localCreteInfo.pNext);
+                localCreteInfo.pNext = &addresses;
+            }
+        }
     }
 
     auto result = o_vkCreateDevice(physicalDevice, &localCreteInfo, pAllocator, pDevice);
+    if (result == VK_SUCCESS)
+        DlssNr::VkExt::RecordHostDevice(*pDevice, hostReady);
 
     if (Config::Instance()->DlssNrEnabled.value_or_default())
         LOG_INFO("DLSS-NR Vulkan: vkCreateDevice returned {} with {} extensions requested", (int) result,
@@ -459,6 +507,9 @@ PFN_vkVoidFunction hkvkGetInstanceProcAddr(VkInstance instance, const char* pNam
         return (PFN_vkVoidFunction) hkvkCreateDevice;
     }
 
+    if (procName == "vkDestroyDevice" && o_vkDestroyDevice)
+        return reinterpret_cast<PFN_vkVoidFunction>(hkvkDestroyDevice);
+
     auto result = VulkanSpoofing::hkvkGetInstanceProcAddr(orgFunc, pName);
     if (result != VK_NULL_HANDLE)
         return result;
@@ -493,6 +544,9 @@ PFN_vkVoidFunction hkvkGetDeviceProcAddr(VkDevice device, const char* pName)
         return (PFN_vkVoidFunction) hkvkCreateDevice;
     }
 
+    if (procName == "vkDestroyDevice" && o_vkDestroyDevice)
+        return reinterpret_cast<PFN_vkVoidFunction>(hkvkDestroyDevice);
+
     auto result = VulkanSpoofing::hkvkGetDeviceProcAddr(orgFunc, pName);
     if (result != VK_NULL_HANDLE)
         return result;
@@ -514,6 +568,7 @@ void VulkanHooks::Hook(HMODULE vulkan1)
 
     FARPROC address = nullptr;
 
+    o_vkDestroyDevice = (PFN_vkDestroyDevice) KernelBaseProxy::GetProcAddress_()(vulkan1, "vkDestroyDevice");
     o_vkCreateDevice = (PFN_vkCreateDevice) KernelBaseProxy::GetProcAddress_()(vulkan1, "vkCreateDevice");
     o_vkCreateInstance = (PFN_vkCreateInstance) KernelBaseProxy::GetProcAddress_()(vulkan1, "vkCreateInstance");
 
@@ -541,6 +596,7 @@ void VulkanHooks::Hook(HMODULE vulkan1)
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
 
+    if (o_vkDestroyDevice) DetourAttach(&(PVOID&) o_vkDestroyDevice, hkvkDestroyDevice);
     if (o_vkCreateDevice != nullptr)
         DetourAttach(&(PVOID&) o_vkCreateDevice, hkvkCreateDevice);
 
@@ -564,6 +620,7 @@ void VulkanHooks::Hook(HMODULE vulkan1)
     {
         LOG_ERROR("Failed to hook Vulkan, error code: {:X}", detourResult);
         o_vkCreateDevice = nullptr;
+        o_vkDestroyDevice = nullptr;
         o_vkCreateInstance = nullptr;
         o_vkGetInstanceProcAddr = nullptr;
         o_vkGetDeviceProcAddr = nullptr;
@@ -583,6 +640,7 @@ void VulkanHooks::Unhook()
     if (o_CreateSwapchainKHR != nullptr)
         DetourDetach(&(PVOID&) o_CreateSwapchainKHR, hkvkCreateSwapchainKHR);
 
+    if (o_vkDestroyDevice) DetourDetach(&(PVOID&) o_vkDestroyDevice, hkvkDestroyDevice);
     if (o_vkCreateDevice != nullptr)
         DetourDetach(&(PVOID&) o_vkCreateDevice, hkvkCreateDevice);
 
@@ -605,6 +663,7 @@ void VulkanHooks::Unhook()
         o_QueuePresentKHR = nullptr;
         o_CreateSwapchainKHR = nullptr;
         o_vkCreateDevice = nullptr;
+        o_vkDestroyDevice = nullptr;
         o_vkCreateInstance = nullptr;
         o_vkGetInstanceProcAddr = nullptr;
         o_vkGetDeviceProcAddr = nullptr;

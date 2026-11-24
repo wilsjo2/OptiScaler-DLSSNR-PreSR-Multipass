@@ -10,6 +10,26 @@
 
 namespace NrPassRuntime
 {
+struct Work
+{
+    bool swinActive = false;
+    unsigned long long swin = 0, net = 0, ffn = 0;
+    // Launches that did not run as asked (each layer: Faults()): any during an evaluation and it is not our model.
+    unsigned long long swinFaults = 0, netFaults = 0, ffnFaults = 0;
+};
+
+inline Work ReadWork()
+{
+    Work work;
+    work.swin = NrSwin4::CompletedWork(work.swinActive);
+    work.net = NrNet4::CompletedWork();
+    work.ffn = NrFfnV2::CompletedWork();
+    work.swinFaults = NrSwin4::Faults();
+    work.netFaults = NrNet4::Faults();
+    work.ffnFaults = NrFfnV2::Faults();
+    return work;
+}
+
 enum class Backend { Nvidia, Nvfp4, Fp8, Host, Unavailable };
 
 struct Model

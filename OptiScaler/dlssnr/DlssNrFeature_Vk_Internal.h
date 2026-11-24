@@ -6,6 +6,7 @@
 #include <shaders/dlssnr/DlssNr_Guides.h>
 #include <shaders/dlssnr/DlssNr_Spatial.h>
 #include "PassProfiles.h"
+#include "NrHost_Vk.h"
 #include <nvsdk_ngx_vk.h>
 #include <shaders/output_scaling/OS_Vk.h>
 #include <mutex>
@@ -18,14 +19,16 @@ namespace DlssNr
 // Sharing either would couple temporal histories when two passes use the same profile.
 struct NgxPassVk
 {
+    std::unique_ptr<VulkanHost> host;
     NVSDK_NGX_Handle* feature = nullptr;
+    bool Ready() const { return host || feature; }
     NVSDK_NGX_Parameter* parameters = nullptr;
 };
 
 struct VkState
 {
     bool failed = false;
-    const char* reason = "";
+    std::string reason;
 
     VkInstance instance = VK_NULL_HANDLE;
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;

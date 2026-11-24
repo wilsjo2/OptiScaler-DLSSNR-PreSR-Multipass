@@ -21,14 +21,6 @@ namespace DlssNr::Nvfp4
 {
 namespace
 {
-struct Work
-{
-    bool swinActive = false;
-    unsigned long long swin = 0, net = 0, ffn = 0;
-    // Launches that did not run as asked (each layer: Faults()): any during an evaluation and it is not our model.
-    unsigned long long swinFaults = 0, netFaults = 0, ffnFaults = 0;
-};
-
 void (*gLog)(const char*) = nullptr;
 std::mutex gMutex;
 bool gOn = false;
@@ -38,7 +30,7 @@ std::string gEnableProblem; // a layer that could not be switched on: nothing ca
 std::string gRefused;       // a path that cannot run these models at all
 bool gOurs = false;         // the evaluation in progress asked for a 4-bit model
 std::string gSetMissing;     // the model asked for lacks a weight file: nothing else is run in its place
-Work gBefore;
+NrPassRuntime::Work gBefore;
 std::string gWhy;     // why the last of them did not
 bool gRunning = false, gToldFailed = false;
 // The FP8 pass-in-one models (NrFp8): loaded beside the 4-bit layers, independent of them (they run on RTX 40 too).
@@ -60,17 +52,6 @@ void Say(const std::string& line)
         gLog(line.c_str());
 }
 
-Work Read()
-{
-    Work work;
-    work.swin = NrSwin4::CompletedWork(work.swinActive);
-    work.net = NrNet4::CompletedWork();
-    work.ffn = NrFfnV2::CompletedWork();
-    work.swinFaults = NrSwin4::Faults();
-    work.netFaults = NrNet4::Faults();
-    work.ffnFaults = NrFfnV2::Faults();
-    return work;
-}
 
 } // namespace
 
@@ -308,7 +289,7 @@ bool BeginEvaluation(unsigned requestedPreset, ID3D12GraphicsCommandList* comman
     }
     if (gOurs && (!gOn || !gSetMissing.empty() || !gEnableProblem.empty())) return false;
     NrPassRuntime::Activate(model, commands);
-    if (gOurs) gBefore = Read();
+    if (gOurs) gBefore = NrPassRuntime::ReadWork();
     return true;
 }
 
@@ -352,7 +333,7 @@ bool OursRan(bool whole)
         why = "the NVFP4 host did not record this pass";
     else
     {
-        const Work now = Read();
+        const auto now = NrPassRuntime::ReadWork();
         if (!now.swinActive || now.swin <= gBefore.swin)
             why = "fused blocks: " + NrSwin4::Status(false);
         else if (whole && now.net <= gBefore.net)

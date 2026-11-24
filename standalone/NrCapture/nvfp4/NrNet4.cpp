@@ -6,7 +6,7 @@
 // runtime's block, 32-bit constants, the address of our record and an options word. Ours is launched with the
 // runtime's grid and block. The runtime's neighbours wait for a kernel's flags without a time limit, so a kernel of
 // ours must publish exactly what the runtime's does; that is proven per family before its assets exist.
-#include "NrWeightUpload.h"
+#include "NrLayerDevice.h"
 #include "NrFourBitPlan.h"
 #include <windows.h>
 #include <bcrypt.h>
@@ -99,11 +99,7 @@ int GroupOf(unsigned family, const std::string& name) {
     return -1;
 }
 
-struct Buffer {
-    ComPtr<ID3D12Resource> resource;
-    uint64_t bytes = 0;
-    uint64_t Address() const { return resource->GetGPUVirtualAddress(); }
-};
+using Buffer = NrLayer::Buffer;
 ComPtr<ID3D12Resource> CreateBuffer(ID3D12Device* device, uint64_t bytes, D3D12_HEAP_TYPE heap, D3D12_RESOURCE_STATES state) {
     D3D12_RESOURCE_DESC desc{};
     desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -247,7 +243,11 @@ NvAPI_Status Submit(State& state, ID3D12GraphicsCommandList* list, const NVAPI_C
     return NrFourBitPlan::current ? NrSwin4::SubmitNative(list, kernels, count) : state.launch(list, kernels, count);
 }
 
-State& S() { static State* state = new State; return *state; }
+State& S() {
+    if (NrLayer::active) return NrLayer::State<State>(NrLayer::active->net);
+    static State* state = new State;
+    return *state;
+}
 
 void Report(State& s, const std::string& text) {
     const std::string line = "NVFP4 network: " + text;
@@ -502,19 +502,15 @@ void LoadWeights(State& s, Device& d, unsigned family, ID3D12Device* device) {
             bytes = (bytes + own.size() + 4096 + 255) / 256 * 256;
         }
         w.blendAt = (bytes + 511) / 512 * 512; bytes = w.blendAt + 4096;     // our copy of the history blend weight
-        w.buffer ={CreateBuffer(device, bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS), bytes};
+        w.buffer = NrLayer::Upload(device, bytes, CreateBuffer, [&](void* mapped) {
+            memset(mapped, 0, size_t(bytes));
+            memcpy(mapped, blob.data(), blob.size());
+            if (!trained.empty()) memcpy(static_cast<unsigned char*>(mapped) + second, trained.data(), trained.size());
+            for (unsigned n = 0; n < kMaxSets; ++n)
+                if (w.setAt[n]) memcpy(static_cast<unsigned char*>(mapped) + w.setAt[n], s.sets[n].blob[family].data(), blob.size());
+            memcpy(static_cast<unsigned char*>(mapped) + w.blendAt, &kBlendWeight, 2);
+        });
         w.trained = trained.empty() ? 0 : second;
-        auto upload = CreateBuffer(device, bytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
-        void* mapped = nullptr;
-        Check(upload->Map(0, nullptr, &mapped), "NVFP4 upload map");
-        memset(mapped, 0, size_t(bytes));
-        memcpy(mapped, blob.data(), blob.size());
-        if (!trained.empty()) memcpy(static_cast<unsigned char*>(mapped) + second, trained.data(), trained.size());
-        for (unsigned n = 0; n < kMaxSets; ++n)
-            if (w.setAt[n]) memcpy(static_cast<unsigned char*>(mapped) + w.setAt[n], s.sets[n].blob[family].data(), blob.size());
-        memcpy(static_cast<unsigned char*>(mapped) + w.blendAt, &kBlendWeight, 2);
-        upload->Unmap(0, nullptr);
-        NrWeightUpload::Copy(device, w.buffer.resource.Get(), upload.Get(), bytes);
         w.ready = true;
     } catch (const std::exception& error) {
         w.buffer = {};
@@ -779,15 +775,17 @@ NvAPI_Status __cdecl CreateFunction(ID3D12Device* device, NVDX_ObjectHandle modu
 }
 
 void PoolBarrier(ID3D12GraphicsCommandList* commands) {
+    if (NrLayer::active) return NrLayer::active->Barrier();
     D3D12_RESOURCE_BARRIER barrier{}; barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     commands->ResourceBarrier(1, &barrier);
 }
 uint64_t PoolBuffer(Device& d, ID3D12Device* device, uint64_t original, unsigned tokens) {
     if (!original) throw std::runtime_error("null transformer activation");
     auto& b = d.poolBuffers[{original, tokens}];
-    if (!b.resource) {
+    if (!b) {
         b.bytes = uint64_t((tokens + 127) / 128) * 128 * 4096;
-        b.resource = CreateBuffer(device, b.bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        if (NrLayer::active) b.memory = NrLayer::active->AllocateMemory(b.bytes, false);
+        else b.resource = CreateBuffer(device, b.bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     }
     return b.Address();
 }
@@ -897,18 +895,12 @@ bool SideLaunch(State& s,ListState& list,Target& target,ID3D12GraphicsCommandLis
         }
         if (!native.function)
             NvCheck(s.createFunction(target.device, native.module, "nr_side4", &native.function), "Side4 function");
-        if (!native.weights.resource) {
-            Buffer weights;
-            weights.bytes = (record.blob.size() + 4096 + 255) / 256 * 256;
-            weights.resource = CreateBuffer(target.device, weights.bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            auto upload = CreateBuffer(target.device, weights.bytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
-            void* dst = nullptr;
-            Check(upload->Map(0, nullptr, &dst), "Side4 weights map");
-            memset(dst, 0, size_t(weights.bytes));
-            memcpy(dst, record.blob.data(), record.blob.size());
-            upload->Unmap(0, nullptr);
-            NrWeightUpload::Copy(target.device, weights.resource.Get(), upload.Get(), weights.bytes);
-            native.weights = std::move(weights);
+        if (!native.weights) {
+            const auto bytes = (record.blob.size() + 4096 + 255) / 256 * 256;
+            native.weights = NrLayer::Upload(target.device, bytes, CreateBuffer, [&](void* dst) {
+                memset(dst, 0, size_t(bytes));
+                memcpy(dst, record.blob.data(), record.blob.size());
+            });
         }
         p={true,side,NrFourBitPlan::WeightSet(s.passSet),number,0,input,h,w};
     }
