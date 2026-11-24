@@ -259,12 +259,14 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
     // if (hookSetTag)
     //     localPref->flags &= ~(sl::PreferenceFlags::eAllowOTA | sl::PreferenceFlags::eLoadDownloadedPlugins);
 
-    // To prevent mixed up OTA situations
-    // if (State::Instance().activeFgOutput == FGOutput::DLSSG)
-    //{
-    //    localPref.flags &= ~sl::PreferenceFlags::eAllowOTA;
-    //    localPref.flags &= ~sl::PreferenceFlags::eLoadDownloadedPlugins;
-    //}
+    // To prevent mixed up OTA situations (upstream optiscaler/OptiScaler's DisableOTA, issue #1180): with NVIDIA's
+    // downloaded copy of each plugin loaded beside the game's, Streamline unloads one of them under OptiScaler's hook,
+    // and the stale DetourDetach that follows corrupts the other ("Failed to unhook ...: 1E7", crashes at start)
+    if (Config::Instance()->DisableOTA.value_or_default())
+    {
+        localPref.flags &= ~sl::PreferenceFlags::eAllowOTA;
+        localPref.flags &= ~sl::PreferenceFlags::eLoadDownloadedPlugins;
+    }
 
     return o_slInit(localPref, sdkVersion);
 }
