@@ -149,7 +149,7 @@ void RuntimeReport(ID3D12GraphicsCommandList* commands, ID3D12Device* device, co
         }
         FileReport(NVNGXProxy::NVNGXModule_Path(), "driver dispatcher", false);
         std::set<std::filesystem::path> paths;
-        for (const auto& path : State::Instance().NVNGX_FeatureInfo_Paths)
+        for (const auto& path : NVNGXProxy::FeaturePaths())
         {
             LOG_INFO("NR diagnostic NGX search path: {}", wstring_to_string(path));
             paths.insert(std::filesystem::path(path) / L"nvngx_dlssnr.dll");

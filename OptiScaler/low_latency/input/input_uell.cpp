@@ -1,22 +1,29 @@
 #include "pch.h"
 #include "input_uell.h"
 
+#include <DirectXMath.h>
+
+using namespace DirectX;
+
+// No output yet or the game uses another input, nothing went wrong
+static bool IsError(InputResult result)
+{
+    return result != InputResult::Ok && result != InputResult::UsingDifferentInput &&
+           result != InputResult::NoReadyOutput && result != InputResult::NotEnoughReports;
+}
+
 void InputUeLowLatency::init()
 {
     if (inited)
         return;
 
-    // if (auto dx11device = State::Instance().currentD3D11Device; dx11device)
-    //{
-    //     device = dx11device;
-    //     inited = true;
-    // }
+    // The swapchain's device, D3D11 games can have a D3D12 device too
+    if (State::Instance().swapchainApi == DX11)
+        device = State::Instance().currentD3D11Device;
+    else
+        device = State::Instance().currentD3D12Device;
 
-    if (auto dx12device = State::Instance().currentD3D12Device; !inited && dx12device)
-    {
-        device = dx12device;
-        inited = true;
-    }
+    inited = device != nullptr;
 
     if (inited)
     {
@@ -41,14 +48,14 @@ void InputUeLowLatency::tickStart(int64_t frameId, float DeltaSeconds, bool bIdl
     if (!inited)
         InputUeLowLatency::init();
 
-    auto result = InputCommon::sleep(inputContext, device, frameId);
-
-    if (result == InputResult::UsingDifferentInput)
-        return;
+    // Most backends use 32bit frameId so it is what it is
+    auto result = InputCommon::sleep(inputContext, device, (uint32_t) frameId);
 
     if (result != InputResult::Ok)
     {
-        LOG_ERROR("sleep result: {}", magic_enum::enum_name(result));
+        if (IsError(result))
+            LOG_ERROR("sleep result: {}", magic_enum::enum_name(result));
+
         return;
     }
 
@@ -58,11 +65,8 @@ void InputUeLowLatency::tickStart(int64_t frameId, float DeltaSeconds, bool bIdl
 
     result = InputCommon::set_marker(inputContext, device, markerParams);
 
-    if (result != InputResult::Ok)
-    {
+    if (IsError(result))
         LOG_ERROR("set_marker result: {}", magic_enum::enum_name(result));
-        return;
-    }
 }
 
 void InputUeLowLatency::tickEnd(int64_t frameId, float DeltaSeconds, bool bIdleMode)
@@ -73,9 +77,59 @@ void InputUeLowLatency::tickEnd(int64_t frameId, float DeltaSeconds, bool bIdleM
 
     auto result = InputCommon::set_marker(inputContext, device, markerParams);
 
-    if (result != InputResult::Ok)
-    {
+    if (IsError(result))
         LOG_ERROR("set_marker result: {}", magic_enum::enum_name(result));
-        return;
+}
+
+static void GetCameraBasis(const float cameraRotation[3], float cameraUp[3], float cameraRight[3],
+                           float cameraForward[3])
+{
+    float pitch = DirectX::XMConvertToRadians(cameraRotation[0]);
+    float yaw = DirectX::XMConvertToRadians(cameraRotation[1]);
+    float roll = DirectX::XMConvertToRadians(cameraRotation[2]);
+
+    float SP, CP, SY, CY, SR, CR;
+    DirectX::XMScalarSinCos(&SP, &CP, pitch);
+    DirectX::XMScalarSinCos(&SY, &CY, yaw);
+    DirectX::XMScalarSinCos(&SR, &CR, roll);
+
+    cameraForward[0] = CP * CY;
+    cameraForward[1] = CP * SY;
+    cameraForward[2] = SP;
+
+    cameraRight[0] = SR * SP * CY - CR * SY;
+    cameraRight[1] = SR * SP * SY + CR * CY;
+    cameraRight[2] = -SR * CP;
+
+    cameraUp[0] = -(CR * SP * CY + SR * SY);
+    cameraUp[1] = CY * SR - CR * SP * SY;
+    cameraUp[2] = CR * CP;
+}
+
+void InputUeLowLatency::cameraUpdate(int64_t frameId, float cameraPosition[3], float cameraRotation[3], float fovAngle)
+{
+    // Technically FSRFG input might have the camera data but not guaranteed
+    // if (State::Instance().activeFgInput == FGInput::DLSSG)
+    //    return;
+
+    if (auto fg = State::Instance().currentFG)
+    {
+        auto index = (int) (frameId % BUFFER_COUNT);
+
+        float cameraUp[3];
+        float cameraRight[3];
+        float cameraForward[3];
+
+        GetCameraBasis(cameraRotation, cameraUp, cameraRight, cameraForward);
+
+        fg->SetCameraData(cameraPosition, cameraUp, cameraRight, cameraForward, index);
+
+        UINT64 width = 0;
+        UINT height = 0;
+        fg->GetInterpolationRect(width, height, index);
+        float aspectRatio = (float) width / (float) height;
+
+        // TODO: camera near and far are placeholders
+        fg->SetCameraValues(0.01f, 10000.f, DirectX::XMConvertToRadians(fovAngle), aspectRatio, 0.0f, index);
     }
 }

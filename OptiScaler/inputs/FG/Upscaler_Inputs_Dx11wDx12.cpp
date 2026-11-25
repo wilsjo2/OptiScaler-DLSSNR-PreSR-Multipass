@@ -1,15 +1,20 @@
 #include "pch.h"
 #include "Upscaler_Inputs_Dx11wDx12.h"
+#include "Upscaler_Inputs.h"
 
 #include "MathUtils.h"
 
 #include <with_dx12/with_dx12.h>
+#include <upscalers/IFeature_Dx11wDx12.h>
 #include <hudfix/Hudfix_Dx11.h>
 #include <resource_tracking/ResTrack_dx11.h>
 #include "shaders/depth_scale/DS_Dx12.h"
 
 using namespace OptiMath;
 static DS_Dx12* DepthScaleDx11wDx12 = nullptr;
+
+// Used when the upscaler is native DX11 and doesn't have its own D3D12 shared resources
+static Dx11WithDx12::D3D11_UPSCALER_RESOURCE_CACHE_C FgResourceCache = {};
 
 static bool PrepareFgResourceCache(NVSDK_NGX_Parameter* parameters, UINT64 frameKey)
 {
@@ -18,10 +23,10 @@ static bool PrepareFgResourceCache(NVSDK_NGX_Parameter* parameters, UINT64 frame
 
     const auto mask = Dx11WithDx12::ResourceMask::Mv | Dx11WithDx12::ResourceMask::Depth;
     const auto dontUseNtShared = Config::Instance()->DontUseNTShared.value_or_default();
-    const auto frameIndex = Dx11WithDx12::GetUpscalerFrameIndex();
 
-    const auto result =
-        Dx11WithDx12::PrepareUpscalerResources(parameters, mask, frameIndex, frameKey, dontUseNtShared, false, true);
+    // Next slot, the previous ones can still be in use by FG
+    const auto result = Dx11WithDx12::PrepareUpscalerResources(
+        FgResourceCache, parameters, mask, FgResourceCache.FrameIndex + 1, frameKey, dontUseNtShared, false, true);
 
     if (!result.Success)
     {
@@ -32,12 +37,11 @@ static bool PrepareFgResourceCache(NVSDK_NGX_Parameter* parameters, UINT64 frame
     return true;
 }
 
-static bool ReusePreparedUpscalerCacheForFg(UINT64 frameKey)
+static bool ReusePreparedUpscalerCacheForFg(const Dx11WithDx12::D3D11_UPSCALER_RESOURCE_CACHE_C& cache)
 {
     const auto mask = Dx11WithDx12::ResourceMask::Mv | Dx11WithDx12::ResourceMask::Depth;
-    const auto resolvedFrameKey = frameKey != 0 ? frameKey : Dx11WithDx12::GetLastPreparedUpscalerFrameId();
 
-    if (!Dx11WithDx12::HasPreparedUpscalerResources(mask, resolvedFrameKey))
+    if (!Dx11WithDx12::HasPreparedUpscalerResources(cache, mask))
     {
         LOG_WARN("Dx11wDx12 FG input cache miss");
         return false;
@@ -73,6 +77,12 @@ void UpscalerInputsDx11wDx12::Reset()
     Hudfix_Dx11::ResetCounters();
 }
 
+void UpscalerInputsDx11wDx12::Shutdown()
+{
+    Reset();
+    Dx11WithDx12::ResetUpscalerResourceCache(FgResourceCache, true);
+}
+
 void UpscalerInputsDx11wDx12::UpscaleStart(NVSDK_NGX_Parameter* InParameters, IFeature_Dx11* feature)
 {
     Hudfix_Dx11::SetSkipStatus(true);
@@ -83,73 +93,24 @@ void UpscalerInputsDx11wDx12::UpscaleStart(NVSDK_NGX_Parameter* InParameters, IF
         return;
     }
 
-    // FSR Camera values
-    float cameraNear = 0.0f;
-    float cameraFar = 0.0f;
-    float cameraVFov = 0.0f;
-    float meterFactor = 0.0f;
     float mvScaleX = 0.0f;
     float mvScaleY = 0.0f;
     float jitterX = 0.0f;
     float jitterY = 0.0f;
 
-    float tempCameraNear = 0.0f;
-    float tempCameraFar = 0.0f;
-
-    auto& cfg = *Config::Instance();
-    const auto& ngxParams = *InParameters;
-
-    ngxParams.Get(OptiKeys::FSR_NearPlane, &tempCameraNear);
-    ngxParams.Get(OptiKeys::FSR_FarPlane, &tempCameraFar);
-
-    if (!cfg.FsrUseFsrInputValues.value_or_default() || (tempCameraNear == 0.0f && tempCameraFar == 0.0f))
-    {
-        if (feature->DepthInverted())
-        {
-            cameraFar = cfg.FsrCameraNear.value_or_default();
-            cameraNear = cfg.FsrCameraFar.value_or_default();
-        }
-        else
-        {
-            cameraFar = cfg.FsrCameraFar.value_or_default();
-            cameraNear = cfg.FsrCameraNear.value_or_default();
-        }
-    }
-    else
-    {
-        cameraNear = tempCameraNear;
-        cameraFar = tempCameraFar;
-    }
-
-    if (!cfg.FsrUseFsrInputValues.value_or_default() ||
-        ngxParams.Get(OptiKeys::FSR_CameraFovVertical, &cameraVFov) != NVSDK_NGX_Result_Success)
-    {
-        if (cfg.FsrVerticalFov.has_value())
-            cameraVFov = GetRadiansFromDeg(cfg.FsrVerticalFov.value());
-        else if (cfg.FsrHorizontalFov.value_or_default() > 0.0f)
-        {
-            const float hFovRad = GetRadiansFromDeg(cfg.FsrHorizontalFov.value());
-            cameraVFov =
-                GetVerticalFovFromHorizontal(hFovRad, (float) feature->TargetWidth(), (float) feature->TargetHeight());
-        }
-        else
-            cameraVFov = GetRadiansFromDeg(60);
-    }
-
-    if (!cfg.FsrUseFsrInputValues.value_or_default())
-        ngxParams.Get(OptiKeys::FSR_ViewSpaceToMetersFactor, &meterFactor);
-
-    State::Instance().lastFsrCameraFar = cameraFar;
-    State::Instance().lastFsrCameraNear = cameraNear;
+    // FSR Camera values
+    auto camera = UpscalerInputs::GetCameraValues(*InParameters, feature);
 
     if (State::Instance().activeFgInput != FGInput::Upscaler || _dx12Device == nullptr)
         return;
 
-    if (feature->IsWithDx12())
-    {
-        const auto cacheFrameKey = Dx11WithDx12::GetLastPreparedUpscalerFrameId();
+    const Dx11WithDx12::D3D11_UPSCALER_RESOURCE_CACHE_C* cache = &FgResourceCache;
 
-        if (!ReusePreparedUpscalerCacheForFg(cacheFrameKey))
+    if (auto withDx12Feature = dynamic_cast<IFeature_Dx11wDx12*>(feature); withDx12Feature != nullptr)
+    {
+        cache = &withDx12Feature->GetResourceCache();
+
+        if (!ReusePreparedUpscalerCacheForFg(*cache))
             return;
     }
     else if (!PrepareFgResourceCache(InParameters, Dx11WithDx12::NextUpscalerFrameId()))
@@ -163,26 +124,17 @@ void UpscalerInputsDx11wDx12::UpscaleStart(NVSDK_NGX_Parameter* InParameters, IF
     if (fg == nullptr)
         return;
 
-    FG_Constants fgConstants {};
-    fgConstants.displayWidth = feature->DisplayWidth();
-    fgConstants.displayHeight = feature->DisplayHeight();
-
-    if (feature->IsHdr())
-        fgConstants.flags |= FG_Flags::Hdr;
-
-    if (feature->DepthInverted())
-        fgConstants.flags |= FG_Flags::InvertedDepth;
-
-    if (feature->JitteredMV())
-        fgConstants.flags |= FG_Flags::JitteredMVs;
-
-    if (!feature->LowResMV())
-        fgConstants.flags |= FG_Flags::DisplayResolutionMVs;
-
-    if (Config::Instance()->FGAsync.value_or_default())
-        fgConstants.flags |= FG_Flags::Async;
+    auto fgConstants = UpscalerInputs::GetFGConstants(feature);
 
     fg->EvaluateState(_dx12Device, fgConstants);
+
+    // Not needed while FG or the option is off, its destructor defers the buffer release
+    if (DepthScaleDx11wDx12 != nullptr &&
+        (!Config::Instance()->IsFGEnabled() || !Config::Instance()->FGEnableDepthScale.value_or_default()))
+    {
+        delete DepthScaleDx11wDx12;
+        DepthScaleDx11wDx12 = nullptr;
+    }
 
     int reset = 0;
     InParameters->Get(NVSDK_NGX_Parameter_Reset, &reset);
@@ -195,7 +147,7 @@ void UpscalerInputsDx11wDx12::UpscaleStart(NVSDK_NGX_Parameter* InParameters, IF
     fg->StartNewFrame();
 
     auto aspectRatio = (float) feature->DisplayWidth() / (float) feature->DisplayHeight();
-    fg->SetCameraValues(cameraNear, cameraFar, cameraVFov, aspectRatio, meterFactor);
+    fg->SetCameraValues(camera.cameraNear, camera.cameraFar, camera.cameraVFov, aspectRatio, camera.meterFactor);
     fg->SetFrameTimeDelta(State::Instance().lastFGFrameTime);
     fg->SetMVScale(mvScaleX, mvScaleY);
     fg->SetJitter(jitterX, jitterY);
@@ -204,7 +156,7 @@ void UpscalerInputsDx11wDx12::UpscaleStart(NVSDK_NGX_Parameter* InParameters, IF
 
     Hudfix_Dx11::UpscaleStart();
 
-    if (State::Instance().isShuttingDown || !fg->IsActive() || !Config::Instance()->FGEnabled.value_or_default() ||
+    if (State::Instance().isShuttingDown || !fg->IsActive() || !Config::Instance()->IsFGEnabled() ||
         State::Instance().currentSwapchain == nullptr)
     {
         return;
@@ -217,13 +169,12 @@ void UpscalerInputsDx11wDx12::UpscaleStart(NVSDK_NGX_Parameter* InParameters, IF
         fg->Mutex.unlockThis(4);
     }
 
-    auto& cache = Dx11WithDx12::GetUpscalerResourceCache();
     const auto frameIndex = fg->GetIndex();
 
     LOG_DEBUG("(FG Dx11wDx12) using cached inputs for fgUpscaledImage[{}], frame: {}", frameIndex, fg->FrameCount());
 
-    ID3D12Resource* paramVelocity = cache.Mv.Dx12Resource;
-    ID3D12Resource* paramDepth = cache.Depth.Dx12Resource;
+    ID3D12Resource* paramVelocity = cache->CurrentMv().Dx12Resource;
+    ID3D12Resource* paramDepth = cache->CurrentDepth().Dx12Resource;
 
     auto cmdList = fg->GetUICommandList();
 
@@ -260,8 +211,7 @@ void UpscalerInputsDx11wDx12::UpscaleStart(NVSDK_NGX_Parameter* InParameters, IF
             if (DepthScaleDx11wDx12 == nullptr)
                 DepthScaleDx11wDx12 = new DS_Dx12("Depth Scale Dx11wDx12", _dx12Device);
 
-            if (DepthScaleDx11wDx12->CreateBufferResource(_dx12Device, paramDepth, feature->DisplayWidth(),
-                                                          feature->DisplayHeight(),
+            if (DepthScaleDx11wDx12->CreateBufferResource(_dx12Device, paramDepth, 0, 0,
                                                           D3D12_RESOURCE_STATE_UNORDERED_ACCESS) &&
                 DepthScaleDx11wDx12->Buffer() != nullptr)
             {
@@ -315,9 +265,23 @@ void UpscalerInputsDx11wDx12::UpscaleEnd(NVSDK_NGX_Parameter* InParameters, IFea
     if (fg == nullptr || State::Instance().activeFgInput != FGInput::Upscaler || _dx12Device == nullptr)
         return;
 
-    if (fg->IsActive() && Config::Instance()->FGEnabled.value_or_default() &&
-        State::Instance().currentSwapchain != nullptr)
+    if (fg->IsActive() && Config::Instance()->IsFGEnabled() && State::Instance().currentSwapchain != nullptr)
     {
+        ID3D11Resource* gameHudless = nullptr;
+        if (InParameters->Get("Opti.Hudless", &gameHudless) != NVSDK_NGX_Result_Success)
+            InParameters->Get("Opti.Hudless", (void**) &gameHudless);
+
+        // Used instead of the HUD fix for this frame, copied at present
+        ID3D11Texture2D* hudlessTexture = nullptr;
+        if (gameHudless != nullptr && SUCCEEDED(gameHudless->QueryInterface(IID_PPV_ARGS(&hudlessTexture))))
+        {
+            unsigned int flip = 0;
+            InParameters->Get("Opti.Hudless.Flip", &flip);
+
+            Hudfix_Dx11::SetGameHudless(hudlessTexture, flip != 0);
+            return;
+        }
+
         if (Config::Instance()->FGHUDFix.value_or_default())
         {
             Hudfix_Dx11::UpscaleEnd(feature->FrameCount(), State::Instance().lastFGFrameTime);

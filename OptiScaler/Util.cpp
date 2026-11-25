@@ -45,6 +45,13 @@ std::string Util::WhoIsTheCaller(void* returnAddress)
     return "";
 }
 
+std::filesystem::path Util::ModulePath(HMODULE module)
+{
+    wchar_t path[MAX_PATH] = { 0 };
+    GetModuleFileNameW(module, path, MAX_PATH);
+    return std::filesystem::path(path);
+}
+
 HMODULE Util::GetCallerModule(void* returnAddress)
 {
     HMODULE hModule = NULL;
@@ -370,6 +377,18 @@ std::filesystem::path Util::ExePath()
     return exe;
 }
 
+// ReShade checks for "d3d12" in its own name so also accept d3d12-ReShade64.dll
+std::filesystem::path Util::ReShadePath()
+{
+    auto dir = ExePath().parent_path();
+    auto rsFile = dir / L"ReShade64.dll";
+
+    if (!std::filesystem::exists(rsFile) && std::filesystem::exists(dir / L"d3d12-ReShade64.dll"))
+        rsFile = dir / L"d3d12-ReShade64.dll";
+
+    return rsFile;
+}
+
 static BOOL CALLBACK EnumWindowsCallback(HWND handle, LPARAM lParam)
 {
     const auto isMainWindow = [handle]()
@@ -398,6 +417,31 @@ HWND Util::GetProcessWindow()
     }
 
     return hwnd;
+}
+
+// Overlays and hook libraries use small swapchains, 0 size means the window's client size
+bool Util::IsOverlaySwapchain(HWND hwnd, UINT width, UINT height)
+{
+    RECT rect {};
+    bool windowSize = false;
+    if ((width == 0 || height == 0) && hwnd != nullptr && GetClientRect(hwnd, &rect))
+    {
+        windowSize = true;
+
+        if (width == 0)
+            width = static_cast<UINT>(rect.right - rect.left);
+
+        if (height == 0)
+            height = static_cast<UINT>(rect.bottom - rect.top);
+    }
+
+    const bool overlay = (width != 0 && width < 100) || (height != 0 && height < 100);
+
+    // Shows games which create their swapchain on a small window and resize it later
+    if (overlay && windowSize)
+        LOG_INFO("0 sized swapchain uses window size {}x{}, treating it as overlay", width, height);
+
+    return overlay;
 }
 
 static inline std::string LogLastError()
@@ -484,9 +528,60 @@ bool Util::GetFileVersion(std::wstring dllPath, version_t* fileVersionOut, versi
     return true;
 }
 
+// ProductVersion string from the version resource, falling back to FileVersion
+std::string Util::GetFileVersionString(std::wstring dllPath)
+{
+    DWORD handle = 0;
+    DWORD versionSize = GetFileVersionInfoSizeW(dllPath.c_str(), &handle);
+    if (versionSize == 0)
+        return {};
+
+    std::vector<BYTE> versionInfo(versionSize);
+    if (!GetFileVersionInfoW(dllPath.c_str(), handle, versionSize, versionInfo.data()))
+        return {};
+
+    struct LANGANDCODEPAGE
+    {
+        WORD wLanguage;
+        WORD wCodePage;
+    }* lpTranslate = nullptr;
+
+    UINT cbTranslate = 0;
+    if (!VerQueryValueW(versionInfo.data(), L"\\VarFileInfo\\Translation", (LPVOID*) &lpTranslate, &cbTranslate) ||
+        cbTranslate < sizeof(LANGANDCODEPAGE))
+    {
+        return {};
+    }
+
+    for (const wchar_t* name : { L"ProductVersion", L"FileVersion" })
+    {
+        std::wstring query = std::format(L"\\StringFileInfo\\{:04x}{:04x}\\{}", lpTranslate[0].wLanguage,
+                                         lpTranslate[0].wCodePage, name);
+
+        LPWSTR value = nullptr;
+        UINT size = 0;
+
+        if (VerQueryValueW(versionInfo.data(), query.c_str(), reinterpret_cast<LPVOID*>(&value), &size) && value &&
+            size > 1)
+        {
+            return wstring_to_string(value);
+        }
+    }
+
+    return {};
+}
+
 bool Util::IsSubpath(const std::filesystem::path& path, const std::filesystem::path& base)
 {
-    auto rel = std::filesystem::relative(path, base);
+    auto lowerPath = path.lexically_normal().wstring();
+    auto lowerBase = base.lexically_normal().wstring();
+    to_lower_in_place(lowerPath);
+    to_lower_in_place(lowerBase);
+
+    auto rel = std::filesystem::path(lowerPath).lexically_relative(lowerBase);
+    if (rel.empty())
+        return false;
+
     auto first = *rel.begin();
     return first != "." && first != "..";
 }
@@ -495,8 +590,10 @@ std::optional<std::filesystem::path> Util::FindFilePath(const std::filesystem::p
                                                         const std::filesystem::path& fileName)
 {
     std::filesystem::path optiPath(Config::Instance()->MainDllPath.value());
-    optiPath /= L"streamline";
-    auto normalizedStreamlinePath = optiPath.lexically_normal();
+    auto normalizedStreamlinePath = (optiPath / L"streamline").lexically_normal();
+
+    // Custom provider dlls use the standard names but are only loaded from their own folders
+    auto normalizedCustomPath = (optiPath / L"custom").lexically_normal();
 
     const bool isDlssgOutput = State::Instance().activeFgOutput == FGOutput::DLSSG;
 
@@ -535,7 +632,8 @@ std::optional<std::filesystem::path> Util::FindFilePath(const std::filesystem::p
                 else if (entry.path().filename() == fileName)
                 {
                     auto normalizedPath = entry.path().lexically_normal();
-                    if (isDlssgOutput || !IsSubpath(normalizedPath, normalizedStreamlinePath))
+                    if (!IsSubpath(normalizedPath, normalizedCustomPath) &&
+                        (isDlssgOutput || !IsSubpath(normalizedPath, normalizedStreamlinePath)))
                     {
                         return entry.path();
                     }
@@ -552,14 +650,14 @@ std::optional<std::filesystem::path> Util::FindFilePath(const std::filesystem::p
         return foundPath;
     }
 
-    // 3) Unreal-Engine/WinGDK fallback: check for Win64 or WinGDK in parent
+    // 3) Unreal-Engine/WinGDK fallback: check for Win64 or WinGDK in parent (and for other special games)
     std::filesystem::path parent = startDir.parent_path().parent_path();
     uint32_t cnt = 0;
     for (const char* folder : { "Win64", "WinGDK", "Win64MasterMasterSteamPGO" })
     {
         if (std::filesystem::exists(parent / folder) && std::filesystem::is_directory(parent / folder))
         {
-            // Move up two more levels from 'parent' to reach UE project root but one level for KCD2
+            // Move up two more levels from 'parent' to reach UE project root, but one level for KCD2
             std::filesystem::path gameRoot;
             if (cnt < 2)
             {
@@ -601,6 +699,52 @@ std::optional<std::filesystem::path> Util::FindFilePath(const std::filesystem::p
         }
 
         cnt++;
+    }
+
+    // 4) Optional extended search for special games. Search for Plugins and its subdirectories
+    if (State::Instance().gameQuirks & GameQuirk::ExtendedSearch)
+
+    {
+        std::filesystem::path ancestor = startDir;
+        for (uint32_t level = 0; level < 4 && !ancestor.empty(); ++level)
+        {
+            std::vector<std::filesystem::path> pluginRoots;
+            std::error_code ec;
+            if (std::filesystem::is_directory(ancestor, ec) && !ec)
+            {
+                std::filesystem::recursive_directory_iterator it(
+                    ancestor, std::filesystem::directory_options::skip_permission_denied, ec);
+                const std::filesystem::recursive_directory_iterator end;
+                while (!ec && it != end)
+                {
+                    if (it.depth() >= 5)
+                        it.disable_recursion_pending();
+                    std::error_code entryEc;
+                    if (it->is_directory(entryEc) && !entryEc && it->path().filename() == L"Plugins")
+                    {
+                        pluginRoots.push_back(it->path());
+                        it.disable_recursion_pending();
+                    }
+                    it.increment(ec);
+                }
+            }
+            for (const auto& pluginRoot : pluginRoots)
+            {
+                LOG_INFO(L"Extended search: searching at {}", pluginRoot.wstring());
+                if (auto foundPath = SearchDirectoryBFS(pluginRoot))
+                {
+                    LOG_INFO(L"{} found by extended search at {}", fileName.wstring(), foundPath.value().wstring());
+                    return foundPath;
+                }
+            }
+
+            if (!pluginRoots.empty())
+                break;
+            const auto parentPath = ancestor.parent_path();
+            if (parentPath == ancestor)
+                break;
+            ancestor = parentPath;
+        }
     }
 
     // Not found anywhere
@@ -683,6 +827,53 @@ Util::MonitorInfo Util::GetMonitorInfoForOutput(IDXGIOutput* pOutput)
         out.name = std::wstring(bufName);
     }
     return out;
+}
+
+// ReShade's IID_UnwrappedObject (6.7+) and its D3D12CommandQueue proxy
+static constexpr GUID ReShadeUnwrappedObject = {
+    0x7f2c9a11, 0x3b4e, 0x4d6a, { 0x81, 0x2f, 0x5e, 0x9c, 0xd3, 0x7a, 0x1b, 0x42 }
+};
+static constexpr GUID ReShadeCommandQueue = {
+    0x2c576d2a, 0x0c1c, 0x4d1d, { 0xad, 0x7c, 0xbc, 0x4f, 0xae, 0xc1, 0x5a, 0xbc }
+};
+
+// Special K's IWrapDXGISwapChain
+static constexpr GUID SpecialKSwapChain = {
+    0x24430a12, 0x6e3c, 0x4706, { 0xaf, 0xfa, 0xb3, 0xee, 0xf2, 0xdf, 0x41, 0x02 }
+};
+
+static bool HasInterface(IUnknown* pObject, const GUID& riid)
+{
+    IUnknown* result = nullptr;
+
+    if (pObject->QueryInterface(riid, (void**) &result) != S_OK || result == nullptr)
+        return false;
+
+    result->Release();
+    return true;
+}
+
+void Util::WarnIfProxy(std::string functionName, IUnknown* pObject)
+{
+    if (pObject == nullptr)
+        return;
+
+    if (HasInterface(pObject, ReShadeUnwrappedObject))
+        LOG_WARN("{} ReShade proxy found", functionName);
+    else if (HasInterface(pObject, ReShadeCommandQueue))
+        LOG_WARN("{} ReShade proxy found, ReShade before 6.7 can't be unwrapped", functionName);
+    else if (HasInterface(pObject, SpecialKSwapChain))
+        LOG_WARN("{} Special K proxy found", functionName);
+}
+
+IUnknown* Util::GetReShadeOriginal(IUnknown* pObject)
+{
+    IUnknown* original = nullptr;
+
+    if (pObject == nullptr || pObject->QueryInterface(ReShadeUnwrappedObject, (void**) &original) != S_OK)
+        return nullptr;
+
+    return original;
 }
 
 bool Util::CheckForRealObject(std::string functionName, IUnknown* pObject, IUnknown** ppRealObject)
@@ -932,4 +1123,27 @@ std::map<Util::Luid, std::filesystem::path> Util::GetDriverStore()
         NtdllProxy::FreeLibrary_Ldr(hGdi32);
 
     return result;
+}
+
+uint64_t Util::GetTimestamp()
+{
+    FILETIME fileTime;
+    GetSystemTimePreciseAsFileTime(&fileTime);
+
+    uint64_t time = (static_cast<uint64_t>(fileTime.dwHighDateTime) << 32) | fileTime.dwLowDateTime;
+
+    return time * 100;
+}
+
+void Util::SetFlagEnvVar(const wchar_t* name, bool enabled)
+{
+    const wchar_t* crtValue = enabled ? L"1" : L"";
+    _wputenv_s(name, crtValue);
+    SetEnvironmentVariableW(name, enabled ? L"1" : nullptr);
+
+    if (auto ucrt = GetModuleHandleW(L"ucrtbase.dll"))
+    {
+        if (auto ucrtPutenv = reinterpret_cast<decltype(&_wputenv_s)>(GetProcAddress(ucrt, "_wputenv_s")))
+            ucrtPutenv(name, crtValue);
+    }
 }

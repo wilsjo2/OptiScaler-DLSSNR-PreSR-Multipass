@@ -5,7 +5,7 @@
 #include <wincrypt.h>
 
 #include "Hook_Utils.h"
-#include <fsr4/FSR4Upgrade.h>
+#include <fsr4/FSR4DriverProviderDx12.h>
 
 typedef decltype(&CryptQueryObject) PFN_CryptQueryObject;
 
@@ -25,15 +25,16 @@ static BOOL hkCryptQueryObject(DWORD dwObjectType, const void* pvObject, DWORD d
 
         // It's applied even if ffx is already signed, could be improved
         if ((pathString.contains("amd_fidelityfx_dx12.dll") || pathString.contains("amd_fidelityfx_vk.dll")) &&
-            FSR4Upgrade::GetFSR4Module())
+            FSR4DriverProviderDx12::LoadedModule())
         {
             LOG_DEBUG("Replacing FFX with a signed dll");
-            WCHAR signedDll[256] {};
-            GetModuleFileNameW(FSR4Upgrade::GetFSR4Module(), signedDll, 256);
+            std::wstring signedDll(32768, L'\0');
+            signedDll.resize(
+                GetModuleFileNameW(FSR4DriverProviderDx12::LoadedModule(), signedDll.data(), (DWORD) signedDll.size()));
 
-            return o_CryptQueryObject(dwObjectType, signedDll, dwExpectedContentTypeFlags, dwExpectedFormatTypeFlags,
-                                      dwFlags, pdwMsgAndCertEncodingType, pdwContentType, pdwFormatType, phCertStore,
-                                      phMsg, ppvContext);
+            return o_CryptQueryObject(dwObjectType, signedDll.c_str(), dwExpectedContentTypeFlags,
+                                      dwExpectedFormatTypeFlags, dwFlags, pdwMsgAndCertEncodingType, pdwContentType,
+                                      pdwFormatType, phCertStore, phMsg, ppvContext);
         }
 
         if (pathString.contains("nvngx.dll") && !State::Instance().nvngxExists &&

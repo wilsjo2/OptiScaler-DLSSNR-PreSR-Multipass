@@ -4,6 +4,8 @@
 
 #include <upscalers/IFeature.h>
 
+struct CustomFfxModule;
+
 class FFXFeature : public virtual IFeature
 {
   private:
@@ -21,9 +23,6 @@ class FFXFeature : public virtual IFeature
     virtual bool InitFFX(const NVSDK_NGX_Parameter* InParameters) = 0;
 
     double GetDeltaTime();
-
-    void QueryVersionsDx12(ID3D12Device* device);
-    void QueryVersionsVulkan();
 
     void InitFlags();
 
@@ -90,6 +89,15 @@ class FFXFeature : public virtual IFeature
 
   public:
     feature_version Version() override { return _version; }
+
+    // Fills the custom upscaler's list when given, the regular one otherwise
+    static bool QueryVersionsDx12(ID3D12Device* device, CustomFfxModule* custom = nullptr);
+    // deviceContext is VkDeviceContext of FFX SDK 2.x, used for filtering out unsupported upscalers (FSR4)
+    static bool QueryVersionsVulkan(void* deviceContext = nullptr, CustomFfxModule* custom = nullptr);
+
+    // Fill the version lists without an active FFX feature, loads FFX and creates a temp device if needed
+    static void EnsureVersionsDx12();
+    static void EnsureVersionsVulkan();
 
     FFXFeature(unsigned int InHandleId, NVSDK_NGX_Parameter* InParameters);
 

@@ -2,6 +2,7 @@
 
 #include "SysUtils.h"
 #include <vulkan/vulkan.h>
+#include <gpu_time/GpuTime_Vk.h>
 #include <string>
 #include <vector>
 
@@ -25,6 +26,8 @@ class Shader_Vk
     VkDevice _device = VK_NULL_HANDLE;
     VkPhysicalDevice _physicalDevice = VK_NULL_HANDLE;
 
+    std::unique_ptr<GpuTime_Vk> GpuTime = nullptr;
+
     // Pipeline Layouts
     VkPipeline _pipeline = VK_NULL_HANDLE;
     VkPipelineLayout _pipelineLayout = VK_NULL_HANDLE;
@@ -34,12 +37,16 @@ class Shader_Vk
     VkDescriptorPool _descriptorPool = VK_NULL_HANDLE;
     std::vector<VkDescriptorSet> _descriptorSets;
     uint32_t _currentSetIndex = 0;
-    uint32_t _maxFramesInFlight = 3;
+
+    // Sets and params slots are reused in turn. The game's command buffers using them have no fence,
+    // like DeferredRelease this relies on presents limiting how far the GPU lags behind.
+    uint32_t _maxFramesInFlight = 8;
 
     // Common Resources
     VkBuffer _constantBuffer = VK_NULL_HANDLE;
     VkDeviceMemory _constantBufferMemory = VK_NULL_HANDLE;
     void* _mappedConstantBuffer = nullptr;
+    VkDeviceSize _constantStride = 0; // One params slot per set
     VkSampler _textureSampler = VK_NULL_HANDLE;
 
     // Intermediate Image (For shaders that output to a temp texture)
@@ -71,7 +78,13 @@ class Shader_Vk
     void CreateDescriptorSets(VkDescriptorSetLayout descriptorSetLayout, VkDescriptorPool descriptorPool,
                               std::vector<VkDescriptorSet>& descriptorSets);
 
-    void CreateConstantBuffer(VkDeviceSize bufferSize);
+    static VkDeviceSize UniformStride(VkPhysicalDevice physicalDevice, VkDeviceSize size);
+
+    // Takes the params size, makes a slot for each set
+    void CreateConstantBuffer(VkDeviceSize paramsSize);
+
+    // Copies the params to the current set's slot
+    VkDescriptorBufferInfo WriteConstants(const void* data, VkDeviceSize size);
     void CreateSampler(VkFilter filter = VK_FILTER_LINEAR,
                        VkSamplerAddressMode addressMode = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
 
@@ -84,6 +97,8 @@ class Shader_Vk
   public:
     bool IsInit() const { return _init; }
     bool CanRender() const { return _init && _pipeline != VK_NULL_HANDLE; }
+    std::string Name() const { return _name; }
+    std::optional<double> ReadGpuTime() { return GpuTime->ReadGpuTime(); }
 
     VkImageView GetImageView() const { return _intermediateImageView; }
     VkImage GetImage() const { return _intermediateImage; }

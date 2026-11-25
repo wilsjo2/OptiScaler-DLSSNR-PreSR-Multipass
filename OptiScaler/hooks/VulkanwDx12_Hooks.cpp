@@ -1,6 +1,9 @@
 #include <pch.h>
 #include <dlssnr/DlssNrFinished_Vk.h>
 
+#include <deque>
+#include <unordered_set>
+
 #include "VulkanwDx12_Hooks.h"
 
 #include <State.h>
@@ -11,7 +14,10 @@
 #include <detours/detours.h>
 
 #include <vulkan/vulkan_core.h>
+#include <atomic>
+#include <cstring>
 #include <misc/IdentifyGpu.h>
+#include <framegen/nvngx/NvngxVkLayouts.h>
 
 static PFN_vkQueueSubmit o_vkQueueSubmit = nullptr;
 static PFN_vkQueueSubmit2 o_vkQueueSubmit2 = nullptr;
@@ -28,6 +34,8 @@ static PFN_vkCreateCommandPool o_vkCreateCommandPool = nullptr;
 
 static std::mutex mutexCommandPoolToQueueFamilyMap;
 static std::unordered_map<VkCommandPool, uint32_t> commandPoolToQueueFamilyMap;
+
+static PFN_vkDestroyImage o_vkDestroyImage = nullptr;
 
 // #define LOG_ALL_RECORDS
 
@@ -1052,6 +1060,9 @@ void Vulkan_wDx12::hk_vkCmdPipelineBarrier(VkCommandBuffer commandBuffer, VkPipe
                                            uint32_t imageMemoryBarrierCount,
                                            const VkImageMemoryBarrier* pImageMemoryBarriers)
 {
+    std::vector<VkImageMemoryBarrier> fixedBarriers;
+    pImageMemoryBarriers = NvngxVkLayouts::Fixup(pImageMemoryBarriers, imageMemoryBarrierCount, fixedBarriers);
+
     auto primaryGpu = IdentifyGpu::getPrimaryGpu();
     if (State::Instance().gameQuirks & GameQuirk::VulkanDLSSBarrierFixup &&
         (primaryGpu.vendorId != VendorId::Nvidia || !primaryGpu.dlssCapable))
@@ -1124,6 +1135,12 @@ void Vulkan_wDx12::hk_vkCmdPipelineBarrier(VkCommandBuffer commandBuffer, VkPipe
     o_vkCmdPipelineBarrier(cmdBuffer, srcStageMask, dstStageMask, dependencyFlags, memoryBarrierCount, pMemoryBarriers,
                            bufferMemoryBarrierCount, pBufferMemoryBarriers, imageMemoryBarrierCount,
                            pImageMemoryBarriers);
+}
+
+void Vulkan_wDx12::hk_vkDestroyImage(VkDevice device, VkImage image, const VkAllocationCallbacks* pAllocator)
+{
+    NvngxVkLayouts::Forget(image);
+    o_vkDestroyImage(device, image, pAllocator);
 }
 
 void Vulkan_wDx12::hk_vkCmdBeginQuery(VkCommandBuffer commandBuffer, VkQueryPool queryPool, uint32_t query,
@@ -1556,6 +1573,10 @@ void Vulkan_wDx12::hk_vkCmdWaitEvents2(VkCommandBuffer commandBuffer, uint32_t e
 
 void Vulkan_wDx12::hk_vkCmdPipelineBarrier2(VkCommandBuffer commandBuffer, const VkDependencyInfo* pDependencyInfo)
 {
+    std::vector<VkImageMemoryBarrier2> fixedBarriers;
+    VkDependencyInfo fixedInfo;
+    pDependencyInfo = NvngxVkLayouts::Fixup(pDependencyInfo, fixedInfo, fixedBarriers);
+
     VkCommandBuffer cmdBuffer = commandBuffer;
 
     auto mappedVirtualCmdBuffer = GetVirtualCommandBuffer(cmdBuffer);
@@ -2774,6 +2795,10 @@ void Vulkan_wDx12::hk_vkCmdWaitEvents2KHR(VkCommandBuffer commandBuffer, uint32_
 
 void Vulkan_wDx12::hk_vkCmdPipelineBarrier2KHR(VkCommandBuffer commandBuffer, const VkDependencyInfo* pDependencyInfo)
 {
+    std::vector<VkImageMemoryBarrier2> fixedBarriers;
+    VkDependencyInfo fixedInfo;
+    pDependencyInfo = NvngxVkLayouts::Fixup(pDependencyInfo, fixedInfo, fixedBarriers);
+
     VkCommandBuffer cmdBuffer = commandBuffer;
 
     auto mappedVirtualCmdBuffer = GetVirtualCommandBuffer(cmdBuffer);
@@ -6128,6 +6153,7 @@ bool Vulkan_wDx12::RegisterPendingSubmission(const PendingSubmission& submission
     }
 
     pendingSubmissions.emplace(submission.submitCommandBuffer, submission);
+    pendingSubmissionCount = pendingSubmissions.size();
     return true;
 }
 
@@ -6139,10 +6165,15 @@ void Vulkan_wDx12::CancelPendingSubmission(VkCommandBuffer commandBuffer)
 
     std::scoped_lock lock(pendingSubmissionMutex);
     pendingSubmissions.erase(commandBuffer);
+    pendingSubmissionCount = pendingSubmissions.size();
 }
 
 bool Vulkan_wDx12::TakePendingSubmission(VkCommandBuffer commandBuffer, PendingSubmission& submission)
 {
+    // Called for every submitted, begun and reset command buffer
+    if (pendingSubmissionCount == 0)
+        return false;
+
     std::scoped_lock lock(pendingSubmissionMutex);
     auto it = pendingSubmissions.find(commandBuffer);
     if (it == pendingSubmissions.end())
@@ -6150,12 +6181,26 @@ bool Vulkan_wDx12::TakePendingSubmission(VkCommandBuffer commandBuffer, PendingS
 
     submission = it->second;
     pendingSubmissions.erase(it);
+    pendingSubmissionCount = pendingSubmissions.size();
     return true;
 }
 
 static void AbortPendingD3D12Wait(const Vulkan_wDx12::PendingSubmission& pending, const char* reason)
 {
-    LOG_WARN("Aborting Vulkan w/Dx12 submit transaction: {}", reason ? reason : "unknown reason");
+    // Signaled already, signaling again can move the fence back
+    if (pending.aborted)
+        return;
+
+    bool logAbort = true;
+    if (reason != nullptr && (std::strcmp(reason, "unsupported legacy VkSubmitInfo pNext chain") == 0 ||
+                              std::strcmp(reason, "unsupported VkSubmitInfo2 pNext chain") == 0))
+    {
+        static std::atomic<uint32_t> unsupportedCount { 0 };
+        const uint32_t count = unsupportedCount.fetch_add(1, std::memory_order_relaxed) + 1;
+        logAbort = count <= 4 || (count % 512) == 0;
+    }
+    if (logAbort)
+        LOG_WARN("Aborting Vulkan w/Dx12 submit transaction: {}", reason ? reason : "unknown reason");
 
     if (pending.resourceCopyFence == nullptr)
         return;
@@ -6167,33 +6212,406 @@ static void AbortPendingD3D12Wait(const Vulkan_wDx12::PendingSubmission& pending
         LOG_ERROR("Failed to release aborted Vulkan w/Dx12 D3D12 wait: {0:x}", result);
 }
 
-static bool LegacySubmitPNextSupported(const void* pNext)
+// Copies of submit extensions not tied to the batch's semaphores or command buffers, carried by every split part
+struct SubmitPassThrough
 {
-    if (pNext == nullptr)
-        return true;
+    VkPerformanceQuerySubmitInfoKHR performanceQuery {};
+    VkLatencySubmissionPresentIdNV latency {};
+    VkFrameBoundaryEXT frameBoundary {};
+    const void* chain = nullptr;
 
-    const auto* first = reinterpret_cast<const VkBaseInStructure*>(pNext);
-    return first->sType == VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO && first->pNext == nullptr;
-}
+    SubmitPassThrough() = default;
+    SubmitPassThrough(const SubmitPassThrough&) = delete;
 
-static const VkTimelineSemaphoreSubmitInfo* FindTimelineSubmitInfo(const void* pNext)
-{
-    auto next = reinterpret_cast<const VkBaseInStructure*>(pNext);
-    while (next != nullptr)
+    bool Add(const VkBaseInStructure* node)
     {
-        if (next->sType == VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO)
-            return reinterpret_cast<const VkTimelineSemaphoreSubmitInfo*>(next);
-
-        next = next->pNext;
+        switch (node->sType)
+        {
+        case VK_STRUCTURE_TYPE_PERFORMANCE_QUERY_SUBMIT_INFO_KHR:
+            return Link(performanceQuery, node);
+        case VK_STRUCTURE_TYPE_LATENCY_SUBMISSION_PRESENT_ID_NV:
+            return Link(latency, node);
+        case VK_STRUCTURE_TYPE_FRAME_BOUNDARY_EXT:
+            return Link(frameBoundary, node);
+        default:
+            return false;
+        }
     }
 
-    return nullptr;
+    bool AddChain(const void* pNext)
+    {
+        for (auto* node = reinterpret_cast<const VkBaseInStructure*>(pNext); node != nullptr; node = node->pNext)
+        {
+            if (!Add(node))
+                return false;
+        }
+
+        return true;
+    }
+
+  private:
+    template <typename T> bool Link(T& copy, const VkBaseInStructure* node)
+    {
+        // Already added
+        if (copy.sType != 0)
+            return false;
+
+        copy = *reinterpret_cast<const T*>(node);
+        copy.pNext = chain;
+        chain = &copy;
+        return true;
+    }
+};
+
+// The legacy submit can contain several valid, independently-owned pNext nodes. Never mutate the application's
+// chain. The split submits below rebuild their own timeline metadata and can omit extensions ONLY if the omission
+// is semantically equivalent. Unknown or nontrivial extensions must remain fail-closed.
+struct LegacyPNextInspection
+{
+    const VkTimelineSemaphoreSubmitInfo* timeline = nullptr;
+    VkStructureType rejectedType = VK_STRUCTURE_TYPE_MAX_ENUM;
+    const char* reason = nullptr;
+
+    explicit operator bool() const { return reason == nullptr; }
+};
+
+static LegacyPNextInspection InspectLegacySubmitPNext(const VkSubmitInfo& submit, SubmitPassThrough& passThrough)
+{
+    LegacyPNextInspection result {};
+    uint32_t chainLength = 0;
+    for (auto* node = reinterpret_cast<const VkBaseInStructure*>(submit.pNext); node != nullptr; node = node->pNext)
+    {
+        auto Reject = [&](const char* reason)
+        {
+            result.reason = reason;
+            result.rejectedType = node->sType;
+            return result;
+        };
+
+        if (++chainLength > 16)
+            return Reject("pNext chain exceeds the inspection limit");
+
+        switch (node->sType)
+        {
+        case VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO:
+            if (result.timeline != nullptr)
+                return Reject("duplicate VkTimelineSemaphoreSubmitInfo");
+            result.timeline = reinterpret_cast<const VkTimelineSemaphoreSubmitInfo*>(node);
+            break;
+
+        case VK_STRUCTURE_TYPE_DEVICE_GROUP_SUBMIT_INFO:
+        {
+            // Vulkan defaults to device 0 when this extension is omitted. Accept only that exact equivalent.
+            // In particular, multi-device masks cannot be silently collapsed to one device.
+            const auto* group = reinterpret_cast<const VkDeviceGroupSubmitInfo*>(node);
+            if (group->waitSemaphoreCount != submit.waitSemaphoreCount ||
+                group->commandBufferCount != submit.commandBufferCount ||
+                group->signalSemaphoreCount != submit.signalSemaphoreCount)
+                return Reject("device-group count mismatch");
+
+            if ((group->waitSemaphoreCount && !group->pWaitSemaphoreDeviceIndices) ||
+                (group->commandBufferCount && !group->pCommandBufferDeviceMasks) ||
+                (group->signalSemaphoreCount && !group->pSignalSemaphoreDeviceIndices))
+                return Reject("device-group index arrays are missing");
+
+            for (uint32_t i = 0; i < group->waitSemaphoreCount; ++i)
+                if (group->pWaitSemaphoreDeviceIndices[i] != 0)
+                    return Reject("nonzero device-group wait index");
+            for (uint32_t i = 0; i < group->commandBufferCount; ++i)
+                if (group->pCommandBufferDeviceMasks[i] != 1u)
+                    return Reject("non-default device-group command mask");
+            for (uint32_t i = 0; i < group->signalSemaphoreCount; ++i)
+                if (group->pSignalSemaphoreDeviceIndices[i] != 0)
+                    return Reject("nonzero device-group signal index");
+            break;
+        }
+
+        case VK_STRUCTURE_TYPE_PROTECTED_SUBMIT_INFO:
+        {
+            const auto* protection = reinterpret_cast<const VkProtectedSubmitInfo*>(node);
+            if (protection->protectedSubmit != VK_FALSE)
+                return Reject("protected Vulkan submits require protected interop command buffers");
+            // A false protected-submit flag is the same as omitting the node.
+            break;
+        }
+
+        default:
+            if (!passThrough.Add(node))
+                return Reject("unsupported VkSubmitInfo extension");
+            break;
+        }
+    }
+    return result;
+}
+
+static void ReportRejectedLegacyPNext(const VkSubmitInfo& submit, const LegacyPNextInspection& inspection)
+{
+    // Vulkan submit is a hot path. Log the original chain for diagnosis but not on every frame.
+    static std::atomic<uint32_t> reports { 0 };
+    const uint32_t report = reports.fetch_add(1, std::memory_order_relaxed);
+    if (report >= 4 && (report % 512) != 0)
+        return;
+
+    LOG_WARN("Cannot split legacy VkSubmitInfo: {} (sType={}, rejects so far={}), waits={}, cmds={}, signals={}",
+             inspection.reason, (int32_t) inspection.rejectedType, report + 1, submit.waitSemaphoreCount,
+             submit.commandBufferCount, submit.signalSemaphoreCount);
+
+    uint32_t index = 0;
+    for (auto* node = reinterpret_cast<const VkBaseInStructure*>(submit.pNext); node != nullptr && index < 16;
+         node = node->pNext, ++index)
+    {
+        LOG_WARN("  legacy submit pNext[{}] sType={}", index, (int32_t) node->sType);
+    }
+}
+
+static void AbortPendingD3D12Waits(const PendingInterop* interops, size_t count, const char* reason)
+{
+    for (size_t i = 0; i < count; i++)
+        AbortPendingD3D12Wait(interops[i].pending, reason);
+}
+
+// The recorded upscale won't be submitted anymore
+void Vulkan_wDx12::DiscardPendingInterop(VkCommandBuffer commandBuffer)
+{
+    PendingSubmission pending {};
+    if (!TakePendingSubmission(commandBuffer, pending))
+        return;
+
+    AbortPendingD3D12Wait(pending, "command buffer discarded before submit");
+
+    // Redirect target is left recording, it's reset before its next use
+    RemoveVirtualCommandBuffer(commandBuffer);
+}
+
+size_t Vulkan_wDx12::AbortPendingSubmissions(ID3D12Fence* resourceCopyFence)
+{
+    if (resourceCopyFence == nullptr)
+        return 0;
+
+    std::vector<PendingSubmission> aborted;
+    {
+        std::scoped_lock lock(pendingSubmissionMutex);
+        for (auto& [commandBuffer, pending] : pendingSubmissions)
+        {
+            if (pending.resourceCopyFence != resourceCopyFence || pending.aborted)
+                continue;
+
+            aborted.push_back(pending);
+            pending.aborted = true;
+        }
+    }
+
+    for (const auto& pending : aborted)
+        AbortPendingD3D12Wait(pending, "upscale wasn't submitted");
+
+    return aborted.size();
+}
+
+void Vulkan_wDx12::DropPendingSubmissions(VkCommandBuffer barrierCommandBuffer)
+{
+    if (pendingSubmissionCount == 0)
+        return;
+
+    std::vector<PendingSubmission> dropped;
+    {
+        std::scoped_lock lock(pendingSubmissionMutex);
+        for (auto it = pendingSubmissions.begin(); it != pendingSubmissions.end();)
+        {
+            if (it->second.barrierCommandBuffer != barrierCommandBuffer)
+            {
+                ++it;
+                continue;
+            }
+
+            dropped.push_back(it->second);
+            it = pendingSubmissions.erase(it);
+        }
+
+        pendingSubmissionCount = pendingSubmissions.size();
+    }
+
+    for (const auto& pending : dropped)
+    {
+        AbortPendingD3D12Wait(pending, "redirect command buffer is reused");
+
+        if (GetVirtualCommandBuffer(pending.submitCommandBuffer) == pending.barrierCommandBuffer)
+            RemoveVirtualCommandBuffer(pending.submitCommandBuffer);
+    }
+
+    if (!dropped.empty())
+        LOG_WARN("Dropped {} unsubmitted upscales, their commands recorded after Evaluate are lost", dropped.size());
+}
+
+static bool HasAbortedInterop(const PendingInterop* interops, size_t count)
+{
+    for (size_t i = 0; i < count; i++)
+    {
+        if (interops[i].pending.aborted)
+            return true;
+    }
+
+    return false;
+}
+
+// Device group masks are per command buffer, only a leading device group can be replaced by a copy.
+// Protected submits only take protected command buffers
+static bool CanAddCommandBuffers(const VkSubmitInfo& submit)
+{
+    for (auto* node = reinterpret_cast<const VkBaseInStructure*>(submit.pNext); node != nullptr; node = node->pNext)
+    {
+        if (node->sType == VK_STRUCTURE_TYPE_DEVICE_GROUP_SUBMIT_INFO && node != submit.pNext)
+            return false;
+
+        if (node->sType == VK_STRUCTURE_TYPE_PROTECTED_SUBMIT_INFO &&
+            reinterpret_cast<const VkProtectedSubmitInfo*>(node)->protectedSubmit != VK_FALSE)
+            return false;
+    }
+
+    return true;
+}
+
+// Keeps the application's submit, only adds the commands recorded after Evaluate. Upscale output is dropped
+static void AppendUnsplitLegacySubmit(const VkSubmitInfo& original, const PendingInterop* interops, size_t interopCount,
+                                      std::deque<LegacySplitSubmit>& storage, std::vector<VkSubmitInfo>& out)
+{
+    auto& copy = storage.emplace_back();
+
+    auto group = reinterpret_cast<const VkDeviceGroupSubmitInfo*>(original.pNext);
+    if (group != nullptr && group->sType != VK_STRUCTURE_TYPE_DEVICE_GROUP_SUBMIT_INFO)
+        group = nullptr;
+
+    size_t next = 0;
+    for (uint32_t i = 0; i < original.commandBufferCount; i++)
+    {
+        copy.commandBuffers.push_back(original.pCommandBuffers[i]);
+
+        // Added command buffers run on the devices of the upscale's command buffer
+        uint32_t mask = 1;
+        if (group != nullptr && i < group->commandBufferCount && group->pCommandBufferDeviceMasks != nullptr)
+            mask = group->pCommandBufferDeviceMasks[i];
+
+        copy.deviceMasks.push_back(mask);
+
+        if (next < interopCount && interops[next].commandBufferIndex == i)
+        {
+            copy.commandBuffers.push_back(interops[next].pending.barrierCommandBuffer);
+            copy.deviceMasks.push_back(mask);
+            next++;
+        }
+    }
+
+    copy.submit = original;
+    copy.submit.commandBufferCount = static_cast<uint32_t>(copy.commandBuffers.size());
+    copy.submit.pCommandBuffers = copy.commandBuffers.data();
+
+    if (group != nullptr)
+    {
+        copy.deviceGroup = *group;
+        copy.deviceGroup.commandBufferCount = copy.submit.commandBufferCount;
+        copy.deviceGroup.pCommandBufferDeviceMasks = copy.deviceMasks.data();
+        copy.submit.pNext = &copy.deviceGroup;
+    }
+
+    out.push_back(copy.submit);
+}
+
+// Splits one application VkSubmitInfo at every pending Evaluate command buffer:
+//   [app waits] cmds..Evaluate0 -> resourceCopy0 | copyBack0 | barrier0 cmds..Evaluate1 -> resourceCopy1 | copyBack1 |
+//   ... | barrierN rest -> [app signals]
+// Timeline values are copied, the application's pNext chain is never modified.
+static void AppendLegacyInteropSubmits(const VkSubmitInfo& original,
+                                       const VkTimelineSemaphoreSubmitInfo* originalTimeline, const void* passThrough,
+                                       const PendingInterop* interops, size_t interopCount,
+                                       std::deque<LegacySplitSubmit>& storage, std::vector<VkSubmitInfo>& out)
+{
+    constexpr VkPipelineStageFlags allCommands = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    uint32_t nextCommandBuffer = 0;
+
+    for (size_t k = 0; k < interopCount; k++)
+    {
+        const auto& pending = interops[k].pending;
+
+        auto& segment = storage.emplace_back();
+        if (k == 0)
+        {
+            for (uint32_t i = 0; i < original.waitSemaphoreCount; i++)
+            {
+                uint64_t value = 0;
+                if (originalTimeline != nullptr && originalTimeline->pWaitSemaphoreValues != nullptr &&
+                    i < originalTimeline->waitSemaphoreValueCount)
+                    value = originalTimeline->pWaitSemaphoreValues[i];
+
+                segment.AddWait(original.pWaitSemaphores[i], original.pWaitDstStageMask[i], value);
+            }
+        }
+        else
+        {
+            const auto& previous = interops[k - 1].pending;
+            segment.AddWait(previous.copyBackSemaphore, allCommands, previous.copyBackValue);
+            segment.commandBuffers.push_back(previous.barrierCommandBuffer);
+        }
+
+        for (; nextCommandBuffer <= interops[k].commandBufferIndex; nextCommandBuffer++)
+            segment.commandBuffers.push_back(original.pCommandBuffers[nextCommandBuffer]);
+
+        segment.AddSignal(pending.resourceCopySemaphore, pending.resourceCopyValue);
+        segment.timeline.pNext = passThrough;
+        out.push_back(segment.Finalize());
+
+        auto& copyBack = storage.emplace_back();
+        copyBack.AddWait(pending.resourceCopySemaphore, allCommands, pending.d3d12CompleteValue);
+        copyBack.commandBuffers.push_back(pending.copyBackCommandBuffer);
+        copyBack.AddSignal(pending.copyBackSemaphore, pending.copyBackValue);
+        out.push_back(copyBack.Finalize());
+    }
+
+    const auto& last = interops[interopCount - 1].pending;
+
+    auto& tail = storage.emplace_back();
+    tail.AddWait(last.copyBackSemaphore, allCommands, last.copyBackValue);
+    tail.commandBuffers.push_back(last.barrierCommandBuffer);
+    for (; nextCommandBuffer < original.commandBufferCount; nextCommandBuffer++)
+        tail.commandBuffers.push_back(original.pCommandBuffers[nextCommandBuffer]);
+
+    for (uint32_t i = 0; i < original.signalSemaphoreCount; i++)
+    {
+        uint64_t value = 0;
+        if (originalTimeline != nullptr && originalTimeline->pSignalSemaphoreValues != nullptr &&
+            i < originalTimeline->signalSemaphoreValueCount)
+            value = originalTimeline->pSignalSemaphoreValues[i];
+
+        tail.AddSignal(original.pSignalSemaphores[i], value);
+    }
+
+    tail.timeline.pNext = passThrough;
+    out.push_back(tail.Finalize());
+}
+
+// NR's finished-picture work recorded into these command buffers is now on the GPU
+static void NotifyNrSubmitted(VkQueue queue, VkResult result, uint32_t submitCount, const VkSubmitInfo* pSubmits)
+{
+    if (result != VK_SUCCESS || pSubmits == nullptr)
+        return;
+
+    for (uint32_t i = 0; i < submitCount; ++i)
+        for (uint32_t j = 0; j < pSubmits[i].commandBufferCount; ++j)
+            DlssNr::FinishedVkSubmitted(queue, pSubmits[i].pCommandBuffers[j]);
+}
+
+static void NotifyNrSubmitted(VkQueue queue, VkResult result, uint32_t submitCount, const VkSubmitInfo2* pSubmits)
+{
+    if (result != VK_SUCCESS || pSubmits == nullptr)
+        return;
+
+    for (uint32_t i = 0; i < submitCount; ++i)
+        for (uint32_t j = 0; j < pSubmits[i].commandBufferInfoCount; ++j)
+            DlssNr::FinishedVkSubmitted(queue, pSubmits[i].pCommandBufferInfos[j].commandBuffer);
 }
 
 VkResult Vulkan_wDx12::hk_vkQueueSubmit(VkQueue queue, uint32_t submitCount, const VkSubmitInfo* pSubmits,
                                         VkFence fence)
 {
-    if (pSubmits == nullptr || o_vkQueueSubmit == nullptr)
+    if (o_vkQueueSubmit == nullptr)
     {
         LOG_ERROR("Invalid parameters to hk_vkQueueSubmit");
         return VK_ERROR_INITIALIZATION_FAILED;
@@ -6203,379 +6621,300 @@ VkResult Vulkan_wDx12::hk_vkQueueSubmit(VkQueue queue, uint32_t submitCount, con
     LOG_DEBUG("queue: {:X}, submitCount: {}, fence: {:X}", (size_t) queue, submitCount, (size_t) fence);
 #endif
 
-    PendingSubmission pending {};
-    uint32_t submitIndex = UINT32_MAX;
-    uint32_t commandBufferIndex = UINT32_MAX;
+    // A submit without batches is valid and only signals the fence.
+    if (submitCount == 0 || pSubmits == nullptr)
+        return o_vkQueueSubmit(queue, submitCount, pSubmits, fence);
 
-    for (uint32_t i = 0; i < submitCount && submitIndex == UINT32_MAX; i++)
+    std::vector<PendingInterop> interops;
+    for (uint32_t i = 0; i < submitCount; i++)
     {
         for (uint32_t j = 0; j < pSubmits[i].commandBufferCount; j++)
         {
-            if (TakePendingSubmission(pSubmits[i].pCommandBuffers[j], pending))
-            {
-                submitIndex = i;
-                commandBufferIndex = j;
-                break;
-            }
+            PendingInterop interop { i, j };
+            if (TakePendingSubmission(pSubmits[i].pCommandBuffers[j], interop.pending))
+                interops.push_back(interop);
         }
     }
 
-    if (submitIndex == UINT32_MAX)
+    if (interops.empty())
     {
         const auto result = o_vkQueueSubmit(queue, submitCount, pSubmits, fence);
-        if (result == VK_SUCCESS)
-            for (uint32_t i = 0; i < submitCount; ++i)
-                for (uint32_t j = 0; j < pSubmits[i].commandBufferCount; ++j)
-                    DlssNr::FinishedVkSubmitted(queue, pSubmits[i].pCommandBuffers[j]);
+        NotifyNrSubmitted(queue, result, submitCount, pSubmits);
         return result;
     }
 
-    const auto& original = pSubmits[submitIndex];
-
-    // Splitting a legacy VkSubmitInfo changes command/signal counts. Submit-level extensions such as device-group or
-    // protected-submit structures can carry count-coupled semantics, so only the plain submit and the single
-    // VkTimelineSemaphoreSubmitInfo case are rewritten. Everything else is passed through unchanged.
-    if (!LegacySubmitPNextSupported(original.pNext))
-    {
-        AbortPendingD3D12Wait(pending, "unsupported legacy VkSubmitInfo pNext chain");
-        return o_vkQueueSubmit(queue, submitCount, pSubmits, fence);
-    }
-
-    const auto* originalTimeline = FindTimelineSubmitInfo(original.pNext);
-
-    // Copy timeline values instead of modifying the application's pNext chain. Binary semaphore slots use value 0.
-    std::vector<uint64_t> originalWaitValues(original.waitSemaphoreCount, 0);
-    std::vector<uint64_t> originalSignalValues(original.signalSemaphoreCount, 0);
-    if (originalTimeline != nullptr)
-    {
-        if (originalTimeline->pWaitSemaphoreValues != nullptr)
-        {
-            auto count = std::min(original.waitSemaphoreCount, originalTimeline->waitSemaphoreValueCount);
-            std::copy_n(originalTimeline->pWaitSemaphoreValues, count, originalWaitValues.data());
-        }
-
-        if (originalTimeline->pSignalSemaphoreValues != nullptr)
-        {
-            auto count = std::min(original.signalSemaphoreCount, originalTimeline->signalSemaphoreValueCount);
-            std::copy_n(originalTimeline->pSignalSemaphoreValues, count, originalSignalValues.data());
-        }
-    }
-
-    std::vector<VkCommandBuffer> originalCommandBuffers(original.pCommandBuffers,
-                                                        original.pCommandBuffers + commandBufferIndex + 1);
-
-    VkSemaphore resourceCopySemaphore = pending.resourceCopySemaphore;
-    uint64_t resourceCopyValue = pending.resourceCopyValue;
-
-    VkTimelineSemaphoreSubmitInfo originalTimelineCopy {};
-    originalTimelineCopy.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-    originalTimelineCopy.waitSemaphoreValueCount = original.waitSemaphoreCount;
-    originalTimelineCopy.pWaitSemaphoreValues = originalWaitValues.empty() ? nullptr : originalWaitValues.data();
-    originalTimelineCopy.signalSemaphoreValueCount = 1;
-    originalTimelineCopy.pSignalSemaphoreValues = &resourceCopyValue;
-
-    // LegacySubmitPNextSupported guarantees either no extension or one standalone timeline node.
-    originalTimelineCopy.pNext = nullptr;
-
-    VkSubmitInfo modifiedOriginal = original;
-    modifiedOriginal.pNext = &originalTimelineCopy;
-    modifiedOriginal.commandBufferCount = static_cast<uint32_t>(originalCommandBuffers.size());
-    modifiedOriginal.pCommandBuffers = originalCommandBuffers.data();
-    modifiedOriginal.signalSemaphoreCount = 1;
-    modifiedOriginal.pSignalSemaphores = &resourceCopySemaphore;
-
-    VkSemaphore copyBackWaitSemaphore = pending.resourceCopySemaphore;
-    VkSemaphore copyBackSignalSemaphore = pending.copyBackSemaphore;
-    VkPipelineStageFlags copyBackWaitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-    uint64_t d3d12CompleteValue = pending.d3d12CompleteValue;
-    uint64_t copyBackValue = pending.copyBackValue;
-
-    VkTimelineSemaphoreSubmitInfo copyBackTimeline {};
-    copyBackTimeline.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-    copyBackTimeline.waitSemaphoreValueCount = 1;
-    copyBackTimeline.pWaitSemaphoreValues = &d3d12CompleteValue;
-    copyBackTimeline.signalSemaphoreValueCount = 1;
-    copyBackTimeline.pSignalSemaphoreValues = &copyBackValue;
-
-    VkSubmitInfo copyBackSubmit {};
-    copyBackSubmit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    copyBackSubmit.pNext = &copyBackTimeline;
-    copyBackSubmit.waitSemaphoreCount = 1;
-    copyBackSubmit.pWaitSemaphores = &copyBackWaitSemaphore;
-    copyBackSubmit.pWaitDstStageMask = &copyBackWaitStage;
-    copyBackSubmit.commandBufferCount = 1;
-    copyBackSubmit.pCommandBuffers = &pending.copyBackCommandBuffer;
-    copyBackSubmit.signalSemaphoreCount = 1;
-    copyBackSubmit.pSignalSemaphores = &copyBackSignalSemaphore;
-
-    std::vector<VkCommandBuffer> syncCommandBuffers;
-    syncCommandBuffers.reserve(1 + original.commandBufferCount - commandBufferIndex - 1);
-    syncCommandBuffers.push_back(pending.barrierCommandBuffer);
-    for (uint32_t i = commandBufferIndex + 1; i < original.commandBufferCount; i++)
-        syncCommandBuffers.push_back(original.pCommandBuffers[i]);
-
-    VkSemaphore syncWaitSemaphore = pending.copyBackSemaphore;
-    VkPipelineStageFlags syncWaitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-
-    VkTimelineSemaphoreSubmitInfo syncTimeline {};
-    syncTimeline.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-    syncTimeline.waitSemaphoreValueCount = 1;
-    syncTimeline.pWaitSemaphoreValues = &copyBackValue;
-    syncTimeline.signalSemaphoreValueCount = original.signalSemaphoreCount;
-    syncTimeline.pSignalSemaphoreValues = originalSignalValues.empty() ? nullptr : originalSignalValues.data();
-
-    VkSubmitInfo syncSubmit {};
-    syncSubmit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    syncSubmit.pNext = &syncTimeline;
-    syncSubmit.waitSemaphoreCount = 1;
-    syncSubmit.pWaitSemaphores = &syncWaitSemaphore;
-    syncSubmit.pWaitDstStageMask = &syncWaitStage;
-    syncSubmit.commandBufferCount = static_cast<uint32_t>(syncCommandBuffers.size());
-    syncSubmit.pCommandBuffers = syncCommandBuffers.data();
-    syncSubmit.signalSemaphoreCount = original.signalSemaphoreCount;
-    syncSubmit.pSignalSemaphores = original.pSignalSemaphores;
-
+    std::deque<LegacySplitSubmit> storage;
+    std::deque<SubmitPassThrough> passThroughs;
     std::vector<VkSubmitInfo> finalSubmits;
-    finalSubmits.reserve(submitCount + 2);
+    finalSubmits.reserve(submitCount + interops.size() * 2);
+    std::vector<PendingInterop> injected;
+
+    size_t next = 0;
     for (uint32_t i = 0; i < submitCount; i++)
     {
-        if (i == submitIndex)
-        {
-            finalSubmits.push_back(modifiedOriginal);
-            finalSubmits.push_back(copyBackSubmit);
-            finalSubmits.push_back(syncSubmit);
-        }
-        else
+        const size_t first = next;
+        while (next < interops.size() && interops[next].submitIndex == i)
+            next++;
+
+        if (first == next)
         {
             finalSubmits.push_back(pSubmits[i]);
+            continue;
+        }
+
+        // Inspect every node before splitting. Timeline values are cloned; single-device (device 0) group metadata
+        // and an explicitly unprotected submit have exactly the same meaning when omitted from our split submits.
+        auto& passThrough = passThroughs.emplace_back();
+        const auto extensionInfo = InspectLegacySubmitPNext(pSubmits[i], passThrough);
+        const bool aborted = HasAbortedInterop(interops.data() + first, next - first);
+        if (!extensionInfo || aborted)
+        {
+            if (!extensionInfo)
+                ReportRejectedLegacyPNext(pSubmits[i], extensionInfo);
+
+            AbortPendingD3D12Waits(interops.data() + first, next - first,
+                                   aborted ? "upscale wasn't submitted in time"
+                                           : "unsupported legacy VkSubmitInfo pNext chain");
+
+            if (CanAddCommandBuffers(pSubmits[i]))
+                AppendUnsplitLegacySubmit(pSubmits[i], interops.data() + first, next - first, storage, finalSubmits);
+            else
+                finalSubmits.push_back(pSubmits[i]);
+
+            continue;
+        }
+
+        AppendLegacyInteropSubmits(pSubmits[i], extensionInfo.timeline, passThrough.chain, interops.data() + first,
+                                   next - first, storage, finalSubmits);
+
+        for (size_t k = first; k < next; k++)
+        {
+            LOG_DEBUG("Injected Vulkan w/Dx12 legacy submit for command buffer {:X}",
+                      (size_t) interops[k].pending.submitCommandBuffer);
+            injected.push_back(interops[k]);
         }
     }
 
-    LOG_DEBUG("Injected Vulkan w/Dx12 legacy submit for command buffer {:X}", (size_t) pending.submitCommandBuffer);
     auto result = o_vkQueueSubmit(queue, static_cast<uint32_t>(finalSubmits.size()), finalSubmits.data(), fence);
-    if (result != VK_SUCCESS)
+    if (result != VK_SUCCESS && !injected.empty())
     {
         LOG_ERROR("vkQueueSubmit failed after Vulkan w/Dx12 injection: {}", magic_enum::enum_name(result));
-        AbortPendingD3D12Wait(pending, "vkQueueSubmit failed");
+        AbortPendingD3D12Waits(injected.data(), injected.size(), "vkQueueSubmit failed");
     }
 
-    if (result == VK_SUCCESS)
-        for (uint32_t i = 0; i < submitCount; ++i)
-            for (uint32_t j = 0; j < pSubmits[i].commandBufferCount; ++j)
-                DlssNr::FinishedVkSubmitted(queue, pSubmits[i].pCommandBuffers[j]);
+    NotifyNrSubmitted(queue, result, submitCount, pSubmits);
     return result;
 }
 
-template <typename SubmitFn>
-static VkResult Submit2WithDx12Interop(SubmitFn originalSubmit, VkQueue queue, uint32_t submitCount,
-                                       const VkSubmitInfo2* pSubmits, VkFence fence,
-                                       const Vulkan_wDx12::PendingSubmission& pending, uint32_t submitIndex,
-                                       uint32_t commandBufferIndex)
+// Same split layout as AppendLegacyInteropSubmits.
+static void AppendSubmit2InteropSubmits(const VkSubmitInfo2& original, const void* passThrough,
+                                        const PendingInterop* interops, size_t interopCount,
+                                        std::deque<Submit2SplitSubmit>& storage, std::vector<VkSubmitInfo2>& out)
 {
-    const auto& original = pSubmits[submitIndex];
+    uint32_t nextCommandBuffer = 0;
 
-    if (original.pNext != nullptr || original.flags != 0)
+    for (size_t k = 0; k < interopCount; k++)
     {
-        AbortPendingD3D12Wait(pending, original.pNext != nullptr ? "unsupported VkSubmitInfo2 pNext chain"
-                                                                 : "non-zero VkSubmitInfo2 flags are unsupported");
-        return originalSubmit(queue, submitCount, pSubmits, fence);
-    }
+        const auto& pending = interops[k].pending;
 
-    std::vector<VkCommandBufferSubmitInfo> originalCommandBuffers;
-    originalCommandBuffers.reserve(commandBufferIndex + 1);
-    for (uint32_t i = 0; i <= commandBufferIndex; i++)
-        originalCommandBuffers.push_back(original.pCommandBufferInfos[i]);
-
-    VkSemaphoreSubmitInfo resourceCopySignal {};
-    resourceCopySignal.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
-    resourceCopySignal.semaphore = pending.resourceCopySemaphore;
-    resourceCopySignal.value = pending.resourceCopyValue;
-    resourceCopySignal.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-
-    VkSubmitInfo2 modifiedOriginal = original;
-    modifiedOriginal.commandBufferInfoCount = static_cast<uint32_t>(originalCommandBuffers.size());
-    modifiedOriginal.pCommandBufferInfos = originalCommandBuffers.data();
-    modifiedOriginal.signalSemaphoreInfoCount = 1;
-    modifiedOriginal.pSignalSemaphoreInfos = &resourceCopySignal;
-
-    VkSemaphoreSubmitInfo copyBackWait {};
-    copyBackWait.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
-    copyBackWait.semaphore = pending.resourceCopySemaphore;
-    copyBackWait.value = pending.d3d12CompleteValue;
-    copyBackWait.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-
-    VkCommandBufferSubmitInfo copyBackCommand {};
-    copyBackCommand.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
-    copyBackCommand.commandBuffer = pending.copyBackCommandBuffer;
-
-    VkSemaphoreSubmitInfo copyBackSignal {};
-    copyBackSignal.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
-    copyBackSignal.semaphore = pending.copyBackSemaphore;
-    copyBackSignal.value = pending.copyBackValue;
-    copyBackSignal.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-
-    VkSubmitInfo2 copyBackSubmit {};
-    copyBackSubmit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
-    copyBackSubmit.flags = original.flags;
-    copyBackSubmit.waitSemaphoreInfoCount = 1;
-    copyBackSubmit.pWaitSemaphoreInfos = &copyBackWait;
-    copyBackSubmit.commandBufferInfoCount = 1;
-    copyBackSubmit.pCommandBufferInfos = &copyBackCommand;
-    copyBackSubmit.signalSemaphoreInfoCount = 1;
-    copyBackSubmit.pSignalSemaphoreInfos = &copyBackSignal;
-
-    std::vector<VkCommandBufferSubmitInfo> syncCommandBuffers;
-    syncCommandBuffers.reserve(1 + original.commandBufferInfoCount - commandBufferIndex - 1);
-
-    VkCommandBufferSubmitInfo barrierCommand {};
-    barrierCommand.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
-    barrierCommand.commandBuffer = pending.barrierCommandBuffer;
-    syncCommandBuffers.push_back(barrierCommand);
-
-    for (uint32_t i = commandBufferIndex + 1; i < original.commandBufferInfoCount; i++)
-        syncCommandBuffers.push_back(original.pCommandBufferInfos[i]);
-
-    VkSemaphoreSubmitInfo syncWait {};
-    syncWait.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
-    syncWait.semaphore = pending.copyBackSemaphore;
-    syncWait.value = pending.copyBackValue;
-    syncWait.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-
-    std::vector<VkSemaphoreSubmitInfo> originalSignals;
-    originalSignals.reserve(original.signalSemaphoreInfoCount);
-    for (uint32_t i = 0; i < original.signalSemaphoreInfoCount; i++)
-        originalSignals.push_back(original.pSignalSemaphoreInfos[i]);
-
-    VkSubmitInfo2 syncSubmit {};
-    syncSubmit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
-    syncSubmit.flags = original.flags;
-    syncSubmit.waitSemaphoreInfoCount = 1;
-    syncSubmit.pWaitSemaphoreInfos = &syncWait;
-    syncSubmit.commandBufferInfoCount = static_cast<uint32_t>(syncCommandBuffers.size());
-    syncSubmit.pCommandBufferInfos = syncCommandBuffers.data();
-    syncSubmit.signalSemaphoreInfoCount = static_cast<uint32_t>(originalSignals.size());
-    syncSubmit.pSignalSemaphoreInfos = originalSignals.empty() ? nullptr : originalSignals.data();
-
-    std::vector<VkSubmitInfo2> finalSubmits;
-    finalSubmits.reserve(submitCount + 2);
-    for (uint32_t i = 0; i < submitCount; i++)
-    {
-        if (i == submitIndex)
+        auto& segment = storage.emplace_back();
+        if (k == 0)
         {
-            finalSubmits.push_back(modifiedOriginal);
-            finalSubmits.push_back(copyBackSubmit);
-            finalSubmits.push_back(syncSubmit);
+            segment.waits.assign(original.pWaitSemaphoreInfos,
+                                 original.pWaitSemaphoreInfos + original.waitSemaphoreInfoCount);
         }
         else
         {
-            finalSubmits.push_back(pSubmits[i]);
+            const auto& previous = interops[k - 1].pending;
+            segment.AddWait(previous.copyBackSemaphore, previous.copyBackValue);
+            segment.AddCommandBuffer(previous.barrierCommandBuffer);
+        }
+
+        for (; nextCommandBuffer <= interops[k].commandBufferIndex; nextCommandBuffer++)
+            segment.commandBuffers.push_back(original.pCommandBufferInfos[nextCommandBuffer]);
+
+        segment.AddSignal(pending.resourceCopySemaphore, pending.resourceCopyValue);
+        segment.submit.pNext = passThrough;
+        out.push_back(segment.Finalize());
+
+        auto& copyBack = storage.emplace_back();
+        copyBack.AddWait(pending.resourceCopySemaphore, pending.d3d12CompleteValue);
+        copyBack.AddCommandBuffer(pending.copyBackCommandBuffer);
+        copyBack.AddSignal(pending.copyBackSemaphore, pending.copyBackValue);
+        out.push_back(copyBack.Finalize());
+    }
+
+    const auto& last = interops[interopCount - 1].pending;
+
+    auto& tail = storage.emplace_back();
+    tail.AddWait(last.copyBackSemaphore, last.copyBackValue);
+    tail.AddCommandBuffer(last.barrierCommandBuffer);
+    for (; nextCommandBuffer < original.commandBufferInfoCount; nextCommandBuffer++)
+        tail.commandBuffers.push_back(original.pCommandBufferInfos[nextCommandBuffer]);
+
+    tail.signals.assign(original.pSignalSemaphoreInfos,
+                        original.pSignalSemaphoreInfos + original.signalSemaphoreInfoCount);
+    tail.submit.pNext = passThrough;
+    out.push_back(tail.Finalize());
+}
+
+// Same as AppendUnsplitLegacySubmit
+static void AppendUnsplitSubmit2(const VkSubmitInfo2& original, const PendingInterop* interops, size_t interopCount,
+                                 std::deque<Submit2SplitSubmit>& storage, std::vector<VkSubmitInfo2>& out)
+{
+    auto& copy = storage.emplace_back();
+    size_t next = 0;
+    for (uint32_t i = 0; i < original.commandBufferInfoCount; i++)
+    {
+        copy.commandBuffers.push_back(original.pCommandBufferInfos[i]);
+
+        if (next < interopCount && interops[next].commandBufferIndex == i)
+        {
+            copy.AddCommandBuffer(interops[next].pending.barrierCommandBuffer);
+            next++;
         }
     }
 
-    return originalSubmit(queue, static_cast<uint32_t>(finalSubmits.size()), finalSubmits.data(), fence);
+    copy.submit = original;
+    copy.submit.commandBufferInfoCount = static_cast<uint32_t>(copy.commandBuffers.size());
+    copy.submit.pCommandBufferInfos = copy.commandBuffers.data();
+    out.push_back(copy.submit);
+}
+
+template <typename SubmitFn>
+static VkResult Submit2WithDx12Interop(SubmitFn originalSubmit, const char* name, VkQueue queue, uint32_t submitCount,
+                                       const VkSubmitInfo2* pSubmits, VkFence fence,
+                                       const std::vector<PendingInterop>& interops)
+{
+    std::deque<Submit2SplitSubmit> storage;
+    std::deque<SubmitPassThrough> passThroughs;
+    std::vector<VkSubmitInfo2> finalSubmits;
+    finalSubmits.reserve(submitCount + interops.size() * 2);
+    std::vector<PendingInterop> injected;
+
+    size_t next = 0;
+    for (uint32_t i = 0; i < submitCount; i++)
+    {
+        const size_t first = next;
+        while (next < interops.size() && interops[next].submitIndex == i)
+            next++;
+
+        if (first == next)
+        {
+            finalSubmits.push_back(pSubmits[i]);
+            continue;
+        }
+
+        const auto& original = pSubmits[i];
+        if (original.flags != 0)
+        {
+            AbortPendingD3D12Waits(interops.data() + first, next - first,
+                                   "non-zero VkSubmitInfo2 flags are unsupported");
+            finalSubmits.push_back(original);
+            continue;
+        }
+
+        auto& passThrough = passThroughs.emplace_back();
+        const bool aborted = HasAbortedInterop(interops.data() + first, next - first);
+        if (aborted || !passThrough.AddChain(original.pNext))
+        {
+            AbortPendingD3D12Waits(interops.data() + first, next - first,
+                                   aborted ? "upscale wasn't submitted in time"
+                                           : "unsupported VkSubmitInfo2 pNext chain");
+            AppendUnsplitSubmit2(original, interops.data() + first, next - first, storage, finalSubmits);
+            continue;
+        }
+
+        AppendSubmit2InteropSubmits(original, passThrough.chain, interops.data() + first, next - first, storage,
+                                    finalSubmits);
+
+        for (size_t k = first; k < next; k++)
+        {
+            LOG_DEBUG("Injected Vulkan w/Dx12 {} for command buffer {:X}", name,
+                      (size_t) interops[k].pending.submitCommandBuffer);
+            injected.push_back(interops[k]);
+        }
+    }
+
+    auto result = originalSubmit(queue, static_cast<uint32_t>(finalSubmits.size()), finalSubmits.data(), fence);
+    if (result != VK_SUCCESS && !injected.empty())
+    {
+        LOG_ERROR("{} failed after Vulkan w/Dx12 injection: {}", name, magic_enum::enum_name(result));
+        AbortPendingD3D12Waits(injected.data(), injected.size(), "vkQueueSubmit2 failed");
+    }
+
+    return result;
 }
 
 VkResult Vulkan_wDx12::hk_vkQueueSubmit2(VkQueue queue, uint32_t submitCount, const VkSubmitInfo2* pSubmits,
                                          VkFence fence)
 {
-    if (pSubmits == nullptr || o_vkQueueSubmit2 == nullptr)
+    if (o_vkQueueSubmit2 == nullptr)
     {
         LOG_ERROR("Invalid parameters to hk_vkQueueSubmit2");
         return VK_ERROR_INITIALIZATION_FAILED;
     }
 
-    PendingSubmission pending {};
-    uint32_t submitIndex = UINT32_MAX;
-    uint32_t commandBufferIndex = UINT32_MAX;
+    if (submitCount == 0 || pSubmits == nullptr)
+        return o_vkQueueSubmit2(queue, submitCount, pSubmits, fence);
 
-    for (uint32_t i = 0; i < submitCount && submitIndex == UINT32_MAX; i++)
+    std::vector<PendingInterop> interops;
+    for (uint32_t i = 0; i < submitCount; i++)
     {
         for (uint32_t j = 0; j < pSubmits[i].commandBufferInfoCount; j++)
         {
-            if (TakePendingSubmission(pSubmits[i].pCommandBufferInfos[j].commandBuffer, pending))
-            {
-                submitIndex = i;
-                commandBufferIndex = j;
-                break;
-            }
+            PendingInterop interop { i, j };
+            if (TakePendingSubmission(pSubmits[i].pCommandBufferInfos[j].commandBuffer, interop.pending))
+                interops.push_back(interop);
         }
     }
 
-    if (submitIndex == UINT32_MAX)
+    if (interops.empty())
     {
         const auto result = o_vkQueueSubmit2(queue, submitCount, pSubmits, fence);
-        if (result == VK_SUCCESS)
-            for (uint32_t i = 0; i < submitCount; ++i)
-                for (uint32_t j = 0; j < pSubmits[i].commandBufferInfoCount; ++j)
-                    DlssNr::FinishedVkSubmitted(queue, pSubmits[i].pCommandBufferInfos[j].commandBuffer);
+        NotifyNrSubmitted(queue, result, submitCount, pSubmits);
         return result;
     }
 
-    LOG_DEBUG("Injected Vulkan w/Dx12 submit2 for command buffer {:X}", (size_t) pending.submitCommandBuffer);
-    auto result = Submit2WithDx12Interop(o_vkQueueSubmit2, queue, submitCount, pSubmits, fence, pending, submitIndex,
-                                         commandBufferIndex);
-    if (result != VK_SUCCESS)
-    {
-        LOG_ERROR("vkQueueSubmit2 failed after Vulkan w/Dx12 injection: {}", magic_enum::enum_name(result));
-        AbortPendingD3D12Wait(pending, "vkQueueSubmit2 failed");
-    }
-
-    if (result == VK_SUCCESS)
-        for (uint32_t i = 0; i < submitCount; ++i)
-            for (uint32_t j = 0; j < pSubmits[i].commandBufferInfoCount; ++j)
-                DlssNr::FinishedVkSubmitted(queue, pSubmits[i].pCommandBufferInfos[j].commandBuffer);
+    const auto result =
+        Submit2WithDx12Interop(o_vkQueueSubmit2, "vkQueueSubmit2", queue, submitCount, pSubmits, fence, interops);
+    NotifyNrSubmitted(queue, result, submitCount, pSubmits);
     return result;
 }
 
 VkResult Vulkan_wDx12::hk_vkQueueSubmit2KHR(VkQueue queue, uint32_t submitCount, const VkSubmitInfo2* pSubmits,
                                             VkFence fence)
 {
-    if (pSubmits == nullptr || o_vkQueueSubmit2KHR == nullptr)
+    if (o_vkQueueSubmit2KHR == nullptr)
     {
         LOG_ERROR("Invalid parameters to hk_vkQueueSubmit2KHR");
         return VK_ERROR_INITIALIZATION_FAILED;
     }
 
-    PendingSubmission pending {};
-    uint32_t submitIndex = UINT32_MAX;
-    uint32_t commandBufferIndex = UINT32_MAX;
+    if (submitCount == 0 || pSubmits == nullptr)
+        return o_vkQueueSubmit2KHR(queue, submitCount, pSubmits, fence);
 
-    for (uint32_t i = 0; i < submitCount && submitIndex == UINT32_MAX; i++)
+    std::vector<PendingInterop> interops;
+    for (uint32_t i = 0; i < submitCount; i++)
     {
         for (uint32_t j = 0; j < pSubmits[i].commandBufferInfoCount; j++)
         {
-            if (TakePendingSubmission(pSubmits[i].pCommandBufferInfos[j].commandBuffer, pending))
-            {
-                submitIndex = i;
-                commandBufferIndex = j;
-                break;
-            }
+            PendingInterop interop { i, j };
+            if (TakePendingSubmission(pSubmits[i].pCommandBufferInfos[j].commandBuffer, interop.pending))
+                interops.push_back(interop);
         }
     }
 
-    if (submitIndex == UINT32_MAX)
+    if (interops.empty())
     {
         const auto result = o_vkQueueSubmit2KHR(queue, submitCount, pSubmits, fence);
-        if (result == VK_SUCCESS)
-            for (uint32_t i = 0; i < submitCount; ++i)
-                for (uint32_t j = 0; j < pSubmits[i].commandBufferInfoCount; ++j)
-                    DlssNr::FinishedVkSubmitted(queue, pSubmits[i].pCommandBufferInfos[j].commandBuffer);
+        NotifyNrSubmitted(queue, result, submitCount, pSubmits);
         return result;
     }
 
-    LOG_DEBUG("Injected Vulkan w/Dx12 submit2KHR for command buffer {:X}", (size_t) pending.submitCommandBuffer);
-    auto result = Submit2WithDx12Interop(o_vkQueueSubmit2KHR, queue, submitCount, pSubmits, fence, pending, submitIndex,
-                                         commandBufferIndex);
-    if (result != VK_SUCCESS)
-    {
-        LOG_ERROR("vkQueueSubmit2KHR failed after Vulkan w/Dx12 injection: {}", magic_enum::enum_name(result));
-        AbortPendingD3D12Wait(pending, "vkQueueSubmit2KHR failed");
-    }
-
-    if (result == VK_SUCCESS)
-        for (uint32_t i = 0; i < submitCount; ++i)
-            for (uint32_t j = 0; j < pSubmits[i].commandBufferInfoCount; ++j)
-                DlssNr::FinishedVkSubmitted(queue, pSubmits[i].pCommandBufferInfos[j].commandBuffer);
+    const auto result = Submit2WithDx12Interop(o_vkQueueSubmit2KHR, "vkQueueSubmit2KHR", queue, submitCount, pSubmits,
+                                               fence, interops);
+    NotifyNrSubmitted(queue, result, submitCount, pSubmits);
     return result;
 }
 
@@ -6583,8 +6922,8 @@ VkResult Vulkan_wDx12::hk_vkBeginCommandBuffer(VkCommandBuffer commandBuffer,
                                                const VkCommandBufferBeginInfo* pBeginInfo)
 {
     DlssNr::FinishedVkReset(commandBuffer);
-    if (GetVirtualCommandBuffer(commandBuffer) == VK_NULL_HANDLE)
-        cmdBufferStateTracker.OnBegin(commandBuffer, pBeginInfo);
+    DiscardPendingInterop(commandBuffer);
+    cmdBufferStateTracker.OnBegin(commandBuffer, pBeginInfo);
 
 #ifdef LOG_ALL_RECORDS
     LOG_DEBUG("commandBuffer: {:X}", (size_t) commandBuffer);
@@ -6621,8 +6960,8 @@ VkResult Vulkan_wDx12::hk_vkResetCommandBuffer(VkCommandBuffer commandBuffer, Vk
     LOG_DEBUG("commandBuffer: {:X}", (size_t) commandBuffer);
 #endif
 
-    if (GetVirtualCommandBuffer(commandBuffer) == VK_NULL_HANDLE)
-        cmdBufferStateTracker.OnReset(commandBuffer);
+    DiscardPendingInterop(commandBuffer);
+    cmdBufferStateTracker.OnReset(commandBuffer);
 
     return o_vkResetCommandBuffer(commandBuffer, flags);
 }
@@ -6634,6 +6973,9 @@ void Vulkan_wDx12::hk_vkFreeCommandBuffers(VkDevice device, VkCommandPool comman
     LOG_DEBUG("device: {:X}, commandPool: {:X}, commandBufferCount: {}", (size_t) device, (size_t) commandPool,
               commandBufferCount);
 #endif
+
+    for (uint32_t i = 0; i < commandBufferCount; i++)
+        DiscardPendingInterop(pCommandBuffers[i]);
 
     // Notify state tracker before freeing
     for (uint32_t i = 0; i < commandBufferCount; ++i)
@@ -6686,6 +7028,12 @@ void Vulkan_wDx12::hk_vkDestroyCommandPool(VkDevice device, VkCommandPool comman
     LOG_DEBUG("device: {:X}, commandPool: {:X}", (size_t) device, (size_t) commandPool);
 #endif
 
+    if (pendingSubmissionCount > 0)
+    {
+        for (auto commandBuffer : cmdBufferStateTracker.GetPoolCommandBuffers(commandPool))
+            DiscardPendingInterop(commandBuffer);
+    }
+
     // Notify state tracker about pool destruction
     DlssNr::FinishedVkResetPool(commandPool);
     cmdBufferStateTracker.OnDestroyPool(commandPool);
@@ -6704,12 +7052,31 @@ VkResult Vulkan_wDx12::hk_vkResetCommandPool(VkDevice device, VkCommandPool comm
     LOG_DEBUG("device: {:X}, commandPool: {:X}, flags: {:X}", (size_t) device, (size_t) commandPool, (uint32_t) flags);
 #endif
 
+    if (pendingSubmissionCount > 0)
+    {
+        for (auto commandBuffer : cmdBufferStateTracker.GetPoolCommandBuffers(commandPool))
+            DiscardPendingInterop(commandBuffer);
+    }
+
     // Notify state tracker before reset
     DlssNr::FinishedVkResetPool(commandPool);
     cmdBufferStateTracker.OnResetPool(commandPool);
 
     // Call original function
     return o_vkResetCommandPool(device, commandPool, flags);
+}
+
+// vulkan-1.dll exports Hook detours to the same hooks GetAddress hands out
+static std::unordered_set<PFN_vkVoidFunction> _detouredExports;
+
+static FARPROC DetouredExport(HMODULE module, const char* name)
+{
+    auto address = GetProcAddress(module, name);
+
+    if (address != nullptr)
+        _detouredExports.insert((PFN_vkVoidFunction) address);
+
+    return address;
 }
 
 PFN_vkVoidFunction Vulkan_wDx12::GetDeviceProcAddr(const PFN_vkVoidFunction original, const char* pName)
@@ -6734,6 +7101,11 @@ PFN_vkVoidFunction Vulkan_wDx12::GetAddress(const PFN_vkVoidFunction original, c
 {
     if (original == nullptr || pName == nullptr)
         return VK_NULL_HANDLE;
+
+    // A detoured export already leads to our hook. Under Wine the exports are the driver's own functions, which
+    // HUDFix detours too, handing out our hook instead would skip past its detour.
+    if (_detouredExports.contains(original))
+        return original;
 
     auto procName = std::string(pName);
 
@@ -7141,6 +7513,13 @@ PFN_vkVoidFunction Vulkan_wDx12::GetAddress(const PFN_vkVoidFunction original, c
             o_vkCmdWaitEvents = (PFN_vkCmdWaitEvents) original;
 
         return (PFN_vkVoidFunction) hk_vkCmdWaitEvents;
+    }
+    if (procName == std::string("vkDestroyImage"))
+    {
+        if (o_vkDestroyImage == nullptr)
+            o_vkDestroyImage = (PFN_vkDestroyImage) original;
+
+        return (PFN_vkVoidFunction) hk_vkDestroyImage;
     }
     if (procName == std::string("vkCmdPipelineBarrier"))
     {
@@ -9277,407 +9656,408 @@ void Vulkan_wDx12::Hook(HMODULE vulkanModule)
     if (State::Instance().creatingD3DDevice)
         return;
 
-    o_vkQueueSubmit = (PFN_vkQueueSubmit) GetProcAddress(vulkanModule, "vkQueueSubmit");
-    o_vkQueueSubmit2 = (PFN_vkQueueSubmit2) GetProcAddress(vulkanModule, "vkQueueSubmit2");
-    o_vkQueueSubmit2KHR = (PFN_vkQueueSubmit2KHR) GetProcAddress(vulkanModule, "vkQueueSubmit2KHR");
-    o_vkBeginCommandBuffer = (PFN_vkBeginCommandBuffer) GetProcAddress(vulkanModule, "vkBeginCommandBuffer");
-    o_vkEndCommandBuffer = (PFN_vkEndCommandBuffer) GetProcAddress(vulkanModule, "vkEndCommandBuffer");
-    o_vkResetCommandBuffer = (PFN_vkResetCommandBuffer) GetProcAddress(vulkanModule, "vkResetCommandBuffer");
-    o_vkFreeCommandBuffers = (PFN_vkFreeCommandBuffers) GetProcAddress(vulkanModule, "vkFreeCommandBuffers");
-    o_vkResetCommandPool = (PFN_vkResetCommandPool) GetProcAddress(vulkanModule, "vkResetCommandPool");
-    o_vkCmdExecuteCommands = (PFN_vkCmdExecuteCommands) GetProcAddress(vulkanModule, "vkCmdExecuteCommands");
+    o_vkQueueSubmit = (PFN_vkQueueSubmit) DetouredExport(vulkanModule, "vkQueueSubmit");
+    o_vkQueueSubmit2 = (PFN_vkQueueSubmit2) DetouredExport(vulkanModule, "vkQueueSubmit2");
+    o_vkQueueSubmit2KHR = (PFN_vkQueueSubmit2KHR) DetouredExport(vulkanModule, "vkQueueSubmit2KHR");
+    o_vkBeginCommandBuffer = (PFN_vkBeginCommandBuffer) DetouredExport(vulkanModule, "vkBeginCommandBuffer");
+    o_vkEndCommandBuffer = (PFN_vkEndCommandBuffer) DetouredExport(vulkanModule, "vkEndCommandBuffer");
+    o_vkResetCommandBuffer = (PFN_vkResetCommandBuffer) DetouredExport(vulkanModule, "vkResetCommandBuffer");
+    o_vkFreeCommandBuffers = (PFN_vkFreeCommandBuffers) DetouredExport(vulkanModule, "vkFreeCommandBuffers");
+    o_vkResetCommandPool = (PFN_vkResetCommandPool) DetouredExport(vulkanModule, "vkResetCommandPool");
+    o_vkCmdExecuteCommands = (PFN_vkCmdExecuteCommands) DetouredExport(vulkanModule, "vkCmdExecuteCommands");
     o_vkAllocateCommandBuffers =
-        (PFN_vkAllocateCommandBuffers) GetProcAddress(vulkanModule, "vkAllocateCommandBuffers");
-    o_vkDestroyCommandPool = (PFN_vkDestroyCommandPool) GetProcAddress(vulkanModule, "vkDestroyCommandPool");
-    o_vkCreateCommandPool = (PFN_vkCreateCommandPool) GetProcAddress(vulkanModule, "vkCreateCommandPool");
+        (PFN_vkAllocateCommandBuffers) DetouredExport(vulkanModule, "vkAllocateCommandBuffers");
+    o_vkDestroyCommandPool = (PFN_vkDestroyCommandPool) DetouredExport(vulkanModule, "vkDestroyCommandPool");
+    o_vkCreateCommandPool = (PFN_vkCreateCommandPool) DetouredExport(vulkanModule, "vkCreateCommandPool");
 
 #pragma region vkCmd functions
 
-    o_vkCmdBindPipeline = (PFN_vkCmdBindPipeline) GetProcAddress(vulkanModule, "vkCmdBindPipeline");
-    o_vkCmdSetViewport = (PFN_vkCmdSetViewport) GetProcAddress(vulkanModule, "vkCmdSetViewport");
-    o_vkCmdSetScissor = (PFN_vkCmdSetScissor) GetProcAddress(vulkanModule, "vkCmdSetScissor");
-    o_vkCmdSetLineWidth = (PFN_vkCmdSetLineWidth) GetProcAddress(vulkanModule, "vkCmdSetLineWidth");
-    o_vkCmdSetDepthBias = (PFN_vkCmdSetDepthBias) GetProcAddress(vulkanModule, "vkCmdSetDepthBias");
-    o_vkCmdSetBlendConstants = (PFN_vkCmdSetBlendConstants) GetProcAddress(vulkanModule, "vkCmdSetBlendConstants");
-    o_vkCmdSetDepthBounds = (PFN_vkCmdSetDepthBounds) GetProcAddress(vulkanModule, "vkCmdSetDepthBounds");
+    o_vkCmdBindPipeline = (PFN_vkCmdBindPipeline) DetouredExport(vulkanModule, "vkCmdBindPipeline");
+    o_vkCmdSetViewport = (PFN_vkCmdSetViewport) DetouredExport(vulkanModule, "vkCmdSetViewport");
+    o_vkCmdSetScissor = (PFN_vkCmdSetScissor) DetouredExport(vulkanModule, "vkCmdSetScissor");
+    o_vkCmdSetLineWidth = (PFN_vkCmdSetLineWidth) DetouredExport(vulkanModule, "vkCmdSetLineWidth");
+    o_vkCmdSetDepthBias = (PFN_vkCmdSetDepthBias) DetouredExport(vulkanModule, "vkCmdSetDepthBias");
+    o_vkCmdSetBlendConstants = (PFN_vkCmdSetBlendConstants) DetouredExport(vulkanModule, "vkCmdSetBlendConstants");
+    o_vkCmdSetDepthBounds = (PFN_vkCmdSetDepthBounds) DetouredExport(vulkanModule, "vkCmdSetDepthBounds");
     o_vkCmdSetStencilCompareMask =
-        (PFN_vkCmdSetStencilCompareMask) GetProcAddress(vulkanModule, "vkCmdSetStencilCompareMask");
+        (PFN_vkCmdSetStencilCompareMask) DetouredExport(vulkanModule, "vkCmdSetStencilCompareMask");
     o_vkCmdSetStencilWriteMask =
-        (PFN_vkCmdSetStencilWriteMask) GetProcAddress(vulkanModule, "vkCmdSetStencilWriteMask");
+        (PFN_vkCmdSetStencilWriteMask) DetouredExport(vulkanModule, "vkCmdSetStencilWriteMask");
     o_vkCmdSetStencilReference =
-        (PFN_vkCmdSetStencilReference) GetProcAddress(vulkanModule, "vkCmdSetStencilReference");
-    o_vkCmdBindDescriptorSets = (PFN_vkCmdBindDescriptorSets) GetProcAddress(vulkanModule, "vkCmdBindDescriptorSets");
-    o_vkCmdBindIndexBuffer = (PFN_vkCmdBindIndexBuffer) GetProcAddress(vulkanModule, "vkCmdBindIndexBuffer");
-    o_vkCmdBindVertexBuffers = (PFN_vkCmdBindVertexBuffers) GetProcAddress(vulkanModule, "vkCmdBindVertexBuffers");
-    o_vkCmdDraw = (PFN_vkCmdDraw) GetProcAddress(vulkanModule, "vkCmdDraw");
-    o_vkCmdDrawIndexed = (PFN_vkCmdDrawIndexed) GetProcAddress(vulkanModule, "vkCmdDrawIndexed");
-    o_vkCmdDrawIndirect = (PFN_vkCmdDrawIndirect) GetProcAddress(vulkanModule, "vkCmdDrawIndirect");
+        (PFN_vkCmdSetStencilReference) DetouredExport(vulkanModule, "vkCmdSetStencilReference");
+    o_vkCmdBindDescriptorSets = (PFN_vkCmdBindDescriptorSets) DetouredExport(vulkanModule, "vkCmdBindDescriptorSets");
+    o_vkCmdBindIndexBuffer = (PFN_vkCmdBindIndexBuffer) DetouredExport(vulkanModule, "vkCmdBindIndexBuffer");
+    o_vkCmdBindVertexBuffers = (PFN_vkCmdBindVertexBuffers) DetouredExport(vulkanModule, "vkCmdBindVertexBuffers");
+    o_vkCmdDraw = (PFN_vkCmdDraw) DetouredExport(vulkanModule, "vkCmdDraw");
+    o_vkCmdDrawIndexed = (PFN_vkCmdDrawIndexed) DetouredExport(vulkanModule, "vkCmdDrawIndexed");
+    o_vkCmdDrawIndirect = (PFN_vkCmdDrawIndirect) DetouredExport(vulkanModule, "vkCmdDrawIndirect");
     o_vkCmdDrawIndexedIndirect =
-        (PFN_vkCmdDrawIndexedIndirect) GetProcAddress(vulkanModule, "vkCmdDrawIndexedIndirect");
-    o_vkCmdDispatch = (PFN_vkCmdDispatch) GetProcAddress(vulkanModule, "vkCmdDispatch");
-    o_vkCmdDispatchIndirect = (PFN_vkCmdDispatchIndirect) GetProcAddress(vulkanModule, "vkCmdDispatchIndirect");
-    o_vkCmdCopyBuffer = (PFN_vkCmdCopyBuffer) GetProcAddress(vulkanModule, "vkCmdCopyBuffer");
-    o_vkCmdCopyImage = (PFN_vkCmdCopyImage) GetProcAddress(vulkanModule, "vkCmdCopyImage");
-    o_vkCmdBlitImage = (PFN_vkCmdBlitImage) GetProcAddress(vulkanModule, "vkCmdBlitImage");
-    o_vkCmdCopyBufferToImage = (PFN_vkCmdCopyBufferToImage) GetProcAddress(vulkanModule, "vkCmdCopyBufferToImage");
-    o_vkCmdCopyImageToBuffer = (PFN_vkCmdCopyImageToBuffer) GetProcAddress(vulkanModule, "vkCmdCopyImageToBuffer");
-    o_vkCmdUpdateBuffer = (PFN_vkCmdUpdateBuffer) GetProcAddress(vulkanModule, "vkCmdUpdateBuffer");
-    o_vkCmdFillBuffer = (PFN_vkCmdFillBuffer) GetProcAddress(vulkanModule, "vkCmdFillBuffer");
-    o_vkCmdClearColorImage = (PFN_vkCmdClearColorImage) GetProcAddress(vulkanModule, "vkCmdClearColorImage");
+        (PFN_vkCmdDrawIndexedIndirect) DetouredExport(vulkanModule, "vkCmdDrawIndexedIndirect");
+    o_vkCmdDispatch = (PFN_vkCmdDispatch) DetouredExport(vulkanModule, "vkCmdDispatch");
+    o_vkCmdDispatchIndirect = (PFN_vkCmdDispatchIndirect) DetouredExport(vulkanModule, "vkCmdDispatchIndirect");
+    o_vkCmdCopyBuffer = (PFN_vkCmdCopyBuffer) DetouredExport(vulkanModule, "vkCmdCopyBuffer");
+    o_vkCmdCopyImage = (PFN_vkCmdCopyImage) DetouredExport(vulkanModule, "vkCmdCopyImage");
+    o_vkCmdBlitImage = (PFN_vkCmdBlitImage) DetouredExport(vulkanModule, "vkCmdBlitImage");
+    o_vkCmdCopyBufferToImage = (PFN_vkCmdCopyBufferToImage) DetouredExport(vulkanModule, "vkCmdCopyBufferToImage");
+    o_vkCmdCopyImageToBuffer = (PFN_vkCmdCopyImageToBuffer) DetouredExport(vulkanModule, "vkCmdCopyImageToBuffer");
+    o_vkCmdUpdateBuffer = (PFN_vkCmdUpdateBuffer) DetouredExport(vulkanModule, "vkCmdUpdateBuffer");
+    o_vkCmdFillBuffer = (PFN_vkCmdFillBuffer) DetouredExport(vulkanModule, "vkCmdFillBuffer");
+    o_vkCmdClearColorImage = (PFN_vkCmdClearColorImage) DetouredExport(vulkanModule, "vkCmdClearColorImage");
     o_vkCmdClearDepthStencilImage =
-        (PFN_vkCmdClearDepthStencilImage) GetProcAddress(vulkanModule, "vkCmdClearDepthStencilImage");
-    o_vkCmdClearAttachments = (PFN_vkCmdClearAttachments) GetProcAddress(vulkanModule, "vkCmdClearAttachments");
-    o_vkCmdResolveImage = (PFN_vkCmdResolveImage) GetProcAddress(vulkanModule, "vkCmdResolveImage");
-    o_vkCmdSetEvent = (PFN_vkCmdSetEvent) GetProcAddress(vulkanModule, "vkCmdSetEvent");
-    o_vkCmdResetEvent = (PFN_vkCmdResetEvent) GetProcAddress(vulkanModule, "vkCmdResetEvent");
-    o_vkCmdWaitEvents = (PFN_vkCmdWaitEvents) GetProcAddress(vulkanModule, "vkCmdWaitEvents");
-    o_vkCmdPipelineBarrier = (PFN_vkCmdPipelineBarrier) GetProcAddress(vulkanModule, "vkCmdPipelineBarrier");
-    o_vkCmdBeginQuery = (PFN_vkCmdBeginQuery) GetProcAddress(vulkanModule, "vkCmdBeginQuery");
-    o_vkCmdEndQuery = (PFN_vkCmdEndQuery) GetProcAddress(vulkanModule, "vkCmdEndQuery");
-    o_vkCmdResetQueryPool = (PFN_vkCmdResetQueryPool) GetProcAddress(vulkanModule, "vkCmdResetQueryPool");
-    o_vkCmdWriteTimestamp = (PFN_vkCmdWriteTimestamp) GetProcAddress(vulkanModule, "vkCmdWriteTimestamp");
+        (PFN_vkCmdClearDepthStencilImage) DetouredExport(vulkanModule, "vkCmdClearDepthStencilImage");
+    o_vkCmdClearAttachments = (PFN_vkCmdClearAttachments) DetouredExport(vulkanModule, "vkCmdClearAttachments");
+    o_vkCmdResolveImage = (PFN_vkCmdResolveImage) DetouredExport(vulkanModule, "vkCmdResolveImage");
+    o_vkCmdSetEvent = (PFN_vkCmdSetEvent) DetouredExport(vulkanModule, "vkCmdSetEvent");
+    o_vkCmdResetEvent = (PFN_vkCmdResetEvent) DetouredExport(vulkanModule, "vkCmdResetEvent");
+    o_vkCmdWaitEvents = (PFN_vkCmdWaitEvents) DetouredExport(vulkanModule, "vkCmdWaitEvents");
+    o_vkCmdPipelineBarrier = (PFN_vkCmdPipelineBarrier) DetouredExport(vulkanModule, "vkCmdPipelineBarrier");
+    o_vkDestroyImage = (PFN_vkDestroyImage) DetouredExport(vulkanModule, "vkDestroyImage");
+    o_vkCmdBeginQuery = (PFN_vkCmdBeginQuery) DetouredExport(vulkanModule, "vkCmdBeginQuery");
+    o_vkCmdEndQuery = (PFN_vkCmdEndQuery) DetouredExport(vulkanModule, "vkCmdEndQuery");
+    o_vkCmdResetQueryPool = (PFN_vkCmdResetQueryPool) DetouredExport(vulkanModule, "vkCmdResetQueryPool");
+    o_vkCmdWriteTimestamp = (PFN_vkCmdWriteTimestamp) DetouredExport(vulkanModule, "vkCmdWriteTimestamp");
     o_vkCmdCopyQueryPoolResults =
-        (PFN_vkCmdCopyQueryPoolResults) GetProcAddress(vulkanModule, "vkCmdCopyQueryPoolResults");
-    o_vkCmdPushConstants = (PFN_vkCmdPushConstants) GetProcAddress(vulkanModule, "vkCmdPushConstants");
-    o_vkCmdBeginRenderPass = (PFN_vkCmdBeginRenderPass) GetProcAddress(vulkanModule, "vkCmdBeginRenderPass");
-    o_vkCmdNextSubpass = (PFN_vkCmdNextSubpass) GetProcAddress(vulkanModule, "vkCmdNextSubpass");
-    o_vkCmdEndRenderPass = (PFN_vkCmdEndRenderPass) GetProcAddress(vulkanModule, "vkCmdEndRenderPass");
-    o_vkCmdExecuteCommands = (PFN_vkCmdExecuteCommands) GetProcAddress(vulkanModule, "vkCmdExecuteCommands");
-    o_vkCmdSetDeviceMask = (PFN_vkCmdSetDeviceMask) GetProcAddress(vulkanModule, "vkCmdSetDeviceMask");
-    o_vkCmdDispatchBase = (PFN_vkCmdDispatchBase) GetProcAddress(vulkanModule, "vkCmdDispatchBase");
-    o_vkCmdDrawIndirectCount = (PFN_vkCmdDrawIndirectCount) GetProcAddress(vulkanModule, "vkCmdDrawIndirectCount");
+        (PFN_vkCmdCopyQueryPoolResults) DetouredExport(vulkanModule, "vkCmdCopyQueryPoolResults");
+    o_vkCmdPushConstants = (PFN_vkCmdPushConstants) DetouredExport(vulkanModule, "vkCmdPushConstants");
+    o_vkCmdBeginRenderPass = (PFN_vkCmdBeginRenderPass) DetouredExport(vulkanModule, "vkCmdBeginRenderPass");
+    o_vkCmdNextSubpass = (PFN_vkCmdNextSubpass) DetouredExport(vulkanModule, "vkCmdNextSubpass");
+    o_vkCmdEndRenderPass = (PFN_vkCmdEndRenderPass) DetouredExport(vulkanModule, "vkCmdEndRenderPass");
+    o_vkCmdExecuteCommands = (PFN_vkCmdExecuteCommands) DetouredExport(vulkanModule, "vkCmdExecuteCommands");
+    o_vkCmdSetDeviceMask = (PFN_vkCmdSetDeviceMask) DetouredExport(vulkanModule, "vkCmdSetDeviceMask");
+    o_vkCmdDispatchBase = (PFN_vkCmdDispatchBase) DetouredExport(vulkanModule, "vkCmdDispatchBase");
+    o_vkCmdDrawIndirectCount = (PFN_vkCmdDrawIndirectCount) DetouredExport(vulkanModule, "vkCmdDrawIndirectCount");
     o_vkCmdDrawIndexedIndirectCount =
-        (PFN_vkCmdDrawIndexedIndirectCount) GetProcAddress(vulkanModule, "vkCmdDrawIndexedIndirectCount");
-    o_vkCmdBeginRenderPass2 = (PFN_vkCmdBeginRenderPass2) GetProcAddress(vulkanModule, "vkCmdBeginRenderPass2");
-    o_vkCmdNextSubpass2 = (PFN_vkCmdNextSubpass2) GetProcAddress(vulkanModule, "vkCmdNextSubpass2");
-    o_vkCmdEndRenderPass2 = (PFN_vkCmdEndRenderPass2) GetProcAddress(vulkanModule, "vkCmdEndRenderPass2");
-    o_vkCmdSetEvent2 = (PFN_vkCmdSetEvent2) GetProcAddress(vulkanModule, "vkCmdSetEvent2");
-    o_vkCmdResetEvent2 = (PFN_vkCmdResetEvent2) GetProcAddress(vulkanModule, "vkCmdResetEvent2");
-    o_vkCmdWaitEvents2 = (PFN_vkCmdWaitEvents2) GetProcAddress(vulkanModule, "vkCmdWaitEvents2");
-    o_vkCmdPipelineBarrier2 = (PFN_vkCmdPipelineBarrier2) GetProcAddress(vulkanModule, "vkCmdPipelineBarrier2");
-    o_vkCmdWriteTimestamp2 = (PFN_vkCmdWriteTimestamp2) GetProcAddress(vulkanModule, "vkCmdWriteTimestamp2");
-    o_vkCmdCopyBuffer2 = (PFN_vkCmdCopyBuffer2) GetProcAddress(vulkanModule, "vkCmdCopyBuffer2");
-    o_vkCmdCopyImage2 = (PFN_vkCmdCopyImage2) GetProcAddress(vulkanModule, "vkCmdCopyImage2");
-    o_vkCmdCopyBufferToImage2 = (PFN_vkCmdCopyBufferToImage2) GetProcAddress(vulkanModule, "vkCmdCopyBufferToImage2");
-    o_vkCmdCopyImageToBuffer2 = (PFN_vkCmdCopyImageToBuffer2) GetProcAddress(vulkanModule, "vkCmdCopyImageToBuffer2");
-    o_vkCmdBlitImage2 = (PFN_vkCmdBlitImage2) GetProcAddress(vulkanModule, "vkCmdBlitImage2");
-    o_vkCmdResolveImage2 = (PFN_vkCmdResolveImage2) GetProcAddress(vulkanModule, "vkCmdResolveImage2");
-    o_vkCmdBeginRendering = (PFN_vkCmdBeginRendering) GetProcAddress(vulkanModule, "vkCmdBeginRendering");
-    o_vkCmdEndRendering = (PFN_vkCmdEndRendering) GetProcAddress(vulkanModule, "vkCmdEndRendering");
-    o_vkCmdSetCullMode = (PFN_vkCmdSetCullMode) GetProcAddress(vulkanModule, "vkCmdSetCullMode");
-    o_vkCmdSetFrontFace = (PFN_vkCmdSetFrontFace) GetProcAddress(vulkanModule, "vkCmdSetFrontFace");
+        (PFN_vkCmdDrawIndexedIndirectCount) DetouredExport(vulkanModule, "vkCmdDrawIndexedIndirectCount");
+    o_vkCmdBeginRenderPass2 = (PFN_vkCmdBeginRenderPass2) DetouredExport(vulkanModule, "vkCmdBeginRenderPass2");
+    o_vkCmdNextSubpass2 = (PFN_vkCmdNextSubpass2) DetouredExport(vulkanModule, "vkCmdNextSubpass2");
+    o_vkCmdEndRenderPass2 = (PFN_vkCmdEndRenderPass2) DetouredExport(vulkanModule, "vkCmdEndRenderPass2");
+    o_vkCmdSetEvent2 = (PFN_vkCmdSetEvent2) DetouredExport(vulkanModule, "vkCmdSetEvent2");
+    o_vkCmdResetEvent2 = (PFN_vkCmdResetEvent2) DetouredExport(vulkanModule, "vkCmdResetEvent2");
+    o_vkCmdWaitEvents2 = (PFN_vkCmdWaitEvents2) DetouredExport(vulkanModule, "vkCmdWaitEvents2");
+    o_vkCmdPipelineBarrier2 = (PFN_vkCmdPipelineBarrier2) DetouredExport(vulkanModule, "vkCmdPipelineBarrier2");
+    o_vkCmdWriteTimestamp2 = (PFN_vkCmdWriteTimestamp2) DetouredExport(vulkanModule, "vkCmdWriteTimestamp2");
+    o_vkCmdCopyBuffer2 = (PFN_vkCmdCopyBuffer2) DetouredExport(vulkanModule, "vkCmdCopyBuffer2");
+    o_vkCmdCopyImage2 = (PFN_vkCmdCopyImage2) DetouredExport(vulkanModule, "vkCmdCopyImage2");
+    o_vkCmdCopyBufferToImage2 = (PFN_vkCmdCopyBufferToImage2) DetouredExport(vulkanModule, "vkCmdCopyBufferToImage2");
+    o_vkCmdCopyImageToBuffer2 = (PFN_vkCmdCopyImageToBuffer2) DetouredExport(vulkanModule, "vkCmdCopyImageToBuffer2");
+    o_vkCmdBlitImage2 = (PFN_vkCmdBlitImage2) DetouredExport(vulkanModule, "vkCmdBlitImage2");
+    o_vkCmdResolveImage2 = (PFN_vkCmdResolveImage2) DetouredExport(vulkanModule, "vkCmdResolveImage2");
+    o_vkCmdBeginRendering = (PFN_vkCmdBeginRendering) DetouredExport(vulkanModule, "vkCmdBeginRendering");
+    o_vkCmdEndRendering = (PFN_vkCmdEndRendering) DetouredExport(vulkanModule, "vkCmdEndRendering");
+    o_vkCmdSetCullMode = (PFN_vkCmdSetCullMode) DetouredExport(vulkanModule, "vkCmdSetCullMode");
+    o_vkCmdSetFrontFace = (PFN_vkCmdSetFrontFace) DetouredExport(vulkanModule, "vkCmdSetFrontFace");
     o_vkCmdSetPrimitiveTopology =
-        (PFN_vkCmdSetPrimitiveTopology) GetProcAddress(vulkanModule, "vkCmdSetPrimitiveTopology");
+        (PFN_vkCmdSetPrimitiveTopology) DetouredExport(vulkanModule, "vkCmdSetPrimitiveTopology");
     o_vkCmdSetViewportWithCount =
-        (PFN_vkCmdSetViewportWithCount) GetProcAddress(vulkanModule, "vkCmdSetViewportWithCount");
+        (PFN_vkCmdSetViewportWithCount) DetouredExport(vulkanModule, "vkCmdSetViewportWithCount");
     o_vkCmdSetScissorWithCount =
-        (PFN_vkCmdSetScissorWithCount) GetProcAddress(vulkanModule, "vkCmdSetScissorWithCount");
-    o_vkCmdBindVertexBuffers2 = (PFN_vkCmdBindVertexBuffers2) GetProcAddress(vulkanModule, "vkCmdBindVertexBuffers2");
-    o_vkCmdSetDepthTestEnable = (PFN_vkCmdSetDepthTestEnable) GetProcAddress(vulkanModule, "vkCmdSetDepthTestEnable");
+        (PFN_vkCmdSetScissorWithCount) DetouredExport(vulkanModule, "vkCmdSetScissorWithCount");
+    o_vkCmdBindVertexBuffers2 = (PFN_vkCmdBindVertexBuffers2) DetouredExport(vulkanModule, "vkCmdBindVertexBuffers2");
+    o_vkCmdSetDepthTestEnable = (PFN_vkCmdSetDepthTestEnable) DetouredExport(vulkanModule, "vkCmdSetDepthTestEnable");
     o_vkCmdSetDepthWriteEnable =
-        (PFN_vkCmdSetDepthWriteEnable) GetProcAddress(vulkanModule, "vkCmdSetDepthWriteEnable");
-    o_vkCmdSetDepthCompareOp = (PFN_vkCmdSetDepthCompareOp) GetProcAddress(vulkanModule, "vkCmdSetDepthCompareOp");
+        (PFN_vkCmdSetDepthWriteEnable) DetouredExport(vulkanModule, "vkCmdSetDepthWriteEnable");
+    o_vkCmdSetDepthCompareOp = (PFN_vkCmdSetDepthCompareOp) DetouredExport(vulkanModule, "vkCmdSetDepthCompareOp");
     o_vkCmdSetDepthBoundsTestEnable =
-        (PFN_vkCmdSetDepthBoundsTestEnable) GetProcAddress(vulkanModule, "vkCmdSetDepthBoundsTestEnable");
+        (PFN_vkCmdSetDepthBoundsTestEnable) DetouredExport(vulkanModule, "vkCmdSetDepthBoundsTestEnable");
     o_vkCmdSetStencilTestEnable =
-        (PFN_vkCmdSetStencilTestEnable) GetProcAddress(vulkanModule, "vkCmdSetStencilTestEnable");
-    o_vkCmdSetStencilOp = (PFN_vkCmdSetStencilOp) GetProcAddress(vulkanModule, "vkCmdSetStencilOp");
+        (PFN_vkCmdSetStencilTestEnable) DetouredExport(vulkanModule, "vkCmdSetStencilTestEnable");
+    o_vkCmdSetStencilOp = (PFN_vkCmdSetStencilOp) DetouredExport(vulkanModule, "vkCmdSetStencilOp");
     o_vkCmdSetRasterizerDiscardEnable =
-        (PFN_vkCmdSetRasterizerDiscardEnable) GetProcAddress(vulkanModule, "vkCmdSetRasterizerDiscardEnable");
-    o_vkCmdSetDepthBiasEnable = (PFN_vkCmdSetDepthBiasEnable) GetProcAddress(vulkanModule, "vkCmdSetDepthBiasEnable");
+        (PFN_vkCmdSetRasterizerDiscardEnable) DetouredExport(vulkanModule, "vkCmdSetRasterizerDiscardEnable");
+    o_vkCmdSetDepthBiasEnable = (PFN_vkCmdSetDepthBiasEnable) DetouredExport(vulkanModule, "vkCmdSetDepthBiasEnable");
     o_vkCmdSetPrimitiveRestartEnable =
-        (PFN_vkCmdSetPrimitiveRestartEnable) GetProcAddress(vulkanModule, "vkCmdSetPrimitiveRestartEnable");
-    o_vkCmdSetLineStipple = (PFN_vkCmdSetLineStipple) GetProcAddress(vulkanModule, "vkCmdSetLineStipple");
-    o_vkCmdBindIndexBuffer2 = (PFN_vkCmdBindIndexBuffer2) GetProcAddress(vulkanModule, "vkCmdBindIndexBuffer2");
-    o_vkCmdPushDescriptorSet = (PFN_vkCmdPushDescriptorSet) GetProcAddress(vulkanModule, "vkCmdPushDescriptorSet");
+        (PFN_vkCmdSetPrimitiveRestartEnable) DetouredExport(vulkanModule, "vkCmdSetPrimitiveRestartEnable");
+    o_vkCmdSetLineStipple = (PFN_vkCmdSetLineStipple) DetouredExport(vulkanModule, "vkCmdSetLineStipple");
+    o_vkCmdBindIndexBuffer2 = (PFN_vkCmdBindIndexBuffer2) DetouredExport(vulkanModule, "vkCmdBindIndexBuffer2");
+    o_vkCmdPushDescriptorSet = (PFN_vkCmdPushDescriptorSet) DetouredExport(vulkanModule, "vkCmdPushDescriptorSet");
     o_vkCmdPushDescriptorSetWithTemplate =
-        (PFN_vkCmdPushDescriptorSetWithTemplate) GetProcAddress(vulkanModule, "vkCmdPushDescriptorSetWithTemplate");
+        (PFN_vkCmdPushDescriptorSetWithTemplate) DetouredExport(vulkanModule, "vkCmdPushDescriptorSetWithTemplate");
     o_vkCmdSetRenderingAttachmentLocations =
-        (PFN_vkCmdSetRenderingAttachmentLocations) GetProcAddress(vulkanModule, "vkCmdSetRenderingAttachmentLocations");
+        (PFN_vkCmdSetRenderingAttachmentLocations) DetouredExport(vulkanModule, "vkCmdSetRenderingAttachmentLocations");
     o_vkCmdSetRenderingInputAttachmentIndices = (PFN_vkCmdSetRenderingInputAttachmentIndices) GetProcAddress(
         vulkanModule, "vkCmdSetRenderingInputAttachmentIndices");
     o_vkCmdBindDescriptorSets2 =
-        (PFN_vkCmdBindDescriptorSets2) GetProcAddress(vulkanModule, "vkCmdBindDescriptorSets2");
-    o_vkCmdPushConstants2 = (PFN_vkCmdPushConstants2) GetProcAddress(vulkanModule, "vkCmdPushConstants2");
-    o_vkCmdPushDescriptorSet2 = (PFN_vkCmdPushDescriptorSet2) GetProcAddress(vulkanModule, "vkCmdPushDescriptorSet2");
+        (PFN_vkCmdBindDescriptorSets2) DetouredExport(vulkanModule, "vkCmdBindDescriptorSets2");
+    o_vkCmdPushConstants2 = (PFN_vkCmdPushConstants2) DetouredExport(vulkanModule, "vkCmdPushConstants2");
+    o_vkCmdPushDescriptorSet2 = (PFN_vkCmdPushDescriptorSet2) DetouredExport(vulkanModule, "vkCmdPushDescriptorSet2");
     o_vkCmdPushDescriptorSetWithTemplate2 =
-        (PFN_vkCmdPushDescriptorSetWithTemplate2) GetProcAddress(vulkanModule, "vkCmdPushDescriptorSetWithTemplate2");
+        (PFN_vkCmdPushDescriptorSetWithTemplate2) DetouredExport(vulkanModule, "vkCmdPushDescriptorSetWithTemplate2");
     o_vkCmdBeginVideoCodingKHR =
-        (PFN_vkCmdBeginVideoCodingKHR) GetProcAddress(vulkanModule, "vkCmdBeginVideoCodingKHR");
-    o_vkCmdEndVideoCodingKHR = (PFN_vkCmdEndVideoCodingKHR) GetProcAddress(vulkanModule, "vkCmdEndVideoCodingKHR");
+        (PFN_vkCmdBeginVideoCodingKHR) DetouredExport(vulkanModule, "vkCmdBeginVideoCodingKHR");
+    o_vkCmdEndVideoCodingKHR = (PFN_vkCmdEndVideoCodingKHR) DetouredExport(vulkanModule, "vkCmdEndVideoCodingKHR");
     o_vkCmdControlVideoCodingKHR =
-        (PFN_vkCmdControlVideoCodingKHR) GetProcAddress(vulkanModule, "vkCmdControlVideoCodingKHR");
-    o_vkCmdDecodeVideoKHR = (PFN_vkCmdDecodeVideoKHR) GetProcAddress(vulkanModule, "vkCmdDecodeVideoKHR");
-    o_vkCmdBeginRenderingKHR = (PFN_vkCmdBeginRenderingKHR) GetProcAddress(vulkanModule, "vkCmdBeginRenderingKHR");
-    o_vkCmdEndRenderingKHR = (PFN_vkCmdEndRenderingKHR) GetProcAddress(vulkanModule, "vkCmdEndRenderingKHR");
-    o_vkCmdSetDeviceMaskKHR = (PFN_vkCmdSetDeviceMaskKHR) GetProcAddress(vulkanModule, "vkCmdSetDeviceMaskKHR");
-    o_vkCmdDispatchBaseKHR = (PFN_vkCmdDispatchBaseKHR) GetProcAddress(vulkanModule, "vkCmdDispatchBaseKHR");
+        (PFN_vkCmdControlVideoCodingKHR) DetouredExport(vulkanModule, "vkCmdControlVideoCodingKHR");
+    o_vkCmdDecodeVideoKHR = (PFN_vkCmdDecodeVideoKHR) DetouredExport(vulkanModule, "vkCmdDecodeVideoKHR");
+    o_vkCmdBeginRenderingKHR = (PFN_vkCmdBeginRenderingKHR) DetouredExport(vulkanModule, "vkCmdBeginRenderingKHR");
+    o_vkCmdEndRenderingKHR = (PFN_vkCmdEndRenderingKHR) DetouredExport(vulkanModule, "vkCmdEndRenderingKHR");
+    o_vkCmdSetDeviceMaskKHR = (PFN_vkCmdSetDeviceMaskKHR) DetouredExport(vulkanModule, "vkCmdSetDeviceMaskKHR");
+    o_vkCmdDispatchBaseKHR = (PFN_vkCmdDispatchBaseKHR) DetouredExport(vulkanModule, "vkCmdDispatchBaseKHR");
     o_vkCmdPushDescriptorSetKHR =
-        (PFN_vkCmdPushDescriptorSetKHR) GetProcAddress(vulkanModule, "vkCmdPushDescriptorSetKHR");
+        (PFN_vkCmdPushDescriptorSetKHR) DetouredExport(vulkanModule, "vkCmdPushDescriptorSetKHR");
     o_vkCmdPushDescriptorSetWithTemplateKHR = (PFN_vkCmdPushDescriptorSetWithTemplateKHR) GetProcAddress(
         vulkanModule, "vkCmdPushDescriptorSetWithTemplateKHR");
     o_vkCmdBeginRenderPass2KHR =
-        (PFN_vkCmdBeginRenderPass2KHR) GetProcAddress(vulkanModule, "vkCmdBeginRenderPass2KHR");
-    o_vkCmdNextSubpass2KHR = (PFN_vkCmdNextSubpass2KHR) GetProcAddress(vulkanModule, "vkCmdNextSubpass2KHR");
-    o_vkCmdEndRenderPass2KHR = (PFN_vkCmdEndRenderPass2KHR) GetProcAddress(vulkanModule, "vkCmdEndRenderPass2KHR");
+        (PFN_vkCmdBeginRenderPass2KHR) DetouredExport(vulkanModule, "vkCmdBeginRenderPass2KHR");
+    o_vkCmdNextSubpass2KHR = (PFN_vkCmdNextSubpass2KHR) DetouredExport(vulkanModule, "vkCmdNextSubpass2KHR");
+    o_vkCmdEndRenderPass2KHR = (PFN_vkCmdEndRenderPass2KHR) DetouredExport(vulkanModule, "vkCmdEndRenderPass2KHR");
     o_vkCmdDrawIndirectCountKHR =
-        (PFN_vkCmdDrawIndirectCountKHR) GetProcAddress(vulkanModule, "vkCmdDrawIndirectCountKHR");
+        (PFN_vkCmdDrawIndirectCountKHR) DetouredExport(vulkanModule, "vkCmdDrawIndirectCountKHR");
     o_vkCmdDrawIndexedIndirectCountKHR =
-        (PFN_vkCmdDrawIndexedIndirectCountKHR) GetProcAddress(vulkanModule, "vkCmdDrawIndexedIndirectCountKHR");
+        (PFN_vkCmdDrawIndexedIndirectCountKHR) DetouredExport(vulkanModule, "vkCmdDrawIndexedIndirectCountKHR");
     o_vkCmdSetFragmentShadingRateKHR =
-        (PFN_vkCmdSetFragmentShadingRateKHR) GetProcAddress(vulkanModule, "vkCmdSetFragmentShadingRateKHR");
+        (PFN_vkCmdSetFragmentShadingRateKHR) DetouredExport(vulkanModule, "vkCmdSetFragmentShadingRateKHR");
     o_vkCmdSetRenderingAttachmentLocationsKHR = (PFN_vkCmdSetRenderingAttachmentLocationsKHR) GetProcAddress(
         vulkanModule, "vkCmdSetRenderingAttachmentLocationsKHR");
     o_vkCmdSetRenderingInputAttachmentIndicesKHR = (PFN_vkCmdSetRenderingInputAttachmentIndicesKHR) GetProcAddress(
         vulkanModule, "vkCmdSetRenderingInputAttachmentIndicesKHR");
-    o_vkCmdEncodeVideoKHR = (PFN_vkCmdEncodeVideoKHR) GetProcAddress(vulkanModule, "vkCmdEncodeVideoKHR");
-    o_vkCmdSetEvent2KHR = (PFN_vkCmdSetEvent2KHR) GetProcAddress(vulkanModule, "vkCmdSetEvent2KHR");
-    o_vkCmdResetEvent2KHR = (PFN_vkCmdResetEvent2KHR) GetProcAddress(vulkanModule, "vkCmdResetEvent2KHR");
-    o_vkCmdWaitEvents2KHR = (PFN_vkCmdWaitEvents2KHR) GetProcAddress(vulkanModule, "vkCmdWaitEvents2KHR");
+    o_vkCmdEncodeVideoKHR = (PFN_vkCmdEncodeVideoKHR) DetouredExport(vulkanModule, "vkCmdEncodeVideoKHR");
+    o_vkCmdSetEvent2KHR = (PFN_vkCmdSetEvent2KHR) DetouredExport(vulkanModule, "vkCmdSetEvent2KHR");
+    o_vkCmdResetEvent2KHR = (PFN_vkCmdResetEvent2KHR) DetouredExport(vulkanModule, "vkCmdResetEvent2KHR");
+    o_vkCmdWaitEvents2KHR = (PFN_vkCmdWaitEvents2KHR) DetouredExport(vulkanModule, "vkCmdWaitEvents2KHR");
     o_vkCmdPipelineBarrier2KHR =
-        (PFN_vkCmdPipelineBarrier2KHR) GetProcAddress(vulkanModule, "vkCmdPipelineBarrier2KHR");
-    o_vkCmdWriteTimestamp2KHR = (PFN_vkCmdWriteTimestamp2KHR) GetProcAddress(vulkanModule, "vkCmdWriteTimestamp2KHR");
-    o_vkCmdCopyBuffer2KHR = (PFN_vkCmdCopyBuffer2KHR) GetProcAddress(vulkanModule, "vkCmdCopyBuffer2KHR");
-    o_vkCmdCopyImage2KHR = (PFN_vkCmdCopyImage2KHR) GetProcAddress(vulkanModule, "vkCmdCopyImage2KHR");
+        (PFN_vkCmdPipelineBarrier2KHR) DetouredExport(vulkanModule, "vkCmdPipelineBarrier2KHR");
+    o_vkCmdWriteTimestamp2KHR = (PFN_vkCmdWriteTimestamp2KHR) DetouredExport(vulkanModule, "vkCmdWriteTimestamp2KHR");
+    o_vkCmdCopyBuffer2KHR = (PFN_vkCmdCopyBuffer2KHR) DetouredExport(vulkanModule, "vkCmdCopyBuffer2KHR");
+    o_vkCmdCopyImage2KHR = (PFN_vkCmdCopyImage2KHR) DetouredExport(vulkanModule, "vkCmdCopyImage2KHR");
     o_vkCmdCopyBufferToImage2KHR =
-        (PFN_vkCmdCopyBufferToImage2KHR) GetProcAddress(vulkanModule, "vkCmdCopyBufferToImage2KHR");
+        (PFN_vkCmdCopyBufferToImage2KHR) DetouredExport(vulkanModule, "vkCmdCopyBufferToImage2KHR");
     o_vkCmdCopyImageToBuffer2KHR =
-        (PFN_vkCmdCopyImageToBuffer2KHR) GetProcAddress(vulkanModule, "vkCmdCopyImageToBuffer2KHR");
-    o_vkCmdBlitImage2KHR = (PFN_vkCmdBlitImage2KHR) GetProcAddress(vulkanModule, "vkCmdBlitImage2KHR");
-    o_vkCmdResolveImage2KHR = (PFN_vkCmdResolveImage2KHR) GetProcAddress(vulkanModule, "vkCmdResolveImage2KHR");
+        (PFN_vkCmdCopyImageToBuffer2KHR) DetouredExport(vulkanModule, "vkCmdCopyImageToBuffer2KHR");
+    o_vkCmdBlitImage2KHR = (PFN_vkCmdBlitImage2KHR) DetouredExport(vulkanModule, "vkCmdBlitImage2KHR");
+    o_vkCmdResolveImage2KHR = (PFN_vkCmdResolveImage2KHR) DetouredExport(vulkanModule, "vkCmdResolveImage2KHR");
     o_vkCmdTraceRaysIndirect2KHR =
-        (PFN_vkCmdTraceRaysIndirect2KHR) GetProcAddress(vulkanModule, "vkCmdTraceRaysIndirect2KHR");
+        (PFN_vkCmdTraceRaysIndirect2KHR) DetouredExport(vulkanModule, "vkCmdTraceRaysIndirect2KHR");
     o_vkCmdBindIndexBuffer2KHR =
-        (PFN_vkCmdBindIndexBuffer2KHR) GetProcAddress(vulkanModule, "vkCmdBindIndexBuffer2KHR");
-    o_vkCmdSetLineStippleKHR = (PFN_vkCmdSetLineStippleKHR) GetProcAddress(vulkanModule, "vkCmdSetLineStippleKHR");
+        (PFN_vkCmdBindIndexBuffer2KHR) DetouredExport(vulkanModule, "vkCmdBindIndexBuffer2KHR");
+    o_vkCmdSetLineStippleKHR = (PFN_vkCmdSetLineStippleKHR) DetouredExport(vulkanModule, "vkCmdSetLineStippleKHR");
     o_vkCmdBindDescriptorSets2KHR =
-        (PFN_vkCmdBindDescriptorSets2KHR) GetProcAddress(vulkanModule, "vkCmdBindDescriptorSets2KHR");
-    o_vkCmdPushConstants2KHR = (PFN_vkCmdPushConstants2KHR) GetProcAddress(vulkanModule, "vkCmdPushConstants2KHR");
+        (PFN_vkCmdBindDescriptorSets2KHR) DetouredExport(vulkanModule, "vkCmdBindDescriptorSets2KHR");
+    o_vkCmdPushConstants2KHR = (PFN_vkCmdPushConstants2KHR) DetouredExport(vulkanModule, "vkCmdPushConstants2KHR");
     o_vkCmdPushDescriptorSet2KHR =
-        (PFN_vkCmdPushDescriptorSet2KHR) GetProcAddress(vulkanModule, "vkCmdPushDescriptorSet2KHR");
+        (PFN_vkCmdPushDescriptorSet2KHR) DetouredExport(vulkanModule, "vkCmdPushDescriptorSet2KHR");
     o_vkCmdPushDescriptorSetWithTemplate2KHR = (PFN_vkCmdPushDescriptorSetWithTemplate2KHR) GetProcAddress(
         vulkanModule, "vkCmdPushDescriptorSetWithTemplate2KHR");
     o_vkCmdSetDescriptorBufferOffsets2EXT =
-        (PFN_vkCmdSetDescriptorBufferOffsets2EXT) GetProcAddress(vulkanModule, "vkCmdSetDescriptorBufferOffsets2EXT");
+        (PFN_vkCmdSetDescriptorBufferOffsets2EXT) DetouredExport(vulkanModule, "vkCmdSetDescriptorBufferOffsets2EXT");
     o_vkCmdBindDescriptorBufferEmbeddedSamplers2EXT =
         (PFN_vkCmdBindDescriptorBufferEmbeddedSamplers2EXT) GetProcAddress(
             vulkanModule, "vkCmdBindDescriptorBufferEmbeddedSamplers2EXT");
     o_vkCmdDebugMarkerBeginEXT =
-        (PFN_vkCmdDebugMarkerBeginEXT) GetProcAddress(vulkanModule, "vkCmdDebugMarkerBeginEXT");
-    o_vkCmdDebugMarkerEndEXT = (PFN_vkCmdDebugMarkerEndEXT) GetProcAddress(vulkanModule, "vkCmdDebugMarkerEndEXT");
+        (PFN_vkCmdDebugMarkerBeginEXT) DetouredExport(vulkanModule, "vkCmdDebugMarkerBeginEXT");
+    o_vkCmdDebugMarkerEndEXT = (PFN_vkCmdDebugMarkerEndEXT) DetouredExport(vulkanModule, "vkCmdDebugMarkerEndEXT");
     o_vkCmdDebugMarkerInsertEXT =
-        (PFN_vkCmdDebugMarkerInsertEXT) GetProcAddress(vulkanModule, "vkCmdDebugMarkerInsertEXT");
+        (PFN_vkCmdDebugMarkerInsertEXT) DetouredExport(vulkanModule, "vkCmdDebugMarkerInsertEXT");
     o_vkCmdBindTransformFeedbackBuffersEXT =
-        (PFN_vkCmdBindTransformFeedbackBuffersEXT) GetProcAddress(vulkanModule, "vkCmdBindTransformFeedbackBuffersEXT");
+        (PFN_vkCmdBindTransformFeedbackBuffersEXT) DetouredExport(vulkanModule, "vkCmdBindTransformFeedbackBuffersEXT");
     o_vkCmdBeginTransformFeedbackEXT =
-        (PFN_vkCmdBeginTransformFeedbackEXT) GetProcAddress(vulkanModule, "vkCmdBeginTransformFeedbackEXT");
+        (PFN_vkCmdBeginTransformFeedbackEXT) DetouredExport(vulkanModule, "vkCmdBeginTransformFeedbackEXT");
     o_vkCmdEndTransformFeedbackEXT =
-        (PFN_vkCmdEndTransformFeedbackEXT) GetProcAddress(vulkanModule, "vkCmdEndTransformFeedbackEXT");
+        (PFN_vkCmdEndTransformFeedbackEXT) DetouredExport(vulkanModule, "vkCmdEndTransformFeedbackEXT");
     o_vkCmdBeginQueryIndexedEXT =
-        (PFN_vkCmdBeginQueryIndexedEXT) GetProcAddress(vulkanModule, "vkCmdBeginQueryIndexedEXT");
-    o_vkCmdEndQueryIndexedEXT = (PFN_vkCmdEndQueryIndexedEXT) GetProcAddress(vulkanModule, "vkCmdEndQueryIndexedEXT");
+        (PFN_vkCmdBeginQueryIndexedEXT) DetouredExport(vulkanModule, "vkCmdBeginQueryIndexedEXT");
+    o_vkCmdEndQueryIndexedEXT = (PFN_vkCmdEndQueryIndexedEXT) DetouredExport(vulkanModule, "vkCmdEndQueryIndexedEXT");
     o_vkCmdDrawIndirectByteCountEXT =
-        (PFN_vkCmdDrawIndirectByteCountEXT) GetProcAddress(vulkanModule, "vkCmdDrawIndirectByteCountEXT");
-    o_vkCmdCuLaunchKernelNVX = (PFN_vkCmdCuLaunchKernelNVX) GetProcAddress(vulkanModule, "vkCmdCuLaunchKernelNVX");
+        (PFN_vkCmdDrawIndirectByteCountEXT) DetouredExport(vulkanModule, "vkCmdDrawIndirectByteCountEXT");
+    o_vkCmdCuLaunchKernelNVX = (PFN_vkCmdCuLaunchKernelNVX) DetouredExport(vulkanModule, "vkCmdCuLaunchKernelNVX");
     o_vkCmdDrawIndirectCountAMD =
-        (PFN_vkCmdDrawIndirectCountAMD) GetProcAddress(vulkanModule, "vkCmdDrawIndirectCountAMD");
+        (PFN_vkCmdDrawIndirectCountAMD) DetouredExport(vulkanModule, "vkCmdDrawIndirectCountAMD");
     o_vkCmdDrawIndexedIndirectCountAMD =
-        (PFN_vkCmdDrawIndexedIndirectCountAMD) GetProcAddress(vulkanModule, "vkCmdDrawIndexedIndirectCountAMD");
+        (PFN_vkCmdDrawIndexedIndirectCountAMD) DetouredExport(vulkanModule, "vkCmdDrawIndexedIndirectCountAMD");
     o_vkCmdBeginConditionalRenderingEXT =
-        (PFN_vkCmdBeginConditionalRenderingEXT) GetProcAddress(vulkanModule, "vkCmdBeginConditionalRenderingEXT");
+        (PFN_vkCmdBeginConditionalRenderingEXT) DetouredExport(vulkanModule, "vkCmdBeginConditionalRenderingEXT");
     o_vkCmdEndConditionalRenderingEXT =
-        (PFN_vkCmdEndConditionalRenderingEXT) GetProcAddress(vulkanModule, "vkCmdEndConditionalRenderingEXT");
+        (PFN_vkCmdEndConditionalRenderingEXT) DetouredExport(vulkanModule, "vkCmdEndConditionalRenderingEXT");
     o_vkCmdSetViewportWScalingNV =
-        (PFN_vkCmdSetViewportWScalingNV) GetProcAddress(vulkanModule, "vkCmdSetViewportWScalingNV");
+        (PFN_vkCmdSetViewportWScalingNV) DetouredExport(vulkanModule, "vkCmdSetViewportWScalingNV");
     o_vkCmdSetDiscardRectangleEXT =
-        (PFN_vkCmdSetDiscardRectangleEXT) GetProcAddress(vulkanModule, "vkCmdSetDiscardRectangleEXT");
+        (PFN_vkCmdSetDiscardRectangleEXT) DetouredExport(vulkanModule, "vkCmdSetDiscardRectangleEXT");
     o_vkCmdSetDiscardRectangleEnableEXT =
-        (PFN_vkCmdSetDiscardRectangleEnableEXT) GetProcAddress(vulkanModule, "vkCmdSetDiscardRectangleEnableEXT");
+        (PFN_vkCmdSetDiscardRectangleEnableEXT) DetouredExport(vulkanModule, "vkCmdSetDiscardRectangleEnableEXT");
     o_vkCmdSetDiscardRectangleModeEXT =
-        (PFN_vkCmdSetDiscardRectangleModeEXT) GetProcAddress(vulkanModule, "vkCmdSetDiscardRectangleModeEXT");
+        (PFN_vkCmdSetDiscardRectangleModeEXT) DetouredExport(vulkanModule, "vkCmdSetDiscardRectangleModeEXT");
     o_vkCmdBeginDebugUtilsLabelEXT =
-        (PFN_vkCmdBeginDebugUtilsLabelEXT) GetProcAddress(vulkanModule, "vkCmdBeginDebugUtilsLabelEXT");
+        (PFN_vkCmdBeginDebugUtilsLabelEXT) DetouredExport(vulkanModule, "vkCmdBeginDebugUtilsLabelEXT");
     o_vkCmdEndDebugUtilsLabelEXT =
-        (PFN_vkCmdEndDebugUtilsLabelEXT) GetProcAddress(vulkanModule, "vkCmdEndDebugUtilsLabelEXT");
+        (PFN_vkCmdEndDebugUtilsLabelEXT) DetouredExport(vulkanModule, "vkCmdEndDebugUtilsLabelEXT");
     o_vkCmdInsertDebugUtilsLabelEXT =
-        (PFN_vkCmdInsertDebugUtilsLabelEXT) GetProcAddress(vulkanModule, "vkCmdInsertDebugUtilsLabelEXT");
+        (PFN_vkCmdInsertDebugUtilsLabelEXT) DetouredExport(vulkanModule, "vkCmdInsertDebugUtilsLabelEXT");
     o_vkCmdSetSampleLocationsEXT =
-        (PFN_vkCmdSetSampleLocationsEXT) GetProcAddress(vulkanModule, "vkCmdSetSampleLocationsEXT");
+        (PFN_vkCmdSetSampleLocationsEXT) DetouredExport(vulkanModule, "vkCmdSetSampleLocationsEXT");
     o_vkCmdBindShadingRateImageNV =
-        (PFN_vkCmdBindShadingRateImageNV) GetProcAddress(vulkanModule, "vkCmdBindShadingRateImageNV");
+        (PFN_vkCmdBindShadingRateImageNV) DetouredExport(vulkanModule, "vkCmdBindShadingRateImageNV");
     o_vkCmdSetViewportShadingRatePaletteNV =
-        (PFN_vkCmdSetViewportShadingRatePaletteNV) GetProcAddress(vulkanModule, "vkCmdSetViewportShadingRatePaletteNV");
+        (PFN_vkCmdSetViewportShadingRatePaletteNV) DetouredExport(vulkanModule, "vkCmdSetViewportShadingRatePaletteNV");
     o_vkCmdSetCoarseSampleOrderNV =
-        (PFN_vkCmdSetCoarseSampleOrderNV) GetProcAddress(vulkanModule, "vkCmdSetCoarseSampleOrderNV");
+        (PFN_vkCmdSetCoarseSampleOrderNV) DetouredExport(vulkanModule, "vkCmdSetCoarseSampleOrderNV");
     o_vkCmdBuildAccelerationStructureNV =
-        (PFN_vkCmdBuildAccelerationStructureNV) GetProcAddress(vulkanModule, "vkCmdBuildAccelerationStructureNV");
+        (PFN_vkCmdBuildAccelerationStructureNV) DetouredExport(vulkanModule, "vkCmdBuildAccelerationStructureNV");
     o_vkCmdCopyAccelerationStructureNV =
-        (PFN_vkCmdCopyAccelerationStructureNV) GetProcAddress(vulkanModule, "vkCmdCopyAccelerationStructureNV");
-    o_vkCmdTraceRaysNV = (PFN_vkCmdTraceRaysNV) GetProcAddress(vulkanModule, "vkCmdTraceRaysNV");
+        (PFN_vkCmdCopyAccelerationStructureNV) DetouredExport(vulkanModule, "vkCmdCopyAccelerationStructureNV");
+    o_vkCmdTraceRaysNV = (PFN_vkCmdTraceRaysNV) DetouredExport(vulkanModule, "vkCmdTraceRaysNV");
     o_vkCmdWriteAccelerationStructuresPropertiesNV = (PFN_vkCmdWriteAccelerationStructuresPropertiesNV) GetProcAddress(
         vulkanModule, "vkCmdWriteAccelerationStructuresPropertiesNV");
     o_vkCmdWriteBufferMarkerAMD =
-        (PFN_vkCmdWriteBufferMarkerAMD) GetProcAddress(vulkanModule, "vkCmdWriteBufferMarkerAMD");
+        (PFN_vkCmdWriteBufferMarkerAMD) DetouredExport(vulkanModule, "vkCmdWriteBufferMarkerAMD");
     o_vkCmdWriteBufferMarker2AMD =
-        (PFN_vkCmdWriteBufferMarker2AMD) GetProcAddress(vulkanModule, "vkCmdWriteBufferMarker2AMD");
-    o_vkCmdDrawMeshTasksNV = (PFN_vkCmdDrawMeshTasksNV) GetProcAddress(vulkanModule, "vkCmdDrawMeshTasksNV");
+        (PFN_vkCmdWriteBufferMarker2AMD) DetouredExport(vulkanModule, "vkCmdWriteBufferMarker2AMD");
+    o_vkCmdDrawMeshTasksNV = (PFN_vkCmdDrawMeshTasksNV) DetouredExport(vulkanModule, "vkCmdDrawMeshTasksNV");
     o_vkCmdDrawMeshTasksIndirectNV =
-        (PFN_vkCmdDrawMeshTasksIndirectNV) GetProcAddress(vulkanModule, "vkCmdDrawMeshTasksIndirectNV");
+        (PFN_vkCmdDrawMeshTasksIndirectNV) DetouredExport(vulkanModule, "vkCmdDrawMeshTasksIndirectNV");
     o_vkCmdDrawMeshTasksIndirectCountNV =
-        (PFN_vkCmdDrawMeshTasksIndirectCountNV) GetProcAddress(vulkanModule, "vkCmdDrawMeshTasksIndirectCountNV");
+        (PFN_vkCmdDrawMeshTasksIndirectCountNV) DetouredExport(vulkanModule, "vkCmdDrawMeshTasksIndirectCountNV");
     o_vkCmdSetExclusiveScissorEnableNV =
-        (PFN_vkCmdSetExclusiveScissorEnableNV) GetProcAddress(vulkanModule, "vkCmdSetExclusiveScissorEnableNV");
+        (PFN_vkCmdSetExclusiveScissorEnableNV) DetouredExport(vulkanModule, "vkCmdSetExclusiveScissorEnableNV");
     o_vkCmdSetExclusiveScissorNV =
-        (PFN_vkCmdSetExclusiveScissorNV) GetProcAddress(vulkanModule, "vkCmdSetExclusiveScissorNV");
-    o_vkCmdSetCheckpointNV = (PFN_vkCmdSetCheckpointNV) GetProcAddress(vulkanModule, "vkCmdSetCheckpointNV");
+        (PFN_vkCmdSetExclusiveScissorNV) DetouredExport(vulkanModule, "vkCmdSetExclusiveScissorNV");
+    o_vkCmdSetCheckpointNV = (PFN_vkCmdSetCheckpointNV) DetouredExport(vulkanModule, "vkCmdSetCheckpointNV");
     o_vkCmdSetPerformanceMarkerINTEL =
-        (PFN_vkCmdSetPerformanceMarkerINTEL) GetProcAddress(vulkanModule, "vkCmdSetPerformanceMarkerINTEL");
+        (PFN_vkCmdSetPerformanceMarkerINTEL) DetouredExport(vulkanModule, "vkCmdSetPerformanceMarkerINTEL");
     o_vkCmdSetPerformanceStreamMarkerINTEL =
-        (PFN_vkCmdSetPerformanceStreamMarkerINTEL) GetProcAddress(vulkanModule, "vkCmdSetPerformanceStreamMarkerINTEL");
+        (PFN_vkCmdSetPerformanceStreamMarkerINTEL) DetouredExport(vulkanModule, "vkCmdSetPerformanceStreamMarkerINTEL");
     o_vkCmdSetPerformanceOverrideINTEL =
-        (PFN_vkCmdSetPerformanceOverrideINTEL) GetProcAddress(vulkanModule, "vkCmdSetPerformanceOverrideINTEL");
-    o_vkCmdSetLineStippleEXT = (PFN_vkCmdSetLineStippleEXT) GetProcAddress(vulkanModule, "vkCmdSetLineStippleEXT");
-    o_vkCmdSetCullModeEXT = (PFN_vkCmdSetCullModeEXT) GetProcAddress(vulkanModule, "vkCmdSetCullModeEXT");
-    o_vkCmdSetFrontFaceEXT = (PFN_vkCmdSetFrontFaceEXT) GetProcAddress(vulkanModule, "vkCmdSetFrontFaceEXT");
+        (PFN_vkCmdSetPerformanceOverrideINTEL) DetouredExport(vulkanModule, "vkCmdSetPerformanceOverrideINTEL");
+    o_vkCmdSetLineStippleEXT = (PFN_vkCmdSetLineStippleEXT) DetouredExport(vulkanModule, "vkCmdSetLineStippleEXT");
+    o_vkCmdSetCullModeEXT = (PFN_vkCmdSetCullModeEXT) DetouredExport(vulkanModule, "vkCmdSetCullModeEXT");
+    o_vkCmdSetFrontFaceEXT = (PFN_vkCmdSetFrontFaceEXT) DetouredExport(vulkanModule, "vkCmdSetFrontFaceEXT");
     o_vkCmdSetPrimitiveTopologyEXT =
-        (PFN_vkCmdSetPrimitiveTopologyEXT) GetProcAddress(vulkanModule, "vkCmdSetPrimitiveTopologyEXT");
+        (PFN_vkCmdSetPrimitiveTopologyEXT) DetouredExport(vulkanModule, "vkCmdSetPrimitiveTopologyEXT");
     o_vkCmdSetViewportWithCountEXT =
-        (PFN_vkCmdSetViewportWithCountEXT) GetProcAddress(vulkanModule, "vkCmdSetViewportWithCountEXT");
+        (PFN_vkCmdSetViewportWithCountEXT) DetouredExport(vulkanModule, "vkCmdSetViewportWithCountEXT");
     o_vkCmdSetScissorWithCountEXT =
-        (PFN_vkCmdSetScissorWithCountEXT) GetProcAddress(vulkanModule, "vkCmdSetScissorWithCountEXT");
+        (PFN_vkCmdSetScissorWithCountEXT) DetouredExport(vulkanModule, "vkCmdSetScissorWithCountEXT");
     o_vkCmdBindVertexBuffers2EXT =
-        (PFN_vkCmdBindVertexBuffers2EXT) GetProcAddress(vulkanModule, "vkCmdBindVertexBuffers2EXT");
+        (PFN_vkCmdBindVertexBuffers2EXT) DetouredExport(vulkanModule, "vkCmdBindVertexBuffers2EXT");
     o_vkCmdSetDepthTestEnableEXT =
-        (PFN_vkCmdSetDepthTestEnableEXT) GetProcAddress(vulkanModule, "vkCmdSetDepthTestEnableEXT");
+        (PFN_vkCmdSetDepthTestEnableEXT) DetouredExport(vulkanModule, "vkCmdSetDepthTestEnableEXT");
     o_vkCmdSetDepthWriteEnableEXT =
-        (PFN_vkCmdSetDepthWriteEnableEXT) GetProcAddress(vulkanModule, "vkCmdSetDepthWriteEnableEXT");
+        (PFN_vkCmdSetDepthWriteEnableEXT) DetouredExport(vulkanModule, "vkCmdSetDepthWriteEnableEXT");
     o_vkCmdSetDepthCompareOpEXT =
-        (PFN_vkCmdSetDepthCompareOpEXT) GetProcAddress(vulkanModule, "vkCmdSetDepthCompareOpEXT");
+        (PFN_vkCmdSetDepthCompareOpEXT) DetouredExport(vulkanModule, "vkCmdSetDepthCompareOpEXT");
     o_vkCmdSetDepthBoundsTestEnableEXT =
-        (PFN_vkCmdSetDepthBoundsTestEnableEXT) GetProcAddress(vulkanModule, "vkCmdSetDepthBoundsTestEnableEXT");
+        (PFN_vkCmdSetDepthBoundsTestEnableEXT) DetouredExport(vulkanModule, "vkCmdSetDepthBoundsTestEnableEXT");
     o_vkCmdSetStencilTestEnableEXT =
-        (PFN_vkCmdSetStencilTestEnableEXT) GetProcAddress(vulkanModule, "vkCmdSetStencilTestEnableEXT");
-    o_vkCmdSetStencilOpEXT = (PFN_vkCmdSetStencilOpEXT) GetProcAddress(vulkanModule, "vkCmdSetStencilOpEXT");
+        (PFN_vkCmdSetStencilTestEnableEXT) DetouredExport(vulkanModule, "vkCmdSetStencilTestEnableEXT");
+    o_vkCmdSetStencilOpEXT = (PFN_vkCmdSetStencilOpEXT) DetouredExport(vulkanModule, "vkCmdSetStencilOpEXT");
     o_vkCmdPreprocessGeneratedCommandsNV =
-        (PFN_vkCmdPreprocessGeneratedCommandsNV) GetProcAddress(vulkanModule, "vkCmdPreprocessGeneratedCommandsNV");
+        (PFN_vkCmdPreprocessGeneratedCommandsNV) DetouredExport(vulkanModule, "vkCmdPreprocessGeneratedCommandsNV");
     o_vkCmdExecuteGeneratedCommandsNV =
-        (PFN_vkCmdExecuteGeneratedCommandsNV) GetProcAddress(vulkanModule, "vkCmdExecuteGeneratedCommandsNV");
+        (PFN_vkCmdExecuteGeneratedCommandsNV) DetouredExport(vulkanModule, "vkCmdExecuteGeneratedCommandsNV");
     o_vkCmdBindPipelineShaderGroupNV =
-        (PFN_vkCmdBindPipelineShaderGroupNV) GetProcAddress(vulkanModule, "vkCmdBindPipelineShaderGroupNV");
-    o_vkCmdSetDepthBias2EXT = (PFN_vkCmdSetDepthBias2EXT) GetProcAddress(vulkanModule, "vkCmdSetDepthBias2EXT");
-    o_vkCmdCudaLaunchKernelNV = (PFN_vkCmdCudaLaunchKernelNV) GetProcAddress(vulkanModule, "vkCmdCudaLaunchKernelNV");
+        (PFN_vkCmdBindPipelineShaderGroupNV) DetouredExport(vulkanModule, "vkCmdBindPipelineShaderGroupNV");
+    o_vkCmdSetDepthBias2EXT = (PFN_vkCmdSetDepthBias2EXT) DetouredExport(vulkanModule, "vkCmdSetDepthBias2EXT");
+    o_vkCmdCudaLaunchKernelNV = (PFN_vkCmdCudaLaunchKernelNV) DetouredExport(vulkanModule, "vkCmdCudaLaunchKernelNV");
     o_vkCmdBindDescriptorBuffersEXT =
-        (PFN_vkCmdBindDescriptorBuffersEXT) GetProcAddress(vulkanModule, "vkCmdBindDescriptorBuffersEXT");
+        (PFN_vkCmdBindDescriptorBuffersEXT) DetouredExport(vulkanModule, "vkCmdBindDescriptorBuffersEXT");
     o_vkCmdSetDescriptorBufferOffsetsEXT =
-        (PFN_vkCmdSetDescriptorBufferOffsetsEXT) GetProcAddress(vulkanModule, "vkCmdSetDescriptorBufferOffsetsEXT");
+        (PFN_vkCmdSetDescriptorBufferOffsetsEXT) DetouredExport(vulkanModule, "vkCmdSetDescriptorBufferOffsetsEXT");
     o_vkCmdBindDescriptorBufferEmbeddedSamplersEXT = (PFN_vkCmdBindDescriptorBufferEmbeddedSamplersEXT) GetProcAddress(
         vulkanModule, "vkCmdBindDescriptorBufferEmbeddedSamplersEXT");
     o_vkCmdSetFragmentShadingRateEnumNV =
-        (PFN_vkCmdSetFragmentShadingRateEnumNV) GetProcAddress(vulkanModule, "vkCmdSetFragmentShadingRateEnumNV");
-    o_vkCmdSetVertexInputEXT = (PFN_vkCmdSetVertexInputEXT) GetProcAddress(vulkanModule, "vkCmdSetVertexInputEXT");
+        (PFN_vkCmdSetFragmentShadingRateEnumNV) DetouredExport(vulkanModule, "vkCmdSetFragmentShadingRateEnumNV");
+    o_vkCmdSetVertexInputEXT = (PFN_vkCmdSetVertexInputEXT) DetouredExport(vulkanModule, "vkCmdSetVertexInputEXT");
     o_vkCmdSubpassShadingHUAWEI =
-        (PFN_vkCmdSubpassShadingHUAWEI) GetProcAddress(vulkanModule, "vkCmdSubpassShadingHUAWEI");
+        (PFN_vkCmdSubpassShadingHUAWEI) DetouredExport(vulkanModule, "vkCmdSubpassShadingHUAWEI");
     o_vkCmdBindInvocationMaskHUAWEI =
-        (PFN_vkCmdBindInvocationMaskHUAWEI) GetProcAddress(vulkanModule, "vkCmdBindInvocationMaskHUAWEI");
+        (PFN_vkCmdBindInvocationMaskHUAWEI) DetouredExport(vulkanModule, "vkCmdBindInvocationMaskHUAWEI");
     o_vkCmdSetPatchControlPointsEXT =
-        (PFN_vkCmdSetPatchControlPointsEXT) GetProcAddress(vulkanModule, "vkCmdSetPatchControlPointsEXT");
+        (PFN_vkCmdSetPatchControlPointsEXT) DetouredExport(vulkanModule, "vkCmdSetPatchControlPointsEXT");
     o_vkCmdSetRasterizerDiscardEnableEXT =
-        (PFN_vkCmdSetRasterizerDiscardEnableEXT) GetProcAddress(vulkanModule, "vkCmdSetRasterizerDiscardEnableEXT");
+        (PFN_vkCmdSetRasterizerDiscardEnableEXT) DetouredExport(vulkanModule, "vkCmdSetRasterizerDiscardEnableEXT");
     o_vkCmdSetDepthBiasEnableEXT =
-        (PFN_vkCmdSetDepthBiasEnableEXT) GetProcAddress(vulkanModule, "vkCmdSetDepthBiasEnableEXT");
-    o_vkCmdSetLogicOpEXT = (PFN_vkCmdSetLogicOpEXT) GetProcAddress(vulkanModule, "vkCmdSetLogicOpEXT");
+        (PFN_vkCmdSetDepthBiasEnableEXT) DetouredExport(vulkanModule, "vkCmdSetDepthBiasEnableEXT");
+    o_vkCmdSetLogicOpEXT = (PFN_vkCmdSetLogicOpEXT) DetouredExport(vulkanModule, "vkCmdSetLogicOpEXT");
     o_vkCmdSetPrimitiveRestartEnableEXT =
-        (PFN_vkCmdSetPrimitiveRestartEnableEXT) GetProcAddress(vulkanModule, "vkCmdSetPrimitiveRestartEnableEXT");
+        (PFN_vkCmdSetPrimitiveRestartEnableEXT) DetouredExport(vulkanModule, "vkCmdSetPrimitiveRestartEnableEXT");
     o_vkCmdSetColorWriteEnableEXT =
-        (PFN_vkCmdSetColorWriteEnableEXT) GetProcAddress(vulkanModule, "vkCmdSetColorWriteEnableEXT");
-    o_vkCmdDrawMultiEXT = (PFN_vkCmdDrawMultiEXT) GetProcAddress(vulkanModule, "vkCmdDrawMultiEXT");
+        (PFN_vkCmdSetColorWriteEnableEXT) DetouredExport(vulkanModule, "vkCmdSetColorWriteEnableEXT");
+    o_vkCmdDrawMultiEXT = (PFN_vkCmdDrawMultiEXT) DetouredExport(vulkanModule, "vkCmdDrawMultiEXT");
     o_vkCmdDrawMultiIndexedEXT =
-        (PFN_vkCmdDrawMultiIndexedEXT) GetProcAddress(vulkanModule, "vkCmdDrawMultiIndexedEXT");
-    o_vkCmdBuildMicromapsEXT = (PFN_vkCmdBuildMicromapsEXT) GetProcAddress(vulkanModule, "vkCmdBuildMicromapsEXT");
-    o_vkCmdCopyMicromapEXT = (PFN_vkCmdCopyMicromapEXT) GetProcAddress(vulkanModule, "vkCmdCopyMicromapEXT");
+        (PFN_vkCmdDrawMultiIndexedEXT) DetouredExport(vulkanModule, "vkCmdDrawMultiIndexedEXT");
+    o_vkCmdBuildMicromapsEXT = (PFN_vkCmdBuildMicromapsEXT) DetouredExport(vulkanModule, "vkCmdBuildMicromapsEXT");
+    o_vkCmdCopyMicromapEXT = (PFN_vkCmdCopyMicromapEXT) DetouredExport(vulkanModule, "vkCmdCopyMicromapEXT");
     o_vkCmdCopyMicromapToMemoryEXT =
-        (PFN_vkCmdCopyMicromapToMemoryEXT) GetProcAddress(vulkanModule, "vkCmdCopyMicromapToMemoryEXT");
+        (PFN_vkCmdCopyMicromapToMemoryEXT) DetouredExport(vulkanModule, "vkCmdCopyMicromapToMemoryEXT");
     o_vkCmdCopyMemoryToMicromapEXT =
-        (PFN_vkCmdCopyMemoryToMicromapEXT) GetProcAddress(vulkanModule, "vkCmdCopyMemoryToMicromapEXT");
+        (PFN_vkCmdCopyMemoryToMicromapEXT) DetouredExport(vulkanModule, "vkCmdCopyMemoryToMicromapEXT");
     o_vkCmdWriteMicromapsPropertiesEXT =
-        (PFN_vkCmdWriteMicromapsPropertiesEXT) GetProcAddress(vulkanModule, "vkCmdWriteMicromapsPropertiesEXT");
-    o_vkCmdDrawClusterHUAWEI = (PFN_vkCmdDrawClusterHUAWEI) GetProcAddress(vulkanModule, "vkCmdDrawClusterHUAWEI");
+        (PFN_vkCmdWriteMicromapsPropertiesEXT) DetouredExport(vulkanModule, "vkCmdWriteMicromapsPropertiesEXT");
+    o_vkCmdDrawClusterHUAWEI = (PFN_vkCmdDrawClusterHUAWEI) DetouredExport(vulkanModule, "vkCmdDrawClusterHUAWEI");
     o_vkCmdDrawClusterIndirectHUAWEI =
-        (PFN_vkCmdDrawClusterIndirectHUAWEI) GetProcAddress(vulkanModule, "vkCmdDrawClusterIndirectHUAWEI");
+        (PFN_vkCmdDrawClusterIndirectHUAWEI) DetouredExport(vulkanModule, "vkCmdDrawClusterIndirectHUAWEI");
     o_vkCmdCopyMemoryIndirectNV =
-        (PFN_vkCmdCopyMemoryIndirectNV) GetProcAddress(vulkanModule, "vkCmdCopyMemoryIndirectNV");
+        (PFN_vkCmdCopyMemoryIndirectNV) DetouredExport(vulkanModule, "vkCmdCopyMemoryIndirectNV");
     o_vkCmdCopyMemoryToImageIndirectNV =
-        (PFN_vkCmdCopyMemoryToImageIndirectNV) GetProcAddress(vulkanModule, "vkCmdCopyMemoryToImageIndirectNV");
-    o_vkCmdDecompressMemoryNV = (PFN_vkCmdDecompressMemoryNV) GetProcAddress(vulkanModule, "vkCmdDecompressMemoryNV");
+        (PFN_vkCmdCopyMemoryToImageIndirectNV) DetouredExport(vulkanModule, "vkCmdCopyMemoryToImageIndirectNV");
+    o_vkCmdDecompressMemoryNV = (PFN_vkCmdDecompressMemoryNV) DetouredExport(vulkanModule, "vkCmdDecompressMemoryNV");
     o_vkCmdDecompressMemoryIndirectCountNV =
-        (PFN_vkCmdDecompressMemoryIndirectCountNV) GetProcAddress(vulkanModule, "vkCmdDecompressMemoryIndirectCountNV");
+        (PFN_vkCmdDecompressMemoryIndirectCountNV) DetouredExport(vulkanModule, "vkCmdDecompressMemoryIndirectCountNV");
     o_vkCmdUpdatePipelineIndirectBufferNV =
-        (PFN_vkCmdUpdatePipelineIndirectBufferNV) GetProcAddress(vulkanModule, "vkCmdUpdatePipelineIndirectBufferNV");
+        (PFN_vkCmdUpdatePipelineIndirectBufferNV) DetouredExport(vulkanModule, "vkCmdUpdatePipelineIndirectBufferNV");
     o_vkCmdSetDepthClampEnableEXT =
-        (PFN_vkCmdSetDepthClampEnableEXT) GetProcAddress(vulkanModule, "vkCmdSetDepthClampEnableEXT");
-    o_vkCmdSetPolygonModeEXT = (PFN_vkCmdSetPolygonModeEXT) GetProcAddress(vulkanModule, "vkCmdSetPolygonModeEXT");
+        (PFN_vkCmdSetDepthClampEnableEXT) DetouredExport(vulkanModule, "vkCmdSetDepthClampEnableEXT");
+    o_vkCmdSetPolygonModeEXT = (PFN_vkCmdSetPolygonModeEXT) DetouredExport(vulkanModule, "vkCmdSetPolygonModeEXT");
     o_vkCmdSetRasterizationSamplesEXT =
-        (PFN_vkCmdSetRasterizationSamplesEXT) GetProcAddress(vulkanModule, "vkCmdSetRasterizationSamplesEXT");
-    o_vkCmdSetSampleMaskEXT = (PFN_vkCmdSetSampleMaskEXT) GetProcAddress(vulkanModule, "vkCmdSetSampleMaskEXT");
+        (PFN_vkCmdSetRasterizationSamplesEXT) DetouredExport(vulkanModule, "vkCmdSetRasterizationSamplesEXT");
+    o_vkCmdSetSampleMaskEXT = (PFN_vkCmdSetSampleMaskEXT) DetouredExport(vulkanModule, "vkCmdSetSampleMaskEXT");
     o_vkCmdSetAlphaToCoverageEnableEXT =
-        (PFN_vkCmdSetAlphaToCoverageEnableEXT) GetProcAddress(vulkanModule, "vkCmdSetAlphaToCoverageEnableEXT");
+        (PFN_vkCmdSetAlphaToCoverageEnableEXT) DetouredExport(vulkanModule, "vkCmdSetAlphaToCoverageEnableEXT");
     o_vkCmdSetAlphaToOneEnableEXT =
-        (PFN_vkCmdSetAlphaToOneEnableEXT) GetProcAddress(vulkanModule, "vkCmdSetAlphaToOneEnableEXT");
+        (PFN_vkCmdSetAlphaToOneEnableEXT) DetouredExport(vulkanModule, "vkCmdSetAlphaToOneEnableEXT");
     o_vkCmdSetLogicOpEnableEXT =
-        (PFN_vkCmdSetLogicOpEnableEXT) GetProcAddress(vulkanModule, "vkCmdSetLogicOpEnableEXT");
+        (PFN_vkCmdSetLogicOpEnableEXT) DetouredExport(vulkanModule, "vkCmdSetLogicOpEnableEXT");
     o_vkCmdSetColorBlendEnableEXT =
-        (PFN_vkCmdSetColorBlendEnableEXT) GetProcAddress(vulkanModule, "vkCmdSetColorBlendEnableEXT");
+        (PFN_vkCmdSetColorBlendEnableEXT) DetouredExport(vulkanModule, "vkCmdSetColorBlendEnableEXT");
     o_vkCmdSetColorBlendEquationEXT =
-        (PFN_vkCmdSetColorBlendEquationEXT) GetProcAddress(vulkanModule, "vkCmdSetColorBlendEquationEXT");
+        (PFN_vkCmdSetColorBlendEquationEXT) DetouredExport(vulkanModule, "vkCmdSetColorBlendEquationEXT");
     o_vkCmdSetColorWriteMaskEXT =
-        (PFN_vkCmdSetColorWriteMaskEXT) GetProcAddress(vulkanModule, "vkCmdSetColorWriteMaskEXT");
+        (PFN_vkCmdSetColorWriteMaskEXT) DetouredExport(vulkanModule, "vkCmdSetColorWriteMaskEXT");
     o_vkCmdSetTessellationDomainOriginEXT =
-        (PFN_vkCmdSetTessellationDomainOriginEXT) GetProcAddress(vulkanModule, "vkCmdSetTessellationDomainOriginEXT");
+        (PFN_vkCmdSetTessellationDomainOriginEXT) DetouredExport(vulkanModule, "vkCmdSetTessellationDomainOriginEXT");
     o_vkCmdSetRasterizationStreamEXT =
-        (PFN_vkCmdSetRasterizationStreamEXT) GetProcAddress(vulkanModule, "vkCmdSetRasterizationStreamEXT");
+        (PFN_vkCmdSetRasterizationStreamEXT) DetouredExport(vulkanModule, "vkCmdSetRasterizationStreamEXT");
     o_vkCmdSetConservativeRasterizationModeEXT = (PFN_vkCmdSetConservativeRasterizationModeEXT) GetProcAddress(
         vulkanModule, "vkCmdSetConservativeRasterizationModeEXT");
     o_vkCmdSetExtraPrimitiveOverestimationSizeEXT = (PFN_vkCmdSetExtraPrimitiveOverestimationSizeEXT) GetProcAddress(
         vulkanModule, "vkCmdSetExtraPrimitiveOverestimationSizeEXT");
     o_vkCmdSetDepthClipEnableEXT =
-        (PFN_vkCmdSetDepthClipEnableEXT) GetProcAddress(vulkanModule, "vkCmdSetDepthClipEnableEXT");
+        (PFN_vkCmdSetDepthClipEnableEXT) DetouredExport(vulkanModule, "vkCmdSetDepthClipEnableEXT");
     o_vkCmdSetSampleLocationsEnableEXT =
-        (PFN_vkCmdSetSampleLocationsEnableEXT) GetProcAddress(vulkanModule, "vkCmdSetSampleLocationsEnableEXT");
+        (PFN_vkCmdSetSampleLocationsEnableEXT) DetouredExport(vulkanModule, "vkCmdSetSampleLocationsEnableEXT");
     o_vkCmdSetColorBlendAdvancedEXT =
-        (PFN_vkCmdSetColorBlendAdvancedEXT) GetProcAddress(vulkanModule, "vkCmdSetColorBlendAdvancedEXT");
+        (PFN_vkCmdSetColorBlendAdvancedEXT) DetouredExport(vulkanModule, "vkCmdSetColorBlendAdvancedEXT");
     o_vkCmdSetProvokingVertexModeEXT =
-        (PFN_vkCmdSetProvokingVertexModeEXT) GetProcAddress(vulkanModule, "vkCmdSetProvokingVertexModeEXT");
+        (PFN_vkCmdSetProvokingVertexModeEXT) DetouredExport(vulkanModule, "vkCmdSetProvokingVertexModeEXT");
     o_vkCmdSetLineRasterizationModeEXT =
-        (PFN_vkCmdSetLineRasterizationModeEXT) GetProcAddress(vulkanModule, "vkCmdSetLineRasterizationModeEXT");
+        (PFN_vkCmdSetLineRasterizationModeEXT) DetouredExport(vulkanModule, "vkCmdSetLineRasterizationModeEXT");
     o_vkCmdSetLineStippleEnableEXT =
-        (PFN_vkCmdSetLineStippleEnableEXT) GetProcAddress(vulkanModule, "vkCmdSetLineStippleEnableEXT");
+        (PFN_vkCmdSetLineStippleEnableEXT) DetouredExport(vulkanModule, "vkCmdSetLineStippleEnableEXT");
     o_vkCmdSetDepthClipNegativeOneToOneEXT =
-        (PFN_vkCmdSetDepthClipNegativeOneToOneEXT) GetProcAddress(vulkanModule, "vkCmdSetDepthClipNegativeOneToOneEXT");
+        (PFN_vkCmdSetDepthClipNegativeOneToOneEXT) DetouredExport(vulkanModule, "vkCmdSetDepthClipNegativeOneToOneEXT");
     o_vkCmdSetViewportWScalingEnableNV =
-        (PFN_vkCmdSetViewportWScalingEnableNV) GetProcAddress(vulkanModule, "vkCmdSetViewportWScalingEnableNV");
+        (PFN_vkCmdSetViewportWScalingEnableNV) DetouredExport(vulkanModule, "vkCmdSetViewportWScalingEnableNV");
     o_vkCmdSetViewportSwizzleNV =
-        (PFN_vkCmdSetViewportSwizzleNV) GetProcAddress(vulkanModule, "vkCmdSetViewportSwizzleNV");
+        (PFN_vkCmdSetViewportSwizzleNV) DetouredExport(vulkanModule, "vkCmdSetViewportSwizzleNV");
     o_vkCmdSetCoverageToColorEnableNV =
-        (PFN_vkCmdSetCoverageToColorEnableNV) GetProcAddress(vulkanModule, "vkCmdSetCoverageToColorEnableNV");
+        (PFN_vkCmdSetCoverageToColorEnableNV) DetouredExport(vulkanModule, "vkCmdSetCoverageToColorEnableNV");
     o_vkCmdSetCoverageToColorLocationNV =
-        (PFN_vkCmdSetCoverageToColorLocationNV) GetProcAddress(vulkanModule, "vkCmdSetCoverageToColorLocationNV");
+        (PFN_vkCmdSetCoverageToColorLocationNV) DetouredExport(vulkanModule, "vkCmdSetCoverageToColorLocationNV");
     o_vkCmdSetCoverageModulationModeNV =
-        (PFN_vkCmdSetCoverageModulationModeNV) GetProcAddress(vulkanModule, "vkCmdSetCoverageModulationModeNV");
+        (PFN_vkCmdSetCoverageModulationModeNV) DetouredExport(vulkanModule, "vkCmdSetCoverageModulationModeNV");
     o_vkCmdSetCoverageModulationTableEnableNV = (PFN_vkCmdSetCoverageModulationTableEnableNV) GetProcAddress(
         vulkanModule, "vkCmdSetCoverageModulationTableEnableNV");
     o_vkCmdSetCoverageModulationTableNV =
-        (PFN_vkCmdSetCoverageModulationTableNV) GetProcAddress(vulkanModule, "vkCmdSetCoverageModulationTableNV");
+        (PFN_vkCmdSetCoverageModulationTableNV) DetouredExport(vulkanModule, "vkCmdSetCoverageModulationTableNV");
     o_vkCmdSetShadingRateImageEnableNV =
-        (PFN_vkCmdSetShadingRateImageEnableNV) GetProcAddress(vulkanModule, "vkCmdSetShadingRateImageEnableNV");
+        (PFN_vkCmdSetShadingRateImageEnableNV) DetouredExport(vulkanModule, "vkCmdSetShadingRateImageEnableNV");
     o_vkCmdSetRepresentativeFragmentTestEnableNV = (PFN_vkCmdSetRepresentativeFragmentTestEnableNV) GetProcAddress(
         vulkanModule, "vkCmdSetRepresentativeFragmentTestEnableNV");
     o_vkCmdSetCoverageReductionModeNV =
-        (PFN_vkCmdSetCoverageReductionModeNV) GetProcAddress(vulkanModule, "vkCmdSetCoverageReductionModeNV");
+        (PFN_vkCmdSetCoverageReductionModeNV) DetouredExport(vulkanModule, "vkCmdSetCoverageReductionModeNV");
     o_vkCmdOpticalFlowExecuteNV =
-        (PFN_vkCmdOpticalFlowExecuteNV) GetProcAddress(vulkanModule, "vkCmdOpticalFlowExecuteNV");
-    o_vkCmdBindShadersEXT = (PFN_vkCmdBindShadersEXT) GetProcAddress(vulkanModule, "vkCmdBindShadersEXT");
+        (PFN_vkCmdOpticalFlowExecuteNV) DetouredExport(vulkanModule, "vkCmdOpticalFlowExecuteNV");
+    o_vkCmdBindShadersEXT = (PFN_vkCmdBindShadersEXT) DetouredExport(vulkanModule, "vkCmdBindShadersEXT");
     o_vkCmdSetDepthClampRangeEXT =
-        (PFN_vkCmdSetDepthClampRangeEXT) GetProcAddress(vulkanModule, "vkCmdSetDepthClampRangeEXT");
+        (PFN_vkCmdSetDepthClampRangeEXT) DetouredExport(vulkanModule, "vkCmdSetDepthClampRangeEXT");
     o_vkCmdConvertCooperativeVectorMatrixNV = (PFN_vkCmdConvertCooperativeVectorMatrixNV) GetProcAddress(
         vulkanModule, "vkCmdConvertCooperativeVectorMatrixNV");
     o_vkCmdSetAttachmentFeedbackLoopEnableEXT = (PFN_vkCmdSetAttachmentFeedbackLoopEnableEXT) GetProcAddress(
@@ -9689,15 +10069,15 @@ void Vulkan_wDx12::Hook(HMODULE vulkanModule)
         (PFN_vkCmdBuildPartitionedAccelerationStructuresNV) GetProcAddress(
             vulkanModule, "vkCmdBuildPartitionedAccelerationStructuresNV");
     o_vkCmdPreprocessGeneratedCommandsEXT =
-        (PFN_vkCmdPreprocessGeneratedCommandsEXT) GetProcAddress(vulkanModule, "vkCmdPreprocessGeneratedCommandsEXT");
+        (PFN_vkCmdPreprocessGeneratedCommandsEXT) DetouredExport(vulkanModule, "vkCmdPreprocessGeneratedCommandsEXT");
     o_vkCmdExecuteGeneratedCommandsEXT =
-        (PFN_vkCmdExecuteGeneratedCommandsEXT) GetProcAddress(vulkanModule, "vkCmdExecuteGeneratedCommandsEXT");
+        (PFN_vkCmdExecuteGeneratedCommandsEXT) DetouredExport(vulkanModule, "vkCmdExecuteGeneratedCommandsEXT");
     o_vkCmdBuildAccelerationStructuresKHR =
-        (PFN_vkCmdBuildAccelerationStructuresKHR) GetProcAddress(vulkanModule, "vkCmdBuildAccelerationStructuresKHR");
+        (PFN_vkCmdBuildAccelerationStructuresKHR) DetouredExport(vulkanModule, "vkCmdBuildAccelerationStructuresKHR");
     o_vkCmdBuildAccelerationStructuresIndirectKHR = (PFN_vkCmdBuildAccelerationStructuresIndirectKHR) GetProcAddress(
         vulkanModule, "vkCmdBuildAccelerationStructuresIndirectKHR");
     o_vkCmdCopyAccelerationStructureKHR =
-        (PFN_vkCmdCopyAccelerationStructureKHR) GetProcAddress(vulkanModule, "vkCmdCopyAccelerationStructureKHR");
+        (PFN_vkCmdCopyAccelerationStructureKHR) DetouredExport(vulkanModule, "vkCmdCopyAccelerationStructureKHR");
     o_vkCmdCopyAccelerationStructureToMemoryKHR = (PFN_vkCmdCopyAccelerationStructureToMemoryKHR) GetProcAddress(
         vulkanModule, "vkCmdCopyAccelerationStructureToMemoryKHR");
     o_vkCmdCopyMemoryToAccelerationStructureKHR = (PFN_vkCmdCopyMemoryToAccelerationStructureKHR) GetProcAddress(
@@ -9705,16 +10085,16 @@ void Vulkan_wDx12::Hook(HMODULE vulkanModule)
     o_vkCmdWriteAccelerationStructuresPropertiesKHR =
         (PFN_vkCmdWriteAccelerationStructuresPropertiesKHR) GetProcAddress(
             vulkanModule, "vkCmdWriteAccelerationStructuresPropertiesKHR");
-    o_vkCmdTraceRaysKHR = (PFN_vkCmdTraceRaysKHR) GetProcAddress(vulkanModule, "vkCmdTraceRaysKHR");
+    o_vkCmdTraceRaysKHR = (PFN_vkCmdTraceRaysKHR) DetouredExport(vulkanModule, "vkCmdTraceRaysKHR");
     o_vkCmdTraceRaysIndirectKHR =
-        (PFN_vkCmdTraceRaysIndirectKHR) GetProcAddress(vulkanModule, "vkCmdTraceRaysIndirectKHR");
+        (PFN_vkCmdTraceRaysIndirectKHR) DetouredExport(vulkanModule, "vkCmdTraceRaysIndirectKHR");
     o_vkCmdSetRayTracingPipelineStackSizeKHR = (PFN_vkCmdSetRayTracingPipelineStackSizeKHR) GetProcAddress(
         vulkanModule, "vkCmdSetRayTracingPipelineStackSizeKHR");
-    o_vkCmdDrawMeshTasksEXT = (PFN_vkCmdDrawMeshTasksEXT) GetProcAddress(vulkanModule, "vkCmdDrawMeshTasksEXT");
+    o_vkCmdDrawMeshTasksEXT = (PFN_vkCmdDrawMeshTasksEXT) DetouredExport(vulkanModule, "vkCmdDrawMeshTasksEXT");
     o_vkCmdDrawMeshTasksIndirectEXT =
-        (PFN_vkCmdDrawMeshTasksIndirectEXT) GetProcAddress(vulkanModule, "vkCmdDrawMeshTasksIndirectEXT");
+        (PFN_vkCmdDrawMeshTasksIndirectEXT) DetouredExport(vulkanModule, "vkCmdDrawMeshTasksIndirectEXT");
     o_vkCmdDrawMeshTasksIndirectCountEXT =
-        (PFN_vkCmdDrawMeshTasksIndirectCountEXT) GetProcAddress(vulkanModule, "vkCmdDrawMeshTasksIndirectCountEXT");
+        (PFN_vkCmdDrawMeshTasksIndirectCountEXT) DetouredExport(vulkanModule, "vkCmdDrawMeshTasksIndirectCountEXT");
 
 #pragma endregion
 
@@ -9864,6 +10244,9 @@ void Vulkan_wDx12::Hook(HMODULE vulkanModule)
 
         if (o_vkCmdPipelineBarrier)
             DetourAttach(&(PVOID&) o_vkCmdPipelineBarrier, hk_vkCmdPipelineBarrier);
+
+        if (o_vkDestroyImage)
+            DetourAttach(&(PVOID&) o_vkDestroyImage, hk_vkDestroyImage);
 
         if (o_vkCmdBeginQuery)
             DetourAttach(&(PVOID&) o_vkCmdBeginQuery, hk_vkCmdBeginQuery);
@@ -10579,6 +10962,8 @@ void Vulkan_wDx12::Hook(HMODULE vulkanModule)
         {
             LOG_ERROR("Failed to attach Vulkan hooks: %d", detourResult);
 
+            _detouredExports.clear();
+
             o_vkCmdBindPipeline = nullptr;
             o_vkCmdSetViewport = nullptr;
             o_vkCmdSetScissor = nullptr;
@@ -10859,15 +11244,16 @@ void Vulkan_wDx12::Unhook()
         DetourDetach(&(PVOID&) o_vkQueueSubmit2, hk_vkQueueSubmit2);
 
     if (o_vkQueueSubmit2KHR)
-        DetourDetach(&(PVOID&) o_vkQueueSubmit2KHR, hk_vkQueueSubmit2);
+        DetourDetach(&(PVOID&) o_vkQueueSubmit2KHR, hk_vkQueueSubmit2KHR);
 
     auto detourResult = DetourTransactionCommit();
     if (detourResult != NO_ERROR)
     {
-        LOG_ERROR("Failed to detach Vulkan hooks: %d", detourResult);
+        LOG_ERROR("Failed to detach Vulkan hooks: {}", detourResult);
     }
     else
     {
+        _detouredExports.clear();
         o_vkQueueSubmit = nullptr;
         o_vkQueueSubmit2 = nullptr;
         o_vkQueueSubmit2KHR = nullptr;

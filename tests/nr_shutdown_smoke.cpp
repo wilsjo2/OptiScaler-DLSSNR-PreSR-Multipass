@@ -12,6 +12,7 @@
 #define LOG_INFO(...) ((void) 0)
 #define LOG_WARN(...) ((void) 0)
 #define NVSDK_NGX_FAILED(r) ((r) != 0)
+#define _ReturnAddress() nullptr
 using NVSDK_NGX_Result = int;
 using PVOID = void*;
 constexpr int NVSDK_NGX_Result_Success = 0, NVSDK_NGX_Result_Fail = 1;
@@ -28,7 +29,22 @@ enum class FGNvngxReplacement
     None,
     Active
 };
-unsigned calls0, calls1, fgCalls, liveNr, destroyedNr, liveAtShutdown, parentDestructions;
+enum class Upscaler
+{
+    None,
+    DLSS
+};
+enum class API
+{
+    DX12
+};
+struct FeatureBase
+{
+    virtual ~FeatureBase() = default;
+    virtual Upscaler GetUpscalerType() const { return Upscaler::None; }
+    API Api() const { return API::DX12; }
+};
+unsigned calls0, calls1, fgCalls, rrCalls, otherClients, liveNr, destroyedNr, liveAtShutdown, parentDestructions;
 bool ready = true;
 int stopResult = 0;
 bool suppliedShutdownState = false;
@@ -40,7 +56,7 @@ struct FG
 struct State
 {
     bool isShuttingDown = false, nvngxDx12Inited = true, clearCapturedHudlesses = false;
-    void* currentFeature = nullptr;
+    FeatureBase* currentFeature = nullptr;
     FG* currentFG = nullptr;
     FGInput activeFgInput = FGInput::None;
     FGNvngxReplacement activeFgNvngx = FGNvngxReplacement::None;
@@ -67,11 +83,14 @@ int RealShutdown1(ID3D12Device*, unsigned int* shutdownState)
     return stopResult;
 }
 using PFN_D3D12_Shutdown = int (*)(void);
-using PFN_D3D12_DriverShutdown1 = int (*)(ID3D12Device*, unsigned int*);
+using PFN_Nvngx_D3D12_Shutdown1 = int (*)(ID3D12Device*, unsigned int*);
 struct NgxModule
 {
     PFN_D3D12_Shutdown D3D12_Shutdown;
-    PFN_D3D12_DriverShutdown1 D3D12_Shutdown1;
+    PFN_Nvngx_D3D12_Shutdown1 D3D12_Shutdown1;
+};
+struct CustomNgx
+{
 };
 struct NVNGXProxy
 {
@@ -79,6 +98,7 @@ struct NVNGXProxy
     inline static NgxModule _module { &RealShutdown, &RealShutdown1 };
     static bool IsDx12Inited() { return _dx12Inited; }
     static void SetDx12Inited(bool b) { _dx12Inited = b; }
+    static void ShutdownCustomDx12(CustomNgx&, ID3D12Device*) {}
 #include "shutdown_accessors.inc"
 };
 namespace Nvngx_FG
@@ -86,6 +106,21 @@ namespace Nvngx_FG
 void D3D12_Shutdown() { ++fgCalls; }
 void D3D12_Shutdown1(ID3D12Device*) { ++fgCalls; }
 } // namespace Nvngx_FG
+namespace Nvngx_RR
+{
+void ShutdownDx12(ID3D12Device*) { ++rrCalls; }
+} // namespace Nvngx_RR
+// Another module (Streamline, a mod) still holding the NGX instance skips the teardown
+struct NVNGXClients
+{
+    bool Remove(void*)
+    {
+        if (otherClients == 0)
+            return true;
+        --otherClients;
+        return false;
+    }
+} _clients;
 namespace DlssNr
 {
 void ClearStatus(void*) {}
@@ -95,10 +130,12 @@ struct DLSSFeature
 {
     static void Shutdown() {}
 };
-struct DLSSFeatureDx12 : DLSSFeature
+struct DLSSFeatureDx12 : FeatureBase, DLSSFeature
 {
-    inline static bool _dlssInitedDx12 = true;
-    static void Shutdown(ID3D12Device*);
+    bool _dlssInited = true;
+    CustomNgx* _custom = nullptr;
+    Upscaler GetUpscalerType() const override { return Upscaler::DLSS; }
+    void Shutdown(ID3D12Device*);
 };
 struct NrState
 {
@@ -187,7 +224,7 @@ void reset()
     State::Instance().isShuttingDown = false;
     Dx12Contexts.clear();
     RetiredNrOwners().clear();
-    calls0 = calls1 = fgCalls = liveNr = destroyedNr = liveAtShutdown = parentDestructions = 0;
+    calls0 = calls1 = fgCalls = rrCalls = otherClients = liveNr = destroyedNr = liveAtShutdown = parentDestructions = 0;
     unloaded = logged = closedLogger = 0;
     ready = true;
     stopResult = 0;
@@ -197,7 +234,6 @@ void reset()
     State::Instance().modulesToFree.push_back(reinterpret_cast<void*>(4));
     NVNGXProxy::_dx12Inited = true;
     NVNGXProxy::_module = { &RealShutdown, &RealShutdown1 };
-    DLSSFeatureDx12::_dlssInitedDx12 = true;
     D3D12Device = &device;
 }
 int main()
@@ -205,10 +241,14 @@ int main()
     reset();
     Dx12Contexts[1].feature = std::make_unique<Parent>();
     State::Instance().activeFgNvngx = FGNvngxReplacement::Active;
+    DLSSFeatureDx12 dlss;
+    State::Instance().currentFeature = &dlss;
     expect(NVSDK_NGX_D3D12_Shutdown() == 0, "legacy shutdown failed");
-    expect(calls0 == 1 && calls1 == 0 && fgCalls == 1 && liveAtShutdown == 0 && parentDestructions == 1,
+    expect(calls0 == 1 && calls1 == 0 && fgCalls == 1 && rrCalls == 1 && liveAtShutdown == 0 &&
+               parentDestructions == 1,
            "runtime shutdown duplicated or ran before NR/parent release");
-    expect(!NVNGXProxy::IsDx12Inited() && !DLSSFeatureDx12::_dlssInitedDx12, "init flags not reset");
+    expect(!NVNGXProxy::IsDx12Inited() && !dlss._dlssInited && State::Instance().currentFeature == nullptr,
+           "init flags not reset");
     NVSDK_NGX_D3D12_Shutdown();
     expect(calls0 == 1 && fgCalls == 1, "repeated shutdown called a driver/provider again");
 
@@ -225,6 +265,14 @@ int main()
     NVNGXProxy::_module.D3D12_Shutdown1 = nullptr;
     NVSDK_NGX_D3D12_Shutdown1(&device);
     expect(calls0 == 1 && calls1 == 0, "legacy-only runtime fallback failed");
+
+    reset();
+    otherClients = 1;
+    Dx12Contexts[1].feature = std::make_unique<Parent>();
+    expect(NVSDK_NGX_D3D12_Shutdown() == 0 && calls0 == 0 && liveNr == 1 && NVNGXProxy::IsDx12Inited(),
+           "a client's shutdown tore down NGX while another module still uses it");
+    NVSDK_NGX_D3D12_Shutdown();
+    expect(calls0 == 1 && liveNr == 0, "the last client's shutdown did not tear down");
 
     reset();
     ready = false;

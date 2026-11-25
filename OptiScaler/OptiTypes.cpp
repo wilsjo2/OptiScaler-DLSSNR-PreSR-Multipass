@@ -2,7 +2,6 @@
 
 #include "OptiTypes.h"
 #include <misc/IdentifyGpu.h>
-#include <unordered_map>
 
 std::string ApiUpscalerInputName(ApiUpscalerInput upscaler)
 {
@@ -12,6 +11,9 @@ std::string ApiUpscalerInputName(ApiUpscalerInput upscaler)
     case ApiUpscalerInput::DLSS_DX12:
     case ApiUpscalerInput::DLSS_VK:
         return "DLSS";
+    case ApiUpscalerInput::DLSSD_DX12:
+    case ApiUpscalerInput::DLSSD_VK:
+        return "DLSSD";
     case ApiUpscalerInput::XeSS_DX11:
     case ApiUpscalerInput::XeSS_DX12:
     case ApiUpscalerInput::XeSS_VK:
@@ -50,7 +52,8 @@ std::string UpscalerDisplayName(Upscaler upscaler, API api)
         return "FSR 3.1";
 
     case Upscaler::FFX:
-        if (fsr4Capable && api == API::DX12)
+        // Native Vulkan gets FSR 4 from the driver
+        if (fsr4Capable && (api == API::DX12 || api == API::Vulkan))
             return "FSR 3.X/4";
         else
             return "FSR 3.X";
@@ -123,97 +126,4 @@ std::string UpscalerShortName(Upscaler upscaler)
     }
 
     return "????";
-}
-
-// Converts enum to the string codes for config
-std::string UpscalerToCode(Upscaler upscaler)
-{
-    switch (upscaler)
-    {
-    case Upscaler::XeSS:
-        return "xess";
-    case Upscaler::XeSS_on12:
-        return "xess_12";
-    case Upscaler::FSR21:
-        return "fsr21";
-    case Upscaler::FSR21_on12:
-        return "fsr21_12";
-    case Upscaler::FSR22:
-        return "fsr22";
-    case Upscaler::FSR22_on12:
-        return "fsr22_12";
-    case Upscaler::FFX:
-        return "ffx";
-    case Upscaler::FFX_on12:
-        return "ffx_12";
-    case Upscaler::DLSS:
-        return "dlss";
-    case Upscaler::DLSS_on12:
-        return "dlss_12";
-    case Upscaler::DLSSD:
-        return "dlssd";
-    case Upscaler::FSR31: // DX11 only
-        return "fsr31";
-    default: // Upscaler::Reset and unknown
-        return "";
-    }
-}
-
-// Converts string codes into enum for config
-Upscaler CodeToUpscaler(const std::string& code)
-{
-    static const std::unordered_map<std::string, Upscaler> mapping = {
-        { "xess", Upscaler::XeSS },         { "xess_12", Upscaler::XeSS_on12 },
-        { "fsr21", Upscaler::FSR21 },       { "fsr21_12", Upscaler::FSR21_on12 },
-        { "fsr22", Upscaler::FSR22 },       { "fsr22_12", Upscaler::FSR22_on12 },
-        { "ffx", Upscaler::FFX },           { "ffx_12", Upscaler::FFX_on12 },
-        { "dlss", Upscaler::DLSS },         { "dlssd", Upscaler::DLSSD },
-        { "dlss_12", Upscaler::DLSS_on12 }, { "fsr31", Upscaler::FSR31 },
-        { "fsr31_12", Upscaler::FFX_on12 }, // for compat reasons
-    };
-
-    auto it = mapping.find(code);
-    return (it != mapping.end()) ? it->second : Upscaler::Reset;
-}
-
-// Upscalers that use FFX got renamed from fsr31 to ffx
-// Needs this function for compatibility for now
-// DX11: fsr31 -> fsr31, fsr31_12 -> ffx_12
-// DX12: fsr31 -> ffx
-// VK:   fsr31 -> ffx, fsr31_12 -> ffx_12
-Upscaler CodeToUpscalerFfx(const std::string& code)
-{
-    if (code == "fsr31")
-        return Upscaler::FFX;
-
-    return CodeToUpscaler(code);
-}
-
-// Converts enum to the string codes for config
-std::string SharpnessShaderToCode(SharpenShader sharpenShader)
-{
-    switch (sharpenShader)
-    {
-    case SharpenShader::RCAS:
-        return "rcas";
-    case SharpenShader::DepthAware:
-        return "da";
-    case SharpenShader::LocalContrastDepthAware:
-        return "lcda";
-    default:
-        return "";
-    }
-}
-
-// Converts string codes into enum for config
-SharpenShader CodeToSharpnessShader(const std::string& code)
-{
-    static const std::unordered_map<std::string, SharpenShader> mapping = {
-        { "rcas", SharpenShader::RCAS },
-        { "da", SharpenShader::DepthAware },
-        { "lcda", SharpenShader::LocalContrastDepthAware },
-    };
-
-    auto it = mapping.find(code);
-    return (it != mapping.end()) ? it->second : SharpenShader::RCAS;
 }

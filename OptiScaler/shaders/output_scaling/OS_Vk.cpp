@@ -141,29 +141,29 @@ bool OS_Vk::DispatchWithSize(VkCommandBuffer InCmdList, const VkImageInfo& InRes
     if (!_init || InCmdList == VK_NULL_HANDLE)
         return false;
 
+    ScopedGpuTime_Vk scopedGpuTime(GpuTime.get(), InCmdList);
+
     // Update Constants
     FsrEasuCon(fsr1Constants.const0, fsr1Constants.const1, fsr1Constants.const2, fsr1Constants.const3, srcW, srcH, srcW,
                srcH, dstW, dstH);
+
+    // EASU only upscales, downscaling stays on the shader's bilinear path
+    fsr1Constants.squaredRadius = srcW < dstW ? UINT32_MAX : 0;
 
     constants.srcWidth = srcW;
     constants.srcHeight = srcH;
     constants.destWidth = dstW;
     constants.destHeight = dstH;
 
-    if (_mappedConstantBuffer)
-    {
-        if (ActiveScaler() == Scaler::FSR1)
-            memcpy(_mappedConstantBuffer, &fsr1Constants, sizeof(UpscaleShaderConstants));
-        else
-            memcpy(_mappedConstantBuffer, &constants, sizeof(Constants));
-    }
-
     // Advance Frame Index
     _currentSetIndex = (_currentSetIndex + 1) % _maxFramesInFlight;
     VkDescriptorSet currentSet = _descriptorSets[_currentSetIndex];
 
+    const auto bufferInfo = ActiveScaler() == Scaler::FSR1
+                                ? WriteConstants(&fsr1Constants, sizeof(UpscaleShaderConstants))
+                                : WriteConstants(&constants, sizeof(Constants));
+
     // Build Descriptor Writes
-    VkDescriptorBufferInfo bufferInfo { _constantBuffer, 0, sizeof(Constants) };
     VkDescriptorImageInfo sourceInfo { VK_NULL_HANDLE, InResourceView.ImageView,
                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
     VkDescriptorImageInfo destInfo { VK_NULL_HANDLE, OutResourceView.ImageView, VK_IMAGE_LAYOUT_GENERAL };

@@ -2,36 +2,11 @@
 #include "IFGFeature.h"
 #include <Config.h>
 #include <low_latency/input/input_common.h>
+#include <shaders/reproject/Reproject.h>
 
 int IFGFeature::GetIndex() { return (_frameCount % BUFFER_COUNT); }
 
-int IFGFeature::GetIndexWillBeDispatched()
-{
-    UINT64 df;
-
-    auto diff = _frameCount - _lastDispatchedFrame;
-    if (diff > Config::Instance()->FGAllowedFrameAhead.value_or_default() || diff < 0 || _lastDispatchedFrame == 0)
-    {
-        // If current index has resources, skip to it
-        if (HasResource(FG_ResourceType::Depth))
-        {
-            LOG_DEBUG("Skipping not presented frames! _frameCount: {}, _lastDispatchedFrame: {}", _frameCount,
-                      _lastDispatchedFrame);
-
-            df = _frameCount; // Set dispatch frame as new one
-        }
-        else
-        {
-            df = _lastDispatchedFrame + 1; // Render next one
-        }
-    }
-    else
-    {
-        df = _lastDispatchedFrame + 1; // Render next one
-    }
-
-    return (df % BUFFER_COUNT);
-}
+int IFGFeature::GetIndexWillBeDispatched() { return (NextDispatchFrame() % BUFFER_COUNT); }
 
 UINT64 IFGFeature::StartNewFrame()
 {
@@ -140,19 +115,7 @@ int IFGFeature::GetDispatchIndex(UINT64& willDispatchFrame)
     if (_frameCount == _lastDispatchedFrame)
         return -1;
 
-    willDispatchFrame = _lastDispatchedFrame + 1; // By default render next one
-
-    auto diff = _frameCount - _lastDispatchedFrame;
-    if (diff > Config::Instance()->FGAllowedFrameAhead.value_or_default() || diff < 0 || _lastDispatchedFrame == 0)
-    {
-        auto index = GetIndex();
-
-        if (HasResource(FG_ResourceType::Depth, index) || HasResource(FG_ResourceType::Velocity, index) ||
-            HasResource(FG_ResourceType::UIColor, index) || HasResource(FG_ResourceType::HudlessColor, index))
-        {
-            willDispatchFrame = _frameCount; // Set dispatch frame as latest one
-        }
-    }
+    willDispatchFrame = NextDispatchFrame();
 
     _lastDispatchedFrame = willDispatchFrame;
     _lastFGFrame = State::Instance().fgLastFrame;
@@ -160,7 +123,42 @@ int IFGFeature::GetDispatchIndex(UINT64& willDispatchFrame)
     return (willDispatchFrame % BUFFER_COUNT);
 }
 
+// Shared by GetDispatchIndex and GetIndexWillBeDispatched so they pick the same slot
+UINT64 IFGFeature::NextDispatchFrame()
+{
+    if (_presentFrame > _lastDispatchedFrame && _presentFrame <= _frameCount)
+        return _presentFrame;
+
+    // Nothing dispatched since (re)activation: +1 would be frame 1, XeFG needs it to match the tagged frame id
+    if (_lastDispatchedFrame == 0)
+        return _frameCount;
+
+    auto frame = _lastDispatchedFrame + 1; // By default render next one
+
+    auto diff = _frameCount - _lastDispatchedFrame;
+    if (diff > Config::Instance()->FGAllowedFrameAhead.value_or_default())
+    {
+        auto index = GetIndex();
+
+        if (HasResource(FG_ResourceType::Depth, index) || HasResource(FG_ResourceType::Velocity, index) ||
+            HasResource(FG_ResourceType::UIColor, index) || HasResource(FG_ResourceType::HudlessColor, index))
+        {
+            frame = _frameCount; // Set dispatch frame as latest one
+        }
+    }
+
+    return frame;
+}
+
 bool IFGFeature::IsActive() { return _isActive || _waitingNewFrameData; }
+
+bool IFGFeature::IsGenerating() { return _isActive && !_waitingNewFrameData && !IsPaused(); }
+
+void IFGFeature::Disable()
+{
+    Deactivate();
+    _waitingNewFrameData = false;
+}
 
 bool IFGFeature::IsPaused() { return _targetFrame != 0 && _targetFrame >= _frameCount; }
 
@@ -193,8 +191,18 @@ void IFGFeature::SetFrameCount(UINT64 frameId)
     //    LOG_TRACE("Prevented setting frame count! Old: {}, New: {}", _frameCount, frameId);
     //}
 
+    // XeFG needs increasing frame ids, so it's only moved forward until its context is destroyed
+    if (frameId < _frameCount && State::Instance().activeFgOutput == FGOutput::XeFG && !_allowLowerFrameId)
+    {
+        LOG_TRACE("Prevented setting frame count! Old: {}, New: {}", _frameCount, frameId);
+        return;
+    }
+
+    _allowLowerFrameId = false;
     _frameCount = frameId;
 }
+
+void IFGFeature::SetPresentFrame(UINT64 frame) { _presentFrame = frame; }
 
 void IFGFeature::SetJitter(float x, float y, int index)
 {
@@ -322,8 +330,51 @@ void IFGFeature::SetResourceReady(FG_ResourceType type, int index)
     _resourceFrame[type] = _frameCount;
 }
 
-UINT IFGFeature::GetInterpolatedFrameCount() const { return _framesToInterpolate < 0 ? 1 : _framesToInterpolate; }
+UINT IFGFeature::GetInterpolatedFrameCount() const
+{
+    // Dynamic MFG's 1X: no frames generated while the output keeps its count
+    if (_generationOff)
+        return 0;
+
+    return _framesToInterpolate < 0 ? 1 : _framesToInterpolate;
+}
 
 int IFGFeature::GetMaxInterpolationCount() const { return _maxInterpolationCount; }
 
 bool IFGFeature::GetDMFGSupport() const { return _supportsDMFG; }
+
+void IFGFeature::FilloutReprojectionData(FilloutData& data, int fIndex)
+{
+    auto& input = InputCollection::getInstance();
+    auto previousIndex = (fIndex + BUFFER_COUNT - 1) % BUFFER_COUNT;
+
+    data.diffThreshold = 0.01f;
+    data.mouseDeltaSinceSim = input.readDeltaSinceSim(_frameCount);
+    data.mouseDeltaSimToSim = input.readSimsDelta(_frameCount);
+    data.lateLatch = Config::Instance()->ReprojectionLateLatch.value_or_default();
+    data.simStartMouse = input.readCumulativeAtSim(_frameCount);
+    data.screenWidth = (uint32_t) _interpolationWidth[fIndex];
+    data.screenHeight = (uint32_t) _interpolationHeight[fIndex];
+    data.invertedDepth = _constants.flags[FG_Flags::InvertedDepth];
+
+    data.cameraVFov = _cameraVFov[fIndex];
+    data.cameraAspectRatio = _cameraAspectRatio[fIndex];
+    std::memcpy(data.cameraUp, _cameraUp[fIndex], 3 * sizeof(float));
+    std::memcpy(data.cameraRight, _cameraRight[fIndex], 3 * sizeof(float));
+    std::memcpy(data.cameraForward, _cameraForward[fIndex], 3 * sizeof(float));
+    std::memcpy(data.cameraPrevForward, _cameraForward[previousIndex], 3 * sizeof(float));
+    std::memcpy(data.cameraPosition, _cameraPosition[fIndex], 3 * sizeof(float));
+    data.cameraNear = _cameraNear[fIndex];
+    data.cameraFar = _cameraFar[fIndex];
+
+    data.hasPrevCamera = _frameCount > 1;
+    std::memcpy(data.cameraPrevUp, _cameraUp[previousIndex], 3 * sizeof(float));
+    std::memcpy(data.cameraPrevRight, _cameraRight[previousIndex], 3 * sizeof(float));
+    std::memcpy(data.cameraPrevPosition, _cameraPosition[previousIndex], 3 * sizeof(float));
+
+    data.frameId = _frameCount;
+    data.reset = _reset[fIndex] != 0;
+
+    data.mvScaleX = _mvScaleX[fIndex];
+    data.mvScaleY = _mvScaleY[fIndex];
+}

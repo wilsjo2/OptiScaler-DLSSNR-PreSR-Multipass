@@ -1,10 +1,12 @@
 #include "pch.h"
 #include "FSR2_Dx11.h"
+#include "NVNGX_DLSS.h"
 
 #include "Util.h"
 #include "Config.h"
 #include "resource.h"
 #include "NVNGX_Parameter.h"
+#include <proxies/Nvngx_Proxy.h>
 
 #include <proxies/KernelBase_Proxy.h>
 
@@ -42,7 +44,9 @@ static std::unordered_map<FfxFsr2Context*, FfxFsr2ContextDescription> _initParam
 static std::unordered_map<FfxFsr2Context*, NVSDK_NGX_Parameter*> _nvParams;
 static std::unordered_map<FfxFsr2Context*, NVSDK_NGX_Handle*> _contexts;
 static ID3D11Device* _d3d11Device = nullptr;
-static bool _nvnxgInited = false;
+// Device this input initialised NGX with, cleared on destroy as a new device can get its address
+static std::atomic<ID3D11Device*> _nvngxDevice { nullptr };
+static bool _nvngxInited = false;
 static bool _skipCreate = false;
 static bool _skipDispatch = false;
 static bool _skipDestroy = false;
@@ -77,6 +81,8 @@ static bool CreateDLSSContext(FfxFsr2Context* handle, const FfxFsr2DispatchDescr
     if ((initParams->flags & FFX_FSR2_ENABLE_DISPLAY_RESOLUTION_MOTION_VECTORS) == 0)
         initFlags |= NVSDK_NGX_DLSS_Feature_Flags_MVLowRes;
 
+    State::Instance().dynamicResolution = (initParams->flags & FFX_FSR2_ENABLE_DYNAMIC_RESOLUTION) != 0;
+
     params->Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, initFlags);
 
     params->Set(NVSDK_NGX_Parameter_Width, pExecParams->renderSize.width);
@@ -86,7 +92,7 @@ static bool CreateDLSSContext(FfxFsr2Context* handle, const FfxFsr2DispatchDescr
 
     auto ratio = (float) initParams->displaySize.width / (float) pExecParams->renderSize.width;
 
-    if (ratio <= 3.0 && ratio > 2.0)
+    if (ratio > 2.0)
         params->Set(NVSDK_NGX_Parameter_PerfQualityValue, NVSDK_NGX_PerfQuality_Value_UltraPerformance);
     else if (ratio <= 2.0 && ratio > 1.7)
         params->Set(NVSDK_NGX_Parameter_PerfQualityValue, NVSDK_NGX_PerfQuality_Value_MaxPerf);
@@ -187,26 +193,24 @@ static FfxErrorCode ffxFsr2ContextCreate_Dx11(FfxFsr2Context* context, FfxFsr2Co
         }
     }
 
+    // Cached device was destroyed
+    if (_d3d11Device != nullptr && !state.IsD3D11Device(_d3d11Device))
+        _d3d11Device = nullptr;
+
     // check for d3d11 device
     // to prevent crashes when game is using custom interface and
     if (_d3d11Device == nullptr)
     {
         auto bDevice = (ID3D11Device*) contextDescription->device;
 
-        for (size_t i = 0; i < state.d3d11Devices.size(); i++)
-        {
-            if (state.d3d11Devices[i] == bDevice)
-            {
-                _d3d11Device = bDevice;
-                break;
-            }
-        }
+        if (state.IsD3D11Device(bDevice))
+            _d3d11Device = bDevice;
     }
 
     // if still no device use latest created one
     // Might fixed TLOU but FMF2 still crashes
-    if (_d3d11Device == nullptr && state.d3d11Devices.size() > 0)
-        _d3d11Device = state.d3d11Devices[state.d3d11Devices.size() - 1];
+    if (_d3d11Device == nullptr)
+        _d3d11Device = state.LastD3D11Device();
 
     if (_d3d11Device == nullptr)
     {
@@ -214,19 +218,21 @@ static FfxErrorCode ffxFsr2ContextCreate_Dx11(FfxFsr2Context* context, FfxFsr2Co
         return ccResult;
     }
 
-    if (!state.nvngxDx11Inited)
+    // Re-initialise NGX when the device this input initialised it with was replaced
+    if (!state.nvngxDx11Inited || (_nvngxInited && _nvngxDevice != _d3d11Device))
     {
         NVSDK_NGX_FeatureCommonInfo fcInfo {};
         auto exePath = Util::ExePath().remove_filename();
 
-        auto nvResult = NVSDK_NGX_D3D11_Init_with_ProjectID(
-            OPTI_GUID, state.NVNGX_Engine, OPTI_VERSION, exePath.c_str(), _d3d11Device, &fcInfo,
-            state.NVNGX_Version == 0 ? NVSDK_NGX_Version_API : state.NVNGX_Version);
+        auto nvResult =
+            NVNGXDx11InputInit(OPTI_GUID, state.NVNGX_Engine, OPTI_VERSION, exePath.c_str(), _d3d11Device, &fcInfo,
+                               state.NVNGX_Version == 0 ? NVSDK_NGX_Version_API : state.NVNGX_Version);
 
         if (nvResult != NVSDK_NGX_Result_Success)
             return FFX_ERROR_BACKEND_API_ERROR;
 
-        _nvnxgInited = true;
+        _nvngxDevice = _d3d11Device;
+        _nvngxInited = true;
     }
 
     NVSDK_NGX_Parameter* params = nullptr;
@@ -254,7 +260,7 @@ static FfxErrorCode ffxFsr2ContextDispatch_Dx11(FfxFsr2Context* context,
     LOG_DEBUG("");
 
     // Skip OptiScaler stuff
-    if (!Config::Instance()->UseFsr2Inputs.value_or_default())
+    if (!Config::Instance()->UseFsr2Inputs.value_or_default() || !_nvParams.contains(context))
     {
         _skipDispatch = true;
         LOG_DEBUG("UseFsr2Inputs not enabled, skipping");
@@ -267,8 +273,8 @@ static FfxErrorCode ffxFsr2ContextDispatch_Dx11(FfxFsr2Context* context,
         return FFX_ERROR_INVALID_ARGUMENT;
 
     // If not in contexts list create and add context
-    if (!_contexts.contains(context) && _initParams.contains(context) &&
-        !CreateDLSSContext(context, dispatchDescription))
+    if (!_contexts.contains(context) &&
+        (!_initParams.contains(context) || !CreateDLSSContext(context, dispatchDescription)))
         return FFX_ERROR_INVALID_ARGUMENT;
 
     NVSDK_NGX_Parameter* params = _nvParams[context];
@@ -325,8 +331,11 @@ static FfxErrorCode ffxFsr2ContextDestroy_Dx11(FfxFsr2Context* context)
         NVSDK_NGX_D3D11_ReleaseFeature(_contexts[context]);
 
     _contexts.erase(context);
-    if (auto params = _nvParams.extract(context); !params.empty() && params.mapped())
-        NVSDK_NGX_D3D11_DestroyParameters(params.mapped());
+    if (auto it = _nvParams.find(context); it != _nvParams.end())
+    {
+        TryDestroyNGXParameters(it->second, NVNGXProxy::D3D11_DestroyParameters());
+        _nvParams.erase(it);
+    }
     _initParams.erase(context);
 
     _skipDestroy = true;
@@ -387,6 +396,12 @@ static FfxErrorCode ffxFsr2GetRenderResolutionFromQualityMode_Dx11(uint32_t* ren
 
     LOG_WARN("Quality mode: {}, pOutRenderWidth or pOutRenderHeight is null!", (UINT) qualityMode);
     return FFX_ERROR_INVALID_ARGUMENT;
+}
+
+void FSR2Dx11DeviceDestroyed(IUnknown* device)
+{
+    ID3D11Device* expected = (ID3D11Device*) device;
+    _nvngxDevice.compare_exchange_strong(expected, nullptr);
 }
 
 void HookFSR2Dx11ExeInputs()
@@ -487,6 +502,7 @@ void HookFSR2Dx11ExeInputs()
     }
     else
     {
-        State::Instance().fsrHooks = o_ffxFsr2ContextCreate_Dx11 != nullptr;
+        if (o_ffxFsr2ContextCreate_Dx11 != nullptr)
+            State::Instance().fsrHooks = true;
     }
 }

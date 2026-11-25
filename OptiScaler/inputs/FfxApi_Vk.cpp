@@ -1,10 +1,12 @@
 #include "pch.h"
 #include "FfxApi_Vk.h"
+#include "NVNGX_DLSS.h"
 
 #include <Util.h>
 #include <Config.h>
 #include <resource.h>
 #include <NVNGX_Parameter.h>
+#include <proxies/Nvngx_Proxy.h>
 
 #include <proxies/FfxApi_Proxy.h>
 
@@ -13,14 +15,17 @@
 
 #include <nvsdk_ngx_vk.h>
 #include <nvsdk_ngx_helpers_vk.h>
+#include <misc/DeferredRelease.h>
 
 static std::unordered_map<ffxContext, ffxCreateContextDescUpscale> _initParams;
 static std::unordered_map<ffxContext, NVSDK_NGX_Parameter*> _nvParams;
 static std::unordered_map<ffxContext, NVSDK_NGX_Handle*> _contexts;
-static VkDevice _vkDevice = nullptr;
+static std::atomic<VkDevice> _vkDevice { nullptr };
 static VkPhysicalDevice _vkPhysicalDevice = nullptr;
 static PFN_vkGetDeviceProcAddr _vkDeviceProcAddress = nullptr;
-static bool _nvnxgInited = false;
+// Device this input initialised NGX with
+static std::atomic<VkDevice> _nvngxDevice { nullptr };
+static bool _nvngxInited = false;
 static float qualityRatios[] = { 1.0f, 1.5f, 1.7f, 2.0f, 3.0f };
 static size_t _contextCounter = 0x00001ee7;
 
@@ -250,6 +255,8 @@ static bool CreateDLSSContext(ffxContext handle, const ffxDispatchDescUpscale* p
     if ((initParams->flags & FFX_UPSCALE_ENABLE_DISPLAY_RESOLUTION_MOTION_VECTORS) == 0)
         initFlags |= NVSDK_NGX_DLSS_Feature_Flags_MVLowRes;
 
+    State::Instance().dynamicResolution = (initParams->flags & FFX_UPSCALE_ENABLE_DYNAMIC_RESOLUTION) != 0;
+
     params->Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, initFlags);
 
     params->Set(NVSDK_NGX_Parameter_Width, pExecParams->renderSize.width);
@@ -265,7 +272,7 @@ static bool CreateDLSSContext(ffxContext handle, const ffxDispatchDescUpscale* p
 
     LOG_INFO("renderWidth: {}, maxWidth: {}, ratio: {}", pExecParams->renderSize.width, width, ratio);
 
-    if (ratio <= 3.0 && ratio > 2.0)
+    if (ratio > 2.0)
         params->Set(NVSDK_NGX_Parameter_PerfQualityValue, NVSDK_NGX_PerfQuality_Value_UltraPerformance);
     else if (ratio <= 2.0 && ratio > 1.7)
         params->Set(NVSDK_NGX_Parameter_PerfQualityValue, NVSDK_NGX_PerfQuality_Value_MaxPerf);
@@ -372,8 +379,10 @@ ffxReturnCode_t ffxCreateContext_Vk(ffxContext* context, ffxCreateContextDescHea
             upscaleContext = true;
             createDesc = (ffxCreateContextDescUpscale*) header;
         }
-        else if (header->type == FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK)
+        else if (header->type == FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK ||
+                 header->type == FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK_V2)
         {
+            // Same layout for FFX SDK 1.x and 2.x
             auto backendDesc = (ffxCreateBackendVKDesc*) header;
             _vkDevice = backendDesc->vkDevice;
             _vkPhysicalDevice = backendDesc->vkPhysicalDevice;
@@ -386,7 +395,7 @@ ffxReturnCode_t ffxCreateContext_Vk(ffxContext* context, ffxCreateContextDescHea
 
     if (!upscaleContext || Config::Instance()->EnableHotSwapping.value_or_default())
     {
-        auto ffxApiResult = FfxApiProxy::VULKAN_CreateContext()(context, desc, memCb);
+        auto ffxApiResult = FfxApiProxy::VULKAN_CreateContext(context, desc, memCb);
 
         LOG_DEBUG("Vulkan_CreateContext result: {:X} ({}), context: {:X}", (UINT) ffxApiResult,
                   FfxApiProxy::ReturnCodeToString(ffxApiResult), (size_t) *context);
@@ -395,20 +404,22 @@ ffxReturnCode_t ffxCreateContext_Vk(ffxContext* context, ffxCreateContextDescHea
             return ffxApiResult;
     }
 
-    if (!State::Instance().nvngxVkInited)
+    // Re-initialise NGX when the device this input initialised it with was replaced
+    if (!State::Instance().nvngxVkInited || (_nvngxInited && _nvngxDevice.load() != _vkDevice.load()))
     {
         NVSDK_NGX_FeatureCommonInfo fcInfo {};
         auto exePath = Util::ExePath().remove_filename();
 
-        auto nvResult = NVSDK_NGX_VULKAN_Init_ProjectID_Ext(
-            OPTI_GUID, State::Instance().NVNGX_Engine, OPTI_VERSION, exePath.c_str(), State::Instance().VulkanInstance,
-            _vkPhysicalDevice, _vkDevice, vkGetInstanceProcAddr, _vkDeviceProcAddress, State::Instance().NVNGX_Version,
-            &fcInfo);
+        auto nvResult =
+            NVNGXVkInputInit(OPTI_GUID, State::Instance().NVNGX_Engine, OPTI_VERSION, exePath.c_str(),
+                             State::Instance().VulkanInstance, _vkPhysicalDevice, _vkDevice, vkGetInstanceProcAddr,
+                             _vkDeviceProcAddress, State::Instance().NVNGX_Version, &fcInfo);
 
         if (nvResult != NVSDK_NGX_Result_Success)
             return FFX_API_RETURN_ERROR_RUNTIME_ERROR;
 
-        _nvnxgInited = true;
+        _nvngxDevice = _vkDevice.load();
+        _nvngxInited = true;
     }
 
     if (!Config::Instance()->EnableHotSwapping.value_or_default())
@@ -451,8 +462,11 @@ ffxReturnCode_t ffxDestroyContext_Vk(ffxContext* context, const ffxAllocationCal
         NVSDK_NGX_VULKAN_ReleaseFeature(_contexts[*context]);
 
     _contexts.erase(*context);
-    if (auto params = _nvParams.extract(*context); !params.empty() && params.mapped())
-        NVSDK_NGX_VULKAN_DestroyParameters(params.mapped());
+    if (auto it = _nvParams.find(*context); it != _nvParams.end())
+    {
+        TryDestroyNGXParameters(it->second, NVNGXProxy::VULKAN_DestroyParameters());
+        _nvParams.erase(it);
+    }
     _initParams.erase(*context);
 
     if (upscalerContext && !Config::Instance()->EnableHotSwapping.value_or_default())
@@ -461,12 +475,12 @@ ffxReturnCode_t ffxDestroyContext_Vk(ffxContext* context, const ffxAllocationCal
     if (!State::Instance().isShuttingDown && upscalerContext &&
         Config::Instance()->EnableHotSwapping.value_or_default())
     {
-        auto cdResult = FfxApiProxy::VULKAN_DestroyContext()(context, memCb);
+        auto cdResult = FfxApiProxy::VULKAN_DestroyContext(context, memCb);
         LOG_INFO("result: {:X}", (UINT) cdResult);
         return FFX_API_RETURN_OK;
     }
 
-    auto cdResult = FfxApiProxy::VULKAN_DestroyContext()(context, memCb);
+    auto cdResult = FfxApiProxy::VULKAN_DestroyContext(context, memCb);
     LOG_INFO("result: {:X}", (UINT) cdResult);
     return cdResult;
 }
@@ -492,11 +506,11 @@ ffxReturnCode_t ffxConfigure_Vk(ffxContext* context, const ffxConfigureDescHeade
     if (desc->type > FFX_API_EFFECT_ID_FRAMEGENERATION && desc->type < 0x00050000u)
     {
         LOG_DEBUG("FG dispatch, redirecting to real FfxApi");
-        return FfxApiProxy::VULKAN_Configure()(context, desc);
+        return FfxApiProxy::VULKAN_Configure(context, desc);
     }
 
     if (Config::Instance()->EnableHotSwapping.value_or_default())
-        return FfxApiProxy::VULKAN_Configure()(context, desc);
+        return FfxApiProxy::VULKAN_Configure(context, desc);
 
     return FFX_API_RETURN_OK;
 }
@@ -514,7 +528,15 @@ ffxReturnCode_t ffxQuery_Vk(ffxContext* context, ffxQueryDescHeader* desc)
     if (type == FFXStructType::SwapchainVulkan || type == FFXStructType::FG)
     {
         LOG_DEBUG("FG dispatch, redirecting to real FfxApi");
-        return FfxApiProxy::VULKAN_Query()(context, desc);
+        return FfxApiProxy::VULKAN_Query(context, desc);
+    }
+
+    if (desc->type == FFX_API_QUERY_DESC_TYPE_GET_VERSIONS && type == FFXStructType::Upscaling &&
+        State::Instance().gameQuirks & GameQuirk::HideFsr4)
+    {
+        return FfxApiProxy::QueryUpscalerVersionsWithoutFsr4(reinterpret_cast<ffxQueryDescGetVersions*>(desc),
+                                                             [context](ffxQueryDescHeader* query)
+                                                             { return FfxApiProxy::VULKAN_Query(context, query); });
     }
 
     if (desc->type == FFX_API_QUERY_DESC_TYPE_UPSCALE_GETRENDERRESOLUTIONFROMQUALITYMODE)
@@ -575,14 +597,14 @@ ffxReturnCode_t ffxQuery_Vk(ffxContext* context, ffxQueryDescHeader* desc)
 
         if (type == FFXStructType::SwapchainVulkan || type == FFXStructType::FG)
         {
-            ver = FfxApiProxy::VersionVk();
+            ver = FfxApiProxy::VersionVk_FG();
 
             providerDesc->versionId =
                 0xF600'0000ui64 << 32u << 32 | (((ver.major << 22) | (ver.minor << 12) | ver.patch) & 0xFFFFFFFF);
         }
         else if (type == FFXStructType::Upscaling)
         {
-            ver = FfxApiProxy::VersionVk();
+            ver = FfxApiProxy::VersionVk_SR();
 
             providerDesc->versionId =
                 0xF5A5'CA1Eui64 << 32 | (((ver.major << 22) | (ver.minor << 12) | ver.patch) & 0xFFFFFFFF);
@@ -630,7 +652,7 @@ ffxReturnCode_t ffxQuery_Vk(ffxContext* context, ffxQueryDescHeader* desc)
     if (Config::Instance()->EnableHotSwapping.value_or_default() ||
         FfxApiProxy::GetType(desc->type) == FFXStructType::General)
     {
-        return FfxApiProxy::VULKAN_Query()(context, desc);
+        return FfxApiProxy::VULKAN_Query(context, desc);
     }
 
     return FFX_API_RETURN_OK;
@@ -647,18 +669,18 @@ ffxReturnCode_t ffxDispatch_Vk(ffxContext* context, ffxDispatchDescHeader* desc)
     if (type == FFXStructType::SwapchainVulkan || type == FFXStructType::FG)
     {
         LOG_DEBUG("FG dispatch, redirecting to real FfxApi");
-        return FfxApiProxy::VULKAN_Dispatch()(context, desc);
+        return FfxApiProxy::VULKAN_Dispatch(context, desc);
     }
 
     // Skip OptiScaler stuff
     if (Config::Instance()->EnableHotSwapping.value_or_default() &&
         !Config::Instance()->UseFfxInputs.value_or_default())
-        return FfxApiProxy::VULKAN_Dispatch()(context, desc);
+        return FfxApiProxy::VULKAN_Dispatch(context, desc);
 
     if (context == nullptr || !_initParams.contains(*context))
     {
         LOG_INFO("Not in _contexts");
-        return FfxApiProxy::VULKAN_Dispatch()(context, desc);
+        return FfxApiProxy::VULKAN_Dispatch(context, desc);
     }
 
     ffxApiHeader* header = desc;
@@ -680,13 +702,13 @@ ffxReturnCode_t ffxDispatch_Vk(ffxContext* context, ffxDispatchDescHeader* desc)
     if (dispatchDesc == nullptr)
     {
         LOG_INFO("dispatchDesc == nullptr, desc type: {:X}", desc->type);
-        return FfxApiProxy::VULKAN_Dispatch()(context, desc);
+        return FfxApiProxy::VULKAN_Dispatch(context, desc);
     }
 
     if (dispatchDesc->commandList == nullptr)
     {
         LOG_ERROR("dispatchDesc->commandList == nullptr !!!");
-        return FfxApiProxy::VULKAN_Dispatch()(context, desc);
+        return FfxApiProxy::VULKAN_Dispatch(context, desc);
     }
 
     // If not in contexts list create and add context
@@ -715,29 +737,29 @@ ffxReturnCode_t ffxDispatch_Vk(ffxContext* context, ffxDispatchDescHeader* desc)
 
     // Clear last frames image views
     LOG_DEBUG("Clear last frames image views");
-    if (depthImageView != nullptr)
-        vkDestroyImageView(_vkDevice, depthImageView, nullptr);
+    // The GPU can still be using them
+    std::array<VkImageView, 8> lastViews { depthImageView, expImageView,    biasImageView,   colorImageView,
+                                           mvImageView,    outputImageView, fsrReactiveView, fsrTransparencyView };
 
-    if (expImageView != nullptr)
-        vkDestroyImageView(_vkDevice, expImageView, nullptr);
+    DeferredRelease::Enqueue(
+        [device = _vkDevice.load(), lastViews]()
+        {
+            for (auto view : lastViews)
+            {
+                if (view != VK_NULL_HANDLE)
+                    vkDestroyImageView(device, view, nullptr);
+            }
+        },
+        (uint64_t) _vkDevice.load());
 
-    if (biasImageView != nullptr)
-        vkDestroyImageView(_vkDevice, biasImageView, nullptr);
-
-    if (colorImageView != nullptr)
-        vkDestroyImageView(_vkDevice, colorImageView, nullptr);
-
-    if (mvImageView != nullptr)
-        vkDestroyImageView(_vkDevice, mvImageView, nullptr);
-
-    if (outputImageView != nullptr)
-        vkDestroyImageView(_vkDevice, outputImageView, nullptr);
-
-    if (fsrReactiveView != nullptr)
-        vkDestroyImageView(_vkDevice, fsrReactiveView, nullptr);
-
-    if (fsrTransparencyView != nullptr)
-        vkDestroyImageView(_vkDevice, fsrTransparencyView, nullptr);
+    depthImageView = VK_NULL_HANDLE;
+    expImageView = VK_NULL_HANDLE;
+    biasImageView = VK_NULL_HANDLE;
+    colorImageView = VK_NULL_HANDLE;
+    mvImageView = VK_NULL_HANDLE;
+    outputImageView = VK_NULL_HANDLE;
+    fsrReactiveView = VK_NULL_HANDLE;
+    fsrTransparencyView = VK_NULL_HANDLE;
 
     // generate new ones with nvidia resource infos
     if (dispatchDesc->depth.resource == nullptr || !CreateIVandNVRes(dispatchDesc->depth, &depthImageView, &depthNVRes))
@@ -755,11 +777,19 @@ ffxReturnCode_t ffxDispatch_Vk(ffxContext* context, ffxDispatchDescHeader* desc)
     {
         params->Set(NVSDK_NGX_Parameter_ExposureTexture, &expNVRes);
     }
+    else
+    {
+        params->Set(NVSDK_NGX_Parameter_ExposureTexture, (void*) nullptr);
+    }
 
     if (dispatchDesc->reactive.resource != nullptr &&
         CreateIVandNVRes(dispatchDesc->reactive, &biasImageView, &biasNVRes))
     {
         params->Set(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, &biasNVRes);
+    }
+    else
+    {
+        params->Set(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, (void*) nullptr);
     }
 
     if (dispatchDesc->color.resource == nullptr || !CreateIVandNVRes(dispatchDesc->color, &colorImageView, &colorNVRes))
@@ -799,11 +829,19 @@ ffxReturnCode_t ffxDispatch_Vk(ffxContext* context, ffxDispatchDescHeader* desc)
     {
         params->Set("FSR.transparencyAndComposition", &fsrTransparencyNVRes);
     }
+    else
+    {
+        params->Set("FSR.transparencyAndComposition", (void*) nullptr);
+    }
 
     if (dispatchDesc->reactive.resource != nullptr &&
         CreateIVandNVRes(dispatchDesc->reactive, &fsrReactiveView, &fsrReactiveNVRes))
     {
         params->Set("FSR.reactive", &fsrReactiveNVRes);
+    }
+    else
+    {
+        params->Set("FSR.reactive", (void*) nullptr);
     }
 
     params->Set("FSR.cameraNear", dispatchDesc->cameraNear);
@@ -826,4 +864,13 @@ ffxReturnCode_t ffxDispatch_Vk(ffxContext* context, ffxDispatchDescHeader* desc)
 
     LOG_ERROR("evalResult: {:X}", (UINT) evalResult);
     return FFX_API_RETURN_ERROR_RUNTIME_ERROR;
+}
+
+void FfxApiVkDeviceDestroyed(VkDevice device)
+{
+    VkDevice expected = device;
+    _vkDevice.compare_exchange_strong(expected, nullptr);
+
+    expected = device;
+    _nvngxDevice.compare_exchange_strong(expected, nullptr);
 }

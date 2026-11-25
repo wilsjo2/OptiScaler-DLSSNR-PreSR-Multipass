@@ -119,6 +119,11 @@ bool FSR2FeatureVk212::InitFSR2(const NVSDK_NGX_Parameter* InParameters)
         if (ret != Fsr212::FFX_OK)
         {
             LOG_ERROR("ffxFsr2ContextCreate error: {0}", ResultToString212(ret));
+
+            // The destructor frees it only for inited features
+            free(_contextDesc.callbacks.scratchBuffer);
+            _contextDesc.callbacks.scratchBuffer = nullptr;
+
             return false;
         }
     }
@@ -182,7 +187,7 @@ bool FSR2FeatureVk212::EvaluateInternal(VkCommandBuffer InCmdBuffer, NVSDK_NGX_P
     InParameters->Get(NVSDK_NGX_Parameter_Jitter_Offset_X, &params.jitterOffset.x);
     InParameters->Get(NVSDK_NGX_Parameter_Jitter_Offset_Y, &params.jitterOffset.y);
 
-    unsigned int reset;
+    unsigned int reset = 0;
     InParameters->Get(NVSDK_NGX_Parameter_Reset, &reset);
     params.reset = (reset == 1);
 
@@ -192,8 +197,9 @@ bool FSR2FeatureVk212::EvaluateInternal(VkCommandBuffer InCmdBuffer, NVSDK_NGX_P
 
     params.commandList = Fsr212::ffxGetCommandListVK212(InCmdBuffer);
 
-    NVSDK_NGX_Resource_VK* paramColor;
+    NVSDK_NGX_Resource_VK* paramColor = nullptr;
     InParameters->Get(NVSDK_NGX_Parameter_Color, (void**) &paramColor);
+    paramColor = SubrectInput(InCmdBuffer, paramColor, SubrectSlot::Color);
 
     if (paramColor)
     {
@@ -211,8 +217,9 @@ bool FSR2FeatureVk212::EvaluateInternal(VkCommandBuffer InCmdBuffer, NVSDK_NGX_P
         return false;
     }
 
-    NVSDK_NGX_Resource_VK* paramVelocity;
+    NVSDK_NGX_Resource_VK* paramVelocity = nullptr;
     InParameters->Get(NVSDK_NGX_Parameter_MotionVectors, (void**) &paramVelocity);
+    paramVelocity = SubrectInput(InCmdBuffer, paramVelocity, SubrectSlot::MV);
 
     if (paramVelocity)
     {
@@ -230,7 +237,7 @@ bool FSR2FeatureVk212::EvaluateInternal(VkCommandBuffer InCmdBuffer, NVSDK_NGX_P
         return false;
     }
 
-    NVSDK_NGX_Resource_VK* paramOutput;
+    NVSDK_NGX_Resource_VK* paramOutput = nullptr;
     InParameters->Get(NVSDK_NGX_Parameter_Output, (void**) &paramOutput);
 
     if (paramOutput)
@@ -249,8 +256,9 @@ bool FSR2FeatureVk212::EvaluateInternal(VkCommandBuffer InCmdBuffer, NVSDK_NGX_P
         return false;
     }
 
-    NVSDK_NGX_Resource_VK* paramDepth;
+    NVSDK_NGX_Resource_VK* paramDepth = nullptr;
     InParameters->Get(NVSDK_NGX_Parameter_Depth, (void**) &paramDepth);
+    paramDepth = SubrectInput(InCmdBuffer, paramDepth, SubrectSlot::Depth);
 
     if (paramDepth)
     {
@@ -301,9 +309,15 @@ bool FSR2FeatureVk212::EvaluateInternal(VkCommandBuffer InCmdBuffer, NVSDK_NGX_P
 
     NVSDK_NGX_Resource_VK* paramReactiveMask = nullptr;
     InParameters->Get("FSR.reactive", (void**) &paramReactiveMask);
+    // The DLSS subrect base is for the bias mask, not for the FSR mask
+    paramReactiveMask = MaskInput(paramReactiveMask);
 
     NVSDK_NGX_Resource_VK* paramReactiveMask2 = nullptr;
     InParameters->Get(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, (void**) &paramReactiveMask2);
+
+    // Used only without the FSR mask
+    if (paramReactiveMask == nullptr)
+        paramReactiveMask2 = SubrectInput(InCmdBuffer, MaskInput(paramReactiveMask2), SubrectSlot::Mask);
 
     if (!Config::Instance()->DisableReactiveMask.value_or(paramReactiveMask == nullptr &&
                                                           paramReactiveMask2 == nullptr))

@@ -7,7 +7,6 @@
 
 #include <proxies/Ntdll_Proxy.h>
 #include <proxies/KernelBase_Proxy.h>
-#include <hooks/Xell_Hooks.h>
 
 #include <xell.h>
 #include <xell_d3d12.h>
@@ -146,16 +145,9 @@ class XeLLProxy
 
     inline static std::filesystem::path DllPath(HMODULE module)
     {
-        static std::filesystem::path dll;
-
-        if (dll.empty())
-        {
-            wchar_t dllPath[MAX_PATH];
-            GetModuleFileNameW(module, dllPath, MAX_PATH);
-            dll = std::filesystem::path(dllPath);
-        }
-
-        return dll;
+        wchar_t dllPath[MAX_PATH];
+        GetModuleFileNameW(module, dllPath, MAX_PATH);
+        return std::filesystem::path(dllPath);
     }
 
     static bool InitXeLLProper()
@@ -179,13 +171,6 @@ class XeLLProxy
 
             if (mainModule != nullptr)
             {
-                // We don't control which XeLL dll XeFG will pick
-                // Detouring GetModuleHandleExA seemingly isn't enough
-#ifndef LOW_LATENCY_INPUTS
-                if (_memoryDll && mainModule != _memoryDll)
-                    RedirectAllExports(_memoryDll, mainModule);
-#endif
-
                 break;
             }
         }
@@ -205,39 +190,109 @@ class XeLLProxy
 
     static bool InitXeLLInput()
     {
-#ifndef LOW_LATENCY_INPUTS
+        RedirectToInput(_dll);
+
+        if (_memoryDll != nullptr && _memoryDll != _dll)
+            RedirectToInput(_memoryDll);
+
         return true;
-#endif
-
-        // TODO: add hooks to redirect already loaded libxell into dllModule
-
-        HMODULE mainModule = nullptr;
-
-        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           (LPCSTR) InputXeLL::D3D12CreateContext, &mainModule);
-
-        if (_dll != nullptr)
-        {
-            // If our xell and the one in memory aren't the same then
-            // hook the in-memory functions with our xell inputs ones
-            if (_memoryDll && _dll != _memoryDll)
-                RedirectAllExports(_memoryDll, dllModule);
-        }
-
-        if (mainModule != nullptr)
-        {
-            wchar_t modulePath[MAX_PATH];
-            DWORD len = GetModuleFileNameW(mainModule, modulePath, MAX_PATH);
-            _dllPath = std::wstring(modulePath);
-
-            LOG_INFO("Loaded from {}", wstring_to_string(_dllPath));
-            return HookXeLL(mainModule);
-        }
-
-        return false;
     }
 
+    // Only called on the real XeLL by the low latency inputs
+    inline static PVOID _xellQueryInterface = nullptr;
+    inline static PVOID _xellGetContextParameterP = nullptr;
+    inline static PVOID _xellSetContextParameterP = nullptr;
+
+    struct RealEntry
+    {
+        const char* name;
+        PVOID* real;
+    };
+
+    // The real XeLL's calls that take a context, they go to OptiScaler's exports and these keep the trampolines
+    inline static RealEntry _realEntries[] = {
+        { "xellDestroyContext", (PVOID*) &_xellDestroyContext },
+        { "xellSetSleepMode", (PVOID*) &_xellSetSleepMode },
+        { "xellGetSleepMode", (PVOID*) &_xellGetSleepMode },
+        { "xellSleep", (PVOID*) &_xellSleep },
+        { "xellAddMarkerData", (PVOID*) &_xellAddMarkerData },
+        { "xellSetLoggingCallback", (PVOID*) &_xellSetLoggingCallback },
+        { "xellGetFramesReports", (PVOID*) &_xellGetFramesReports },
+        { "xellD3D12CreateContext", (PVOID*) &_xellD3D12CreateContext },
+        { "xellD3D12SetAppQueue", (PVOID*) &_xellD3D12SetAppQueue },
+        { "xellSetDisplayInfo", (PVOID*) &_xellSetDisplayInfo },
+        { "xellSetFgEnabled", (PVOID*) &_xellSetFgEnabled },
+        { "xellSetGeneratedFramesCount", (PVOID*) &_xellSetGeneratedFramesCount },
+        { "xellGetLastPresentStartFrameId", (PVOID*) &_xellGetLastPresentStartFrameId },
+        { "xellQueryInterface", &_xellQueryInterface },
+        { "xellGetContextParameterP", &_xellGetContextParameterP },
+        { "xellSetContextParameterP", &_xellSetContextParameterP },
+    };
+
+    inline static std::recursive_mutex _redirectMutex;
+    inline static std::vector<HMODULE> _redirected;
+
   public:
+    // Every libxell's calls go to OptiScaler's XeLL exports, also the ones from libraries that import it or got it
+    // before OptiScaler, so the game's XeLL is the low latency input. The real XeLL is OptiScaler's own libxell when
+    // it has one, as the game's might be too old for OptiScaler's XeFG, otherwise the first one. The real XeLL is
+    // reached through the trampolines, any other one goes to OptiScaler's entirely.
+    static void RedirectToInput(HMODULE module)
+    {
+        if (module == nullptr || module == dllModule)
+            return;
+
+        std::lock_guard lock(_redirectMutex);
+
+        if (std::ranges::find(_redirected, module) != _redirected.end())
+            return;
+
+        _redirected.push_back(module);
+
+        // No libxell OptiScaler could load, the game's is the only one
+        if (_dll == nullptr && !InitXeLL() && HookXeLL(module))
+            _dllPath = DllPath(module).wstring();
+
+        auto path = wstring_to_string(DllPath(module).wstring());
+
+        if (module != _dll)
+        {
+            RedirectAllExports(module, dllModule);
+            LOG_INFO("{} goes to the XeLL input", path);
+            return;
+        }
+
+        DetourTransactionBegin();
+        DetourUpdateThread(GetCurrentThread());
+
+        for (auto& entry : _realEntries)
+        {
+            auto ours = (PVOID) KernelBaseProxy::GetProcAddress_()(dllModule, entry.name);
+
+            if (*entry.real != nullptr && ours != nullptr)
+                DetourAttach(entry.real, ours);
+        }
+
+        auto result = DetourTransactionCommit();
+
+        if (result == NO_ERROR)
+            LOG_INFO("{} is the real XeLL, its calls go to the XeLL input", path);
+        else
+            LOG_ERROR("Couldn't redirect {} to the XeLL input: {}", path, result);
+    }
+
+    // The real XeLL's function, the trampoline when it was redirected
+    static PVOID RealFunction(const char* name)
+    {
+        for (auto& entry : _realEntries)
+        {
+            if (strcmp(entry.name, name) == 0)
+                return *entry.real;
+        }
+
+        return _dll != nullptr && _dll != dllModule ? (PVOID) KernelBaseProxy::GetProcAddress_()(_dll, name) : nullptr;
+    }
+
     static HMODULE Module() { return _dll; }
     static std::wstring Module_Path() { return _dllPath; }
 
@@ -287,6 +342,12 @@ class XeLLProxy
                 _xellGetLastPresentStartFrameId =
                     (PFN_xellGetLastPresentStartFrameId) KernelBaseProxy::GetProcAddress_()(
                         _dll, "xellGetLastPresentStartFrameId");
+
+                _xellQueryInterface = (PVOID) KernelBaseProxy::GetProcAddress_()(_dll, "xellQueryInterface");
+                _xellGetContextParameterP =
+                    (PVOID) KernelBaseProxy::GetProcAddress_()(_dll, "xellGetContextParameterP");
+                _xellSetContextParameterP =
+                    (PVOID) KernelBaseProxy::GetProcAddress_()(_dll, "xellSetContextParameterP");
             }
         }
 
@@ -319,7 +380,6 @@ class XeLLProxy
         return _xellVersion;
     }
 
-#ifdef LOW_LATENCY_INPUTS
     // We export / implement those functions
     static PFN_xellDestroyContext DestroyContext() { return xellDestroyContext; }
     static PFN_xellSetSleepMode SetSleepMode() { return xellSetSleepMode; }
@@ -349,15 +409,4 @@ class XeLLProxy
     {
         return _xellGetLastPresentStartFrameId;
     }
-#else
-    static PFN_xellDestroyContext DestroyContext() { return _xellDestroyContext; }
-    static PFN_xellSetSleepMode SetSleepMode() { return _xellSetSleepMode; }
-    static PFN_xellGetSleepMode GetSleepMode() { return _xellGetSleepMode; }
-    static PFN_xellSleep Sleep() { return _xellSleep; }
-    static PFN_xellAddMarkerData AddMarkerData() { return _xellAddMarkerData; }
-    static PFN_xellGetVersion GetVersion() { return _xellGetVersion; }
-    static PFN_xellSetLoggingCallback SetLoggingCallback() { return _xellSetLoggingCallback; }
-    static PFN_xellGetFramesReports GetFramesReports() { return _xellGetFramesReports; }
-    static PFN_xellD3D12CreateContext D3D12CreateContext() { return _xellD3D12CreateContext; }
-#endif
 };

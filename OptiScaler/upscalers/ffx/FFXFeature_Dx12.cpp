@@ -3,6 +3,7 @@
 #include <Util.h>
 #include <proxies/FfxApi_Proxy.h>
 #include "FFXFeature_Dx12.h"
+#include <misc/DeferredRelease.h>
 #include "MathUtils.h"
 
 using namespace OptiMath;
@@ -13,13 +14,27 @@ NVSDK_NGX_Parameter* FFXFeatureDx12::SetParameters(NVSDK_NGX_Parameter* InParame
     return InParameters;
 }
 
-FFXFeatureDx12::FFXFeatureDx12(unsigned int InHandleId, NVSDK_NGX_Parameter* InParameters)
+FFXFeatureDx12::FFXFeatureDx12(unsigned int InHandleId, NVSDK_NGX_Parameter* InParameters,
+                               const std::string& customUpscaler)
     : FFXFeature(InHandleId, InParameters), IFeature_Dx12(InHandleId, InParameters),
       IFeature(InHandleId, SetParameters(InParameters))
 {
+    // Regular dlls go first, so their name lookups don't find the custom dll
     FfxApiProxy::InitFfxDx12();
 
-    _moduleLoaded = FfxApiProxy::IsSRReady();
+    if (customUpscaler.empty())
+    {
+        _moduleLoaded = FfxApiProxy::IsSRReady();
+    }
+    else
+    {
+        _customUpscaler = FfxApiProxy::LoadCustomUpscalerDx12(customUpscaler);
+        _moduleLoaded = _customUpscaler != nullptr;
+
+        if (!_moduleLoaded)
+            ImGui::InsertNotification(
+                { ImGuiToastType::Error, 10000, "Can't load custom upscaler %s", customUpscaler.c_str() });
+    }
 
     if (_moduleLoaded)
         LOG_INFO("amd_fidelityfx_dx12.dll methods loaded!");
@@ -35,57 +50,6 @@ bool FFXFeatureDx12::InitInternal(ID3D12GraphicsCommandList* InCommandList, NVSD
         return true;
 
     return InitFFX(InParameters);
-}
-
-bool CreateBufferResourceWithSize(ID3D12Device* device, ID3D12Resource* source, D3D12_RESOURCE_STATES state,
-                                  ID3D12Resource** target, UINT width, UINT height)
-{
-    if (device == nullptr || source == nullptr)
-        return false;
-
-    auto inDesc = source->GetDesc();
-
-    if (*target != nullptr)
-    {
-        auto bufDesc = (*target)->GetDesc();
-
-        if (bufDesc.Width != width || bufDesc.Height != height || bufDesc.Format != inDesc.Format ||
-            bufDesc.Flags != inDesc.Flags)
-        {
-            (*target)->Release();
-            (*target) = nullptr;
-        }
-        else
-        {
-            return true;
-        }
-    }
-
-    D3D12_HEAP_PROPERTIES heapProperties;
-    D3D12_HEAP_FLAGS heapFlags;
-    HRESULT hr = source->GetHeapProperties(&heapProperties, &heapFlags);
-
-    if (hr != S_OK)
-    {
-        LOG_ERROR("GetHeapProperties result: {:X}", (UINT64) hr);
-        return false;
-    }
-
-    inDesc.Width = width;
-    inDesc.Height = height;
-
-    hr = device->CreateCommittedResource(&heapProperties, D3D12_HEAP_FLAG_NONE, &inDesc, state, nullptr,
-                                         IID_PPV_ARGS(target));
-
-    if (hr != S_OK)
-    {
-        LOG_ERROR("CreateCommittedResource result: {:X}", (UINT64) hr);
-        return false;
-    }
-
-    LOG_DEBUG("Created new one: {}x{}", inDesc.Width, inDesc.Height);
-
-    return true;
 }
 
 bool FFXFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters)
@@ -127,7 +91,7 @@ bool FFXFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList, 
 
     LOG_DEBUG("Jitter Offset: {0}x{1}", params.jitterOffset.x, params.jitterOffset.y);
 
-    unsigned int reset;
+    unsigned int reset = 0;
     InParameters->Get(NVSDK_NGX_Parameter_Reset, &reset);
     params.reset = (reset == 1);
 
@@ -137,7 +101,7 @@ bool FFXFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList, 
 
     params.commandList = InCommandList;
 
-    ID3D12Resource* paramColor;
+    ID3D12Resource* paramColor = nullptr;
     if (InParameters->Get(NVSDK_NGX_Parameter_Color, &paramColor) != NVSDK_NGX_Result_Success)
         InParameters->Get(NVSDK_NGX_Parameter_Color, (void**) &paramColor);
 
@@ -145,85 +109,20 @@ bool FFXFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList, 
     {
         LOG_DEBUG("Color exist..");
 
-        if (Config::Instance()->ColorResourceBarrier.has_value())
+        if (std::optional<int32_t> barrier = Config::Instance()->ColorResourceBarrier; barrier.has_value())
         {
-            ResourceBarrier(InCommandList, paramColor,
-                            (D3D12_RESOURCE_STATES) Config::Instance()->ColorResourceBarrier.value(),
-                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            ForwardBarrier(InCommandList, paramColor, (D3D12_RESOURCE_STATES) barrier.value(),
+                           D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
         else if (State::Instance().NVNGX_Engine == NVSDK_NGX_ENGINE_TYPE_UNREAL ||
-                 State::Instance().gameEngine == GameEngineType::Unreal ||
                  State::Instance().gameQuirks & GameQuirk::ForceUnrealEngine)
         {
             Config::Instance()->ColorResourceBarrier.set_volatile_value(D3D12_RESOURCE_STATE_RENDER_TARGET);
-            ResourceBarrier(InCommandList, paramColor, D3D12_RESOURCE_STATE_RENDER_TARGET,
-                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            ForwardBarrier(InCommandList, paramColor, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                           D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
 
-        // WAR for FSR 4's autoexposure shader reading entire underlying resource
-        // instead of what's specified by renderSize or color's FfxApiResourceDescription.
-        // Only linear has this issue
-        if (Version().major >= 4 && AutoExposure() && !Config::Instance()->FsrNonLinearPQ.value_or_default() &&
-            !Config::Instance()->FsrNonLinearSRGB.value_or_default() &&
-            !Config::Instance()->FsrNonLinearColorSpace.value_or_default())
-        {
-            D3D12_RESOURCE_DESC desc = paramColor->GetDesc();
-
-            const auto diffW = static_cast<int>(desc.Width) - static_cast<int>(params.renderSize.width);
-            const auto diffH = static_cast<int>(desc.Height) - static_cast<int>(params.renderSize.height);
-
-            // Seemingly it may only be happening when both axes are 1 pixel too big
-            // But let's be conservative here and also trigger when just one axis is too big
-            const bool validW = (diffW >= 0 && diffW <= 2);
-            const bool validH = (diffH >= 0 && diffH <= 2);
-            const bool isPadded = (diffW > 0 || diffH > 0);
-
-            if (validW && validH && isPadded)
-            {
-                static size_t count = 0;
-                const size_t index = count % 2;
-
-                CreateBufferResourceWithSize(Device, paramColor, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                                             &smallerColor[index], params.renderSize.width, params.renderSize.height);
-
-                if (smallerColor[index])
-                {
-                    ResourceBarrier(InCommandList, paramColor, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                                    D3D12_RESOURCE_STATE_COPY_SOURCE);
-
-                    ResourceBarrier(InCommandList, smallerColor[index], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                                    D3D12_RESOURCE_STATE_COPY_DEST);
-
-                    D3D12_BOX srcBox {};
-                    srcBox.left = 0;
-                    srcBox.top = 0;
-                    srcBox.right = params.renderSize.width;
-                    srcBox.bottom = params.renderSize.height;
-                    srcBox.front = 0;
-                    srcBox.back = 1;
-
-                    D3D12_TEXTURE_COPY_LOCATION dstLocation {};
-                    dstLocation.pResource = smallerColor[index];
-                    dstLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-                    dstLocation.SubresourceIndex = 0;
-
-                    D3D12_TEXTURE_COPY_LOCATION srcLocation {};
-                    srcLocation.pResource = paramColor;
-                    srcLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-                    srcLocation.SubresourceIndex = 0;
-
-                    InCommandList->CopyTextureRegion(&dstLocation, 0, 0, 0, &srcLocation, &srcBox);
-
-                    ResourceBarrier(InCommandList, smallerColor[index], D3D12_RESOURCE_STATE_COPY_DEST,
-                                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-
-                    paramColor = smallerColor[index];
-                }
-
-                count++;
-            }
-        }
-
+        paramColor = SubrectInput(InCommandList, paramColor, SubrectSlot::Color);
         params.color = ffxApiGetResourceDX12(paramColor, FFX_API_RESOURCE_STATE_COMPUTE_READ);
     }
     else
@@ -232,7 +131,7 @@ bool FFXFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList, 
         return false;
     }
 
-    ID3D12Resource* paramVelocity;
+    ID3D12Resource* paramVelocity = nullptr;
     if (InParameters->Get(NVSDK_NGX_Parameter_MotionVectors, &paramVelocity) != NVSDK_NGX_Result_Success)
         InParameters->Get(NVSDK_NGX_Parameter_MotionVectors, (void**) &paramVelocity);
 
@@ -240,21 +139,20 @@ bool FFXFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList, 
     {
         LOG_DEBUG("MotionVectors exist..");
 
-        if (Config::Instance()->MVResourceBarrier.has_value())
+        if (std::optional<int32_t> barrier = Config::Instance()->MVResourceBarrier; barrier.has_value())
         {
-            ResourceBarrier(InCommandList, paramVelocity,
-                            (D3D12_RESOURCE_STATES) Config::Instance()->MVResourceBarrier.value(),
-                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            ForwardBarrier(InCommandList, paramVelocity, (D3D12_RESOURCE_STATES) barrier.value(),
+                           D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
         else if (State::Instance().NVNGX_Engine == NVSDK_NGX_ENGINE_TYPE_UNREAL ||
-                 State::Instance().gameEngine == GameEngineType::Unreal ||
                  State::Instance().gameQuirks & GameQuirk::ForceUnrealEngine)
         {
             Config::Instance()->MVResourceBarrier.set_volatile_value(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            ResourceBarrier(InCommandList, paramVelocity, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            ForwardBarrier(InCommandList, paramVelocity, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                           D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
 
+        paramVelocity = SubrectInput(InCommandList, paramVelocity, SubrectSlot::MV);
         params.motionVectors = ffxApiGetResourceDX12(paramVelocity, FFX_API_RESOURCE_STATE_COMPUTE_READ);
     }
     else
@@ -263,18 +161,13 @@ bool FFXFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList, 
         return false;
     }
 
-    ID3D12Resource* paramOutput;
+    ID3D12Resource* paramOutput = nullptr;
     if (InParameters->Get(NVSDK_NGX_Parameter_Output, &paramOutput) != NVSDK_NGX_Result_Success)
         InParameters->Get(NVSDK_NGX_Parameter_Output, (void**) &paramOutput);
 
     if (paramOutput)
     {
         LOG_DEBUG("Output exist..");
-
-        if (Config::Instance()->OutputResourceBarrier.has_value())
-            ResourceBarrier(InCommandList, paramOutput,
-                            (D3D12_RESOURCE_STATES) Config::Instance()->OutputResourceBarrier.value(),
-                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
         params.output = ffxApiGetResourceDX12(paramOutput, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
     }
@@ -284,7 +177,7 @@ bool FFXFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList, 
         return false;
     }
 
-    ID3D12Resource* paramDepth;
+    ID3D12Resource* paramDepth = nullptr;
     if (InParameters->Get(NVSDK_NGX_Parameter_Depth, &paramDepth) != NVSDK_NGX_Result_Success)
         InParameters->Get(NVSDK_NGX_Parameter_Depth, (void**) &paramDepth);
 
@@ -292,11 +185,11 @@ bool FFXFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList, 
     {
         LOG_DEBUG("Depth exist..");
 
-        if (Config::Instance()->DepthResourceBarrier.has_value())
-            ResourceBarrier(InCommandList, paramDepth,
-                            (D3D12_RESOURCE_STATES) Config::Instance()->DepthResourceBarrier.value(),
-                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        if (std::optional<int32_t> barrier = Config::Instance()->DepthResourceBarrier; barrier.has_value())
+            ForwardBarrier(InCommandList, paramDepth, (D3D12_RESOURCE_STATES) barrier.value(),
+                           D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
+        paramDepth = SubrectInput(InCommandList, paramDepth, SubrectSlot::Depth);
         params.depth = ffxApiGetResourceDX12(paramDepth, FFX_API_RESOURCE_STATE_COMPUTE_READ);
     }
     else
@@ -304,7 +197,9 @@ bool FFXFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList, 
         LOG_ERROR("Depth not exist!!");
 
         if (LowResMV())
+        {
             return false;
+        }
     }
 
     ID3D12Resource* paramExp = nullptr;
@@ -321,10 +216,9 @@ bool FFXFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList, 
         {
             LOG_DEBUG("ExposureTexture exist..");
 
-            if (Config::Instance()->ExposureResourceBarrier.has_value())
-                ResourceBarrier(InCommandList, paramExp,
-                                (D3D12_RESOURCE_STATES) Config::Instance()->ExposureResourceBarrier.value(),
-                                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            if (std::optional<int32_t> barrier = Config::Instance()->ExposureResourceBarrier; barrier.has_value())
+                ForwardBarrier(InCommandList, paramExp, (D3D12_RESOURCE_STATES) barrier.value(),
+                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
             params.exposure = ffxApiGetResourceDX12(paramExp, FFX_API_RESOURCE_STATE_COMPUTE_READ);
         }
@@ -338,17 +232,21 @@ bool FFXFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList, 
     }
 
     ID3D12Resource* paramTransparency = nullptr;
-    if (InParameters->Get("FSR.transparencyAndComposition", &paramTransparency) == NVSDK_NGX_Result_Success)
+    if (InParameters->Get("FSR.transparencyAndComposition", &paramTransparency) != NVSDK_NGX_Result_Success)
         InParameters->Get("FSR.transparencyAndComposition", (void**) &paramTransparency);
 
     ID3D12Resource* paramReactiveMask = nullptr;
-    if (InParameters->Get("FSR.reactive", &paramReactiveMask) == NVSDK_NGX_Result_Success)
+    if (InParameters->Get("FSR.reactive", &paramReactiveMask) != NVSDK_NGX_Result_Success)
         InParameters->Get("FSR.reactive", (void**) &paramReactiveMask);
 
     ID3D12Resource* paramReactiveMask2 = nullptr;
     if (InParameters->Get(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, &paramReactiveMask2) !=
         NVSDK_NGX_Result_Success)
         InParameters->Get(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, (void**) &paramReactiveMask2);
+
+    // Integer masks can't be read as float, like the game didn't pass them
+    paramReactiveMask = MaskInput(paramReactiveMask);
+    paramReactiveMask2 = MaskInput(paramReactiveMask2);
 
     if (!Config::Instance()->DisableReactiveMask.value_or(paramReactiveMask == nullptr &&
                                                           paramReactiveMask2 == nullptr))
@@ -363,6 +261,11 @@ bool FFXFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList, 
         if (paramReactiveMask != nullptr)
         {
             LOG_DEBUG("Using FSR reactive mask..");
+
+            if (std::optional<int32_t> barrier = Config::Instance()->MaskResourceBarrier; barrier.has_value())
+                ForwardBarrier(InCommandList, paramReactiveMask, (D3D12_RESOURCE_STATES) barrier.value(),
+                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
             params.reactive = ffxApiGetResourceDX12(paramReactiveMask, FFX_API_RESOURCE_STATE_COMPUTE_READ);
         }
         else
@@ -372,10 +275,11 @@ bool FFXFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList, 
                 LOG_DEBUG("Input Bias mask exist..");
                 Config::Instance()->DisableReactiveMask.set_volatile_value(false);
 
-                if (Config::Instance()->MaskResourceBarrier.has_value())
-                    ResourceBarrier(InCommandList, paramReactiveMask2,
-                                    (D3D12_RESOURCE_STATES) Config::Instance()->MaskResourceBarrier.value(),
-                                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                if (std::optional<int32_t> barrier = Config::Instance()->MaskResourceBarrier; barrier.has_value())
+                    ForwardBarrier(InCommandList, paramReactiveMask2, (D3D12_RESOURCE_STATES) barrier.value(),
+                                   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+                paramReactiveMask2 = SubrectInput(InCommandList, paramReactiveMask2, SubrectSlot::Mask);
 
                 if (paramTransparency == nullptr && Config::Instance()->FsrUseMaskForTransparency.value_or_default())
                     params.transparencyAndComposition =
@@ -578,6 +482,19 @@ bool FFXFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList, 
         params.upscaleSize.height = TargetHeight();
     }
 
+    if (_customAutoExposure)
+    {
+        if (_autoExposure->Dispatch(InCommandList, paramColor, params.renderSize.width, params.renderSize.height,
+                                    params.preExposure, params.frameTimeDelta / 1000.0f, params.reset))
+        {
+            params.exposure = ffxApiGetResourceDX12(_autoExposure->Exposure(), FFX_API_RESOURCE_STATE_COMPUTE_READ);
+        }
+        else
+        {
+            LOG_ERROR("Auto exposure dispatch failed");
+        }
+    }
+
     LOG_DEBUG("Dispatch!!");
     auto result = FfxApiProxy::D3D12_Dispatch(&_context, &params.header);
 
@@ -593,31 +510,6 @@ bool FFXFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList, 
 
         return false;
     }
-
-    // restore resource states
-    if (paramColor && Config::Instance()->ColorResourceBarrier.has_value())
-        ResourceBarrier(InCommandList, paramColor, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                        (D3D12_RESOURCE_STATES) Config::Instance()->ColorResourceBarrier.value());
-
-    if (paramVelocity && Config::Instance()->MVResourceBarrier.has_value())
-        ResourceBarrier(InCommandList, paramVelocity, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                        (D3D12_RESOURCE_STATES) Config::Instance()->MVResourceBarrier.value());
-
-    if (paramOutput && Config::Instance()->OutputResourceBarrier.has_value())
-        ResourceBarrier(InCommandList, paramOutput, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                        (D3D12_RESOURCE_STATES) Config::Instance()->OutputResourceBarrier.value());
-
-    if (paramDepth && Config::Instance()->DepthResourceBarrier.has_value())
-        ResourceBarrier(InCommandList, paramDepth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                        (D3D12_RESOURCE_STATES) Config::Instance()->DepthResourceBarrier.value());
-
-    if (paramExp && Config::Instance()->ExposureResourceBarrier.has_value())
-        ResourceBarrier(InCommandList, paramExp, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                        (D3D12_RESOURCE_STATES) Config::Instance()->ExposureResourceBarrier.value());
-
-    if (paramReactiveMask && Config::Instance()->MaskResourceBarrier.has_value())
-        ResourceBarrier(InCommandList, paramReactiveMask, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                        (D3D12_RESOURCE_STATES) Config::Instance()->MaskResourceBarrier.value());
 
     _frameCount++;
 
@@ -643,7 +535,14 @@ bool FFXFeatureDx12::InitFFX(const NVSDK_NGX_Parameter* InParameters)
     {
         ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
 
-        QueryVersionsDx12(Device);
+        auto& versions =
+            _customUpscaler != nullptr ? _customUpscaler->versions : State::Instance().ffxUpscalerVersionsDx12;
+
+        if (!QueryVersionsDx12(Device, _customUpscaler) || versions.ids.empty())
+        {
+            LOG_ERROR("No FFX upscalers reported!");
+            return false;
+        }
 
         InitFlags();
 
@@ -653,22 +552,49 @@ bool FFXFeatureDx12::InitFFX(const NVSDK_NGX_Parameter* InParameters)
 
         _contextDesc.header.pNext = &backendDesc.header;
 
-        if (Config::Instance()->FfxUpscalerIndex.value_or_default() < 0 ||
-            Config::Instance()->FfxUpscalerIndex.value_or_default() >= State::Instance().ffxUpscalerVersionIds.size())
-            Config::Instance()->FfxUpscalerIndex.set_volatile_value(0);
+        auto& upscalerIndex =
+            Config::Instance()->FfxUpscalerIndexFor(_customUpscaler != nullptr ? _customUpscaler->name : "");
+
+        if (upscalerIndex.value_or_default() < 0 || upscalerIndex.value_or_default() >= versions.ids.size())
+            upscalerIndex.set_volatile_value(0);
+
+        parse_version(versions.names[upscalerIndex.value_or_default()]);
 
         ffxOverrideVersion override = { 0 };
         override.header.type = FFX_API_DESC_TYPE_OVERRIDE_VERSION;
-        override.versionId =
-            State::Instance().ffxUpscalerVersionIds[Config::Instance()->FfxUpscalerIndex.value_or_default()];
+        override.versionId = versions.ids[upscalerIndex.value_or_default()];
         backendDesc.header.pNext = &override.header;
+
+        // FSR4's own auto exposure reads the whole color texture instead of just renderSize. On UE the padding
+        // outside the view can hold garbage that makes it think the scene is very bright and black out the frame.
+        // Run our own auto exposure instead and hand FSR4 the result as a regular exposure texture.
+        // Only linear input is affected, color space changes recreate the feature.
+        _customAutoExposure = false;
+        auto& cfg = *Config::Instance();
+
+        if (Version().major >= 4 && AutoExposure() && !cfg.FsrNonLinearPQ.value_or_default() &&
+            !cfg.FsrNonLinearSRGB.value_or_default() && !cfg.FsrNonLinearColorSpace.value_or_default())
+        {
+            if (_autoExposure == nullptr)
+                _autoExposure = std::make_unique<AE_Dx12>("AutoExposure", Device);
+
+            if (_autoExposure->IsInit())
+            {
+                _customAutoExposure = true;
+                _contextDesc.flags &= ~FFX_UPSCALE_ENABLE_AUTO_EXPOSURE;
+                LOG_INFO("Using OptiScaler auto exposure instead of FSR's");
+            }
+        }
 
         LOG_DEBUG("_createContext!");
 
         {
             ScopedSkipHeapCapture skipHeapCapture {};
 
-            auto ret = FfxApiProxy::D3D12_CreateContext(&_context, &_contextDesc.header, NULL);
+            auto ret =
+                _customUpscaler != nullptr
+                    ? FfxApiProxy::D3D12_CreateContext(&_customUpscaler->module, &_context, &_contextDesc.header, NULL)
+                    : FfxApiProxy::D3D12_CreateContext(&_context, &_contextDesc.header, NULL);
 
             if (ret != FFX_API_RETURN_OK)
             {
@@ -677,10 +603,7 @@ bool FFXFeatureDx12::InitFFX(const NVSDK_NGX_Parameter* InParameters)
             }
         }
 
-        auto version =
-            State::Instance().ffxUpscalerVersionNames[Config::Instance()->FfxUpscalerIndex.value_or_default()];
         _name = "FSR";
-        parse_version(version);
     }
 
     SetInit(true);

@@ -18,7 +18,7 @@ function Extract($path, $signature) {
 }
 $accessors = @(
     (Extract 'OptiScaler/proxies/NVNGX_Proxy.h' 'static PFN_D3D12_Shutdown D3D12_Shutdown()'),
-    (Extract 'OptiScaler/proxies/NVNGX_Proxy.h' 'static PFN_D3D12_DriverShutdown1 D3D12_Shutdown1()')
+    (Extract 'OptiScaler/proxies/NVNGX_Proxy.h' 'static PFN_Nvngx_D3D12_Shutdown1 D3D12_Shutdown1()')
 )
 Set-Content -LiteralPath "$out/shutdown_accessors.inc" -Value ($accessors -join "`n")
 $code = @(

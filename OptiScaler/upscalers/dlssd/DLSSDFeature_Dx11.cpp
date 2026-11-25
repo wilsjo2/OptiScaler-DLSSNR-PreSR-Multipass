@@ -18,11 +18,11 @@ bool DLSSDFeatureDx11::InitInternal(ID3D11DeviceContext* InContext, NVSDK_NGX_Pa
 
     do
     {
-        if (!_dlssdInitedDx11)
+        if (!_dlssdInited)
         {
-            _dlssdInitedDx11 = NVNGXProxy::InitDx11(Device);
+            _dlssdInited = NVNGXProxy::InitDx11(Device);
 
-            if (!_dlssdInitedDx11)
+            if (!_dlssdInited)
                 return false;
 
             _moduleLoaded =
@@ -49,6 +49,7 @@ bool DLSSDFeatureDx11::InitInternal(ID3D11DeviceContext* InContext, NVSDK_NGX_Pa
             if (nvResult != NVSDK_NGX_Result_Success)
             {
                 LOG_ERROR("_CreateFeature result: {0:X}", (unsigned int) nvResult);
+                _p_dlssdHandle = nullptr; // NGX never issued it
                 break;
             }
             else

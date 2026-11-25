@@ -11,34 +11,14 @@
 
 using Microsoft::WRL::ComPtr;
 
-// Prioritize Nvidia cards that can run DLSS and are connected to a display
-// void sortGpus(std::vector<GpuInformation>& gpus)
-//{
-//    std::sort(gpus.begin(), gpus.end(),
-//              [](const GpuInformation& a, const GpuInformation& b)
-//              {
-//                  auto isPreferredNvidia = [](const GpuInformation& gpu)
-//                  {
-//                      bool isNvidia = (gpu.vendorId == VendorId::Nvidia);
-//                      return isNvidia && gpu.dlssCapable && !gpu.noDisplayConnected;
-//                  };
-//
-//                  bool aIsPreferred = isPreferredNvidia(a);
-//                  bool bIsPreferred = isPreferredNvidia(b);
-//
-//                  // If one is a preferred and the other isn't then the preferred one should be sorted first
-//                  if (aIsPreferred != bIsPreferred)
-//                  {
-//                      return aIsPreferred;
-//                  }
-//
-//                  if (a.softwareAdapter)
-//                      return false;
-//
-//                  // Fallback on VRAM amount
-//                  return a.dedicatedVramInBytes > b.dedicatedVramInBytes;
-//              });
-//}
+// DXVK reports revision 0, then any entry of the device id is used, they share the generation
+static std::optional<device_info::CardInfo> GetAmdCardInfo(const GpuInformation& gpuInfo)
+{
+    if (auto cardInfo = device_info::GetCardInfo({ gpuInfo.vendorId, gpuInfo.deviceId, gpuInfo.revisionId }))
+        return cardInfo;
+
+    return device_info::GetCardInfo({ gpuInfo.vendorId, gpuInfo.deviceId, device_info::kRevisionIdAny });
+}
 
 std::vector<GpuInformation> IdentifyGpu::checkGpuInfo()
 {
@@ -83,6 +63,15 @@ std::vector<GpuInformation> IdentifyGpu::checkGpuInfo()
 
         result = adapter->GetDesc1(&adapterDesc);
 
+        // DXGI can list the same adapter more than once
+        if (result == S_OK && std::ranges::any_of(localCachedInfo, [&adapterDesc](const GpuInformation& gpu)
+                                                  { return IsEqualLUID(gpu.luid, adapterDesc.AdapterLuid); }))
+        {
+            LOG_DEBUG("Skipping duplicate adapter: {}", adapterIndex);
+            adapterIndex++;
+            continue;
+        }
+
         if (result == S_OK)
         {
             GpuInformation gpuInfo;
@@ -99,7 +88,7 @@ std::vector<GpuInformation> IdentifyGpu::checkGpuInfo()
             ComPtr<IDXGIVkInteropAdapter> interopAdapter;
             if (SUCCEEDED(adapter->QueryInterface(__uuidof(IDXGIVkInteropAdapter), (void**) &interopAdapter)))
             {
-                gpuInfo.usesDxvk = true;
+                gpuInfo.dxgiIsDxvk = true;
 
                 // Try to get the real GPU info when using dxvk.conf to spoof
                 ComPtr<IDXGIVkInteropFactory> interopFactory;
@@ -152,11 +141,15 @@ std::vector<GpuInformation> IdentifyGpu::checkGpuInfo()
 
             if (gpuInfo.vendorId == VendorId::AMD)
             {
-                device_info::AdapterId adapterId { gpuInfo.vendorId, gpuInfo.deviceId, gpuInfo.revisionId };
-                auto cardInfo = device_info::GetCardInfo(adapterId);
+                auto cardInfo = GetAmdCardInfo(gpuInfo);
 
                 if (cardInfo.has_value())
                     gpuInfo.amdHwGeneration = cardInfo.value().generation;
+
+                auto asicInfoValid = queryAmdAsicInfo(gpuInfo.luid, gpuInfo.vendorId, gpuInfo.deviceId,
+                                                      gpuInfo.amdAsicFamily, gpuInfo.amdAsicRevision);
+                gpuInfo.fsr4DriverModel = getFsr4ModelForAsic(gpuInfo.amdAsicFamily, gpuInfo.amdAsicRevision,
+                                                              gpuInfo.deviceId, asicInfoValid);
             }
 
             Util::Luid luid(gpuInfo.luid.LowPart, gpuInfo.luid.HighPart);
@@ -200,6 +193,15 @@ std::vector<GpuInformation> IdentifyGpu::checkGpuInfo()
                 if (State::Instance().activeFgOutput == FGOutput::DLSSG)
                     State::Instance().activeFgNvngx = FGNvngxReplacement::None;
             }
+
+            // Pascal and Turing can run the INT8 models through DP4a
+            if (gpuInfo.nvidiaArchInfo.architecture_id >= NV_GPU_ARCHITECTURE_GP100 &&
+                gpuInfo.nvidiaArchInfo.architecture_id < NV_GPU_ARCHITECTURE_GA100 &&
+                !Config::Instance()->Fsr4GpuSupport.has_value())
+            {
+                gpuInfo.fsr4Support = FSR4Support::INT8Lite;
+                gpuInfo.fsr4ForcedSupport = true;
+            }
         }
     }
 
@@ -208,10 +210,6 @@ std::vector<GpuInformation> IdentifyGpu::checkGpuInfo()
 
 void IdentifyGpu::queryNvapi(GpuInformation& gpuInfo)
 {
-    // Prevent recursion: NvAPI_Initialize (dxvk-nvapi) internally creates a DXGI factory
-    // and enumerates adapters, which re-enters our hooked EnumAdapters/EnumAdapters1 and
-    // calls getAllGpus() again while is_fetching is already set (returns empty list).
-    // Skip the DXGI load checks so nvapi sees the real adapters, allowing init to succeed.
     ScopedSkipDxgiLoadChecks skipDxgiLoadChecks {};
 
     auto nvapiModule = NtdllProxy::LoadLibraryExW_Ldr(L"nvapi64.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -351,8 +349,7 @@ void IdentifyGpu::getHardwareAdapter(IDXGIFactory* InFactory, IDXGIAdapter** InA
 
 std::vector<GpuInformation> IdentifyGpu::getAllGpus()
 {
-    thread_local bool is_fetching = false;
-    if (is_fetching)
+    if (isFetching)
         return {};
 
     std::scoped_lock lock(mutex);
@@ -362,19 +359,39 @@ std::vector<GpuInformation> IdentifyGpu::getAllGpus()
         return cache;
     }
 
-    is_fetching = true;
+    isFetching = true;
     cache = checkGpuInfo();
-    is_fetching = false;
+    isFetching = false;
 
     // TODO: try to reactivate DxgiSpoofing if was auto on Nvidia cards without DLSS
     return cache;
 }
 
+bool IdentifyGpu::isDetecting() { return isFetching; }
+
 GpuInformation IdentifyGpu::getPrimaryGpu()
 {
+    // Detection creates DXGI factories, hooks of other mods can start nvapi, NGX or Streamline from inside it
+    if (isFetching)
+    {
+        GpuInformation gpu {};
+
+        if (nvidiaHint)
+        {
+            gpu.vendorId = VendorId::Nvidia;
+            gpu.dlssCapable = Config::Instance()->DLSSEnabled.value_or_default();
+        }
+
+        return gpu;
+    }
+
     auto allGpus = getAllGpus();
     return !allGpus.empty() ? allGpus.front() : GpuInformation {};
 }
+
+bool IdentifyGpu::gameUsesDxvk() { return State::Instance().api == DX11 && getPrimaryGpu().dxgiIsDxvk; }
+
+bool IdentifyGpu::gameUsesVkd3dProton() { return State::Instance().api == DX12 && getPrimaryGpu().d3d12IsVkd3dProton; }
 
 void IdentifyGpu::updateD3d12Capabilities(D3d12Proxy::PFN_D3D12CreateDevice o_D3D12CreateDevice)
 {
@@ -400,7 +417,7 @@ void IdentifyGpu::updateD3d12Capabilities(D3d12Proxy::PFN_D3D12CreateDevice o_D3
     struct D3d12Result
     {
         LUID luid;
-        bool usesVkd3dProton = false;
+        bool isVkd3dProton = false;
         FSR4Support fsr4Support = FSR4Support::None;     // Includes force
         FSR4Support realFsr4Support = FSR4Support::None; // Doesn't include force
         bool fsr4ForcedSupport = false;
@@ -409,8 +426,8 @@ void IdentifyGpu::updateD3d12Capabilities(D3d12Proxy::PFN_D3D12CreateDevice o_D3
 
     for (auto& gpuInfo : cache)
     {
-        if (gpuInfo.vendorId != VendorId::AMD && !gpuInfo.usesDxvk &&
-            Config::Instance()->Fsr4ForceModel.value_or_default() == FSR4Support::None)
+        if (gpuInfo.vendorId != VendorId::AMD && !gpuInfo.dxgiIsDxvk &&
+            Config::Instance()->Fsr4GpuSupport.value_or_default() == FSR4Support::None)
         {
             continue;
         }
@@ -418,8 +435,12 @@ void IdentifyGpu::updateD3d12Capabilities(D3d12Proxy::PFN_D3D12CreateDevice o_D3
         ScopedSkipSpoofingThread skipSpoofingThread {};
 
         ComPtr<IDXGIFactory4> factory;
-        if (FAILED(DxgiProxy::CreateDxgiFactory_()(__uuidof(factory), (IDXGIFactory**) factory.GetAddressOf())))
-            continue;
+        {
+            // DXVK's dxgi creates a Vulkan instance, which must not be taken for the game's
+            ScopedCreatingD3DDevice creatingFactory {};
+            if (FAILED(DxgiProxy::CreateDxgiFactory_()(__uuidof(factory), (IDXGIFactory**) factory.GetAddressOf())))
+                continue;
+        }
 
         ComPtr<IDXGIAdapter> adapter;
         if (SUCCEEDED(factory->EnumAdapterByLuid(gpuInfo.luid, IID_PPV_ARGS(&adapter))))
@@ -433,6 +454,7 @@ void IdentifyGpu::updateD3d12Capabilities(D3d12Proxy::PFN_D3D12CreateDevice o_D3
             // D3D12 device is needed to be able to query amdxc and check for vkd3d-proton
             ScopedCreatingD3DDevice scopedCreating {};
             ScopedSkipVulkanHooks skipVulkanHooks {};
+            std::scoped_lock probeLock(probeDeviceMutex); // Declared before localDevice, held until its last release
             ComPtr<ID3D12Device> localDevice;
             auto createResult = pD3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&localDevice));
 
@@ -443,19 +465,19 @@ void IdentifyGpu::updateD3d12Capabilities(D3d12Proxy::PFN_D3D12CreateDevice o_D3
 
                 ComPtr<ID3D12DXVKInteropDevice> vkd3dInterop;
                 if (localDevice && SUCCEEDED(localDevice->QueryInterface(IID_PPV_ARGS(&vkd3dInterop))))
-                    res.usesVkd3dProton = true;
+                    res.isVkd3dProton = true;
 
                 // Kinda questionable, may need to reconsider
-                if (Config::Instance()->Fsr4ForceModel.value_or_default() != FSR4Support::None)
+                if (Config::Instance()->Fsr4GpuSupport.value_or_default() != FSR4Support::None)
                 {
-                    res.fsr4Support = Config::Instance()->Fsr4ForceModel.value_or_default();
+                    res.fsr4Support = Config::Instance()->Fsr4GpuSupport.value_or_default();
                     res.fsr4ForcedSupport = true;
                 }
 
                 if (gpuInfo.vendorId == VendorId::AMD)
                 {
                     // Query vkd3d-proton for extensions it's using to look for the required one for FSR 4
-                    if (res.usesVkd3dProton)
+                    if (res.isVkd3dProton)
                     {
                         UINT extensionCount = 0;
 
@@ -500,6 +522,10 @@ void IdentifyGpu::updateD3d12Capabilities(D3d12Proxy::PFN_D3D12CreateDevice o_D3
 
                         if (moduleAmdxc64 != nullptr)
                         {
+                            // With Fsr4DoNotLoadAmdxc64 the D3D12 driver is what loads amdxc64,
+                            // the load hooks don't see it and leave it unhooked
+                            Amdxc64Hooks::Init();
+
                             AmdExtD3DCreateInterface =
                                 (PFN_AmdExtD3DCreateInterface) KernelBaseProxy::GetProcAddress_()(
                                     moduleAmdxc64, "AmdExtD3DCreateInterface");
@@ -507,7 +533,7 @@ void IdentifyGpu::updateD3d12Capabilities(D3d12Proxy::PFN_D3D12CreateDevice o_D3
 
                         // Query amdxc for a specific intrinsics support, FSR 4 checks more but hopefully this one
                         // is enough amdxc on Windows hates vkd3d-proton's device, on Linux it's fine
-                        if (localDevice && (State::Instance().isRunningOnLinux || !res.usesVkd3dProton) &&
+                        if (localDevice && (State::Instance().isRunningOnLinux || !res.isVkd3dProton) &&
                             AmdExtD3DCreateInterface)
                         {
                             IAmdExtD3DFactory* amdExtD3DFactory = nullptr;
@@ -545,23 +571,63 @@ void IdentifyGpu::updateD3d12Capabilities(D3d12Proxy::PFN_D3D12CreateDevice o_D3
                         }
                     }
 
-                    // Check for native INT8 support
+                    // Check for native INT8 support, the same way the driver picks the model
                     // Don't treat this as real because RDNA3 on Linux may be able to support FP8, useful for FG
-                    if (res.fsr4Support == FSR4Support::None)
+                    // Asic family reported on Linux is unreliable, device_info takes precedence there when it
+                    // knows the card
+                    bool preferDeviceInfo = State::Instance().isRunningOnLinux &&
+                                            gpuInfo.amdHwGeneration != device_info::HwGeneration::kUndefinedGeneration;
+
+                    if (res.fsr4Support == FSR4Support::None && !preferDeviceInfo &&
+                        IsFsr4Int8(gpuInfo.fsr4DriverModel))
                     {
-                        device_info::AdapterId adapterId(gpuInfo.vendorId, gpuInfo.deviceId, gpuInfo.revisionId);
-                        auto cardInfo = device_info::GetCardInfo(adapterId);
+                        res.fsr4Support = gpuInfo.fsr4DriverModel;
+                    }
+
+                    // Asic info not available or not trusted, fall back to device_info
+                    if (res.fsr4Support == FSR4Support::None && (preferDeviceInfo || gpuInfo.amdAsicFamily == 0))
+                    {
+                        auto cardInfo = GetAmdCardInfo(gpuInfo);
 
                         if (cardInfo.has_value())
                         {
-                            if (cardInfo.value().generation == device_info::HwGeneration::kGfx11)
-                                res.fsr4Support = FSR4Support::INT8;
+                            using device_info::AsicType;
+                            using device_info::HwGeneration;
 
-                            // if (cardInfo.value().generation == device_info::HwGeneration::kGfx11_5)
-                            //{
-                            //     res.fsr4Support = FSR4Support::INT8;
-                            //     res.fsr4ForcedSupport = true;
-                            // }
+                            auto& card = cardInfo.value();
+
+                            // Mirrors getFsr4ModelForAsic
+                            // RDNA4
+                            if (card.generation == HwGeneration::kGfx12)
+                            {
+                                res.fsr4Support = FSR4Support::FP8;
+                            }
+                            // Navi 3x (RDNA3) and Strix Halo
+                            else if ((card.generation == HwGeneration::kGfx11 && !card.is_apu) ||
+                                     card.asic_type == AsicType::kGfx11_5_1)
+                            {
+                                res.fsr4Support = FSR4Support::INT8;
+                            }
+                            // Navi 2x (RDNA2)
+                            else if (card.generation == HwGeneration::kGfx10_3 && !card.is_apu)
+                            {
+                                res.fsr4Support = FSR4Support::INT8_2;
+                            }
+                            // Van Gogh and Strix Point
+                            else if (card.asic_type == AsicType::kGfx10_3_3 || card.asic_type == AsicType::kGfx11_5_0)
+                            {
+                                res.fsr4Support = FSR4Support::INT8Lite;
+                            }
+                            // Phoenix, Hawk Point, Krackan, Navi 12 and Navi 14, not officially supported, we are
+                            // adding support for them. Navi 10 lacks hardware INT8
+                            else if ((card.generation == HwGeneration::kGfx11 && card.is_apu) ||
+                                     card.asic_type == AsicType::kGfx11_5_2 || card.asic_type == AsicType::kGfx10_1_1 ||
+                                     card.asic_type == AsicType::kGfx10_1_2 ||
+                                     card.asic_type == AsicType::kGfx10_1_2X ||
+                                     card.asic_type == AsicType::kGfx10_1_2Xt)
+                            {
+                                res.fsr4Support = FSR4Support::INT8Lite;
+                            }
                         }
                     }
 
@@ -585,7 +651,7 @@ void IdentifyGpu::updateD3d12Capabilities(D3d12Proxy::PFN_D3D12CreateDevice o_D3
             {
                 if (IsEqualLUID(gpuInfo.luid, res.luid))
                 {
-                    gpuInfo.usesVkd3dProton = res.usesVkd3dProton;
+                    gpuInfo.d3d12IsVkd3dProton = res.isVkd3dProton;
                     gpuInfo.fsr4Support = res.fsr4Support;
                     gpuInfo.realFsr4Support = res.realFsr4Support;
                     gpuInfo.fsr4ForcedSupport = res.fsr4ForcedSupport;
@@ -606,7 +672,7 @@ void IdentifyGpu::updateD3d12Capabilities(D3d12Proxy::PFN_D3D12CreateDevice o_D3
                 primaryGpu.fsr4Support = FSR4Support::INT8;
                 primaryGpu.fsr4ForcedSupport = true;
 
-                Config::Instance()->Fsr4ForceModel = FSR4Support::INT8;
+                Config::Instance()->Fsr4GpuSupport = FSR4Support::INT8;
             }
         }
     }
@@ -625,14 +691,23 @@ void IdentifyGpu::updateD3d12Capabilities(D3d12Proxy::PFN_D3D12CreateDevice o_D3
             fsr4Support = "fp8";
         else if (gpu.fsr4Support == FSR4Support::INT8)
             fsr4Support = "int8";
+        else if (gpu.fsr4Support == FSR4Support::INT8_2)
+            fsr4Support = "int8-2";
+        else if (gpu.fsr4Support == FSR4Support::INT8Lite)
+            fsr4Support = "int8 lite";
 
         if (gpu.fsr4ForcedSupport)
             fsr4Support += " (forced)";
 
+        if (gpu.amdAsicFamily != 0)
+            fsr4Support += std::format(", asic family: {}, revision: {}, driver model: {}", gpu.amdAsicFamily,
+                                       gpu.amdAsicRevision, magic_enum::enum_name(gpu.fsr4DriverModel));
+
         gpus += std::format("{}{}\n", indent, gpu.name);
         gpus += std::format("{}    vendorId: {:X}, deviceId: {:X}, VRAM: {}MB\n", indent, (uint32_t) gpu.vendorId,
                             gpu.deviceId, gpu.dedicatedVramInBytes / (1024 * 1024));
-        gpus += std::format("{}    dxvk: {}, vkd3d-proton: {}\n", indent, gpu.usesDxvk, gpu.usesVkd3dProton);
+        gpus += std::format("{}    dxgi is dxvk: {}, d3d12 is vkd3d-proton: {}\n", indent, gpu.dxgiIsDxvk,
+                            gpu.d3d12IsVkd3dProton);
         gpus += std::format("{}    Upscaler support - fsr4: {}, dlss: {}\n", indent, fsr4Support, gpu.dlssCapable);
     }
 
@@ -656,7 +731,7 @@ void IdentifyGpu::updateD3d12Capabilities(D3d12Proxy::PFN_D3D12CreateDevice o_D3
     // This means that the user didn't want to force support but we decided that we want to force it
     // We need spoofing on but if it's off then this will be too late for most cases to enable it
     // But if we only force it for AMD GPUs then that's fine
-    if (Config::Instance()->Fsr4ForceModel.value_or_default() == FSR4Support::None && primaryGpu.fsr4ForcedSupport)
+    if (Config::Instance()->Fsr4GpuSupport.value_or_default() == FSR4Support::None && primaryGpu.fsr4ForcedSupport)
     {
         //// We need spoofing hooks for FFX but want to avoid spoofing for the rest of the game
         // if (!Config::Instance()->DxgiSpoofing.value_or_default())
@@ -669,17 +744,190 @@ void IdentifyGpu::updateD3d12Capabilities(D3d12Proxy::PFN_D3D12CreateDevice o_D3
     }
 }
 
-void IdentifyGpu::updateInt8Support(std::optional<bool>& sdkSupportsInt8, std::optional<bool>& amdxcffx64SupportsInt8)
+void IdentifyGpu::updateInt8Support(bool sdkSupportsInt8, bool driverSupportsInt8)
 {
-    if (amdxcffx64SupportsInt8 && !amdxcffx64SupportsInt8.value() && sdkSupportsInt8 && !sdkSupportsInt8.value())
-    {
-        LOG_DEBUG("Neither driver nor the sdk supports FSR 4 Int 8, disabling");
+    if (sdkSupportsInt8 || driverSupportsInt8)
+        return;
 
-        std::scoped_lock lock(mutex);
-        for (auto& gpuInfo : cache)
+    std::scoped_lock lock(mutex);
+    for (auto& gpuInfo : cache)
+    {
+        if (!IsFsr4Int8(gpuInfo.fsr4Support))
+            continue;
+
+        LOG_DEBUG("Neither driver nor the sdk supports FSR 4 Int 8, disabling FSR 4 for {}", gpuInfo.name);
+        gpuInfo.fsr4Support = FSR4Support::None;
+        gpuInfo.fsr4ForcedSupport = false;
+    }
+}
+
+NTSTATUS IdentifyGpu::queryAdapterInfo(LUID luid, KMTQUERYADAPTERINFOTYPE type, void* data, UINT size)
+{
+    constexpr NTSTATUS statusUnsuccessful = 0xC0000001;
+
+    auto gdi32 = KernelBaseProxy::GetModuleHandleW_()(L"gdi32.dll");
+
+    if (gdi32 == nullptr)
+        gdi32 = NtdllProxy::LoadLibraryExW_Ldr(L"gdi32.dll", NULL, 0);
+
+    if (gdi32 == nullptr)
+        return statusUnsuccessful;
+
+    auto openAdapter = reinterpret_cast<decltype(&D3DKMTOpenAdapterFromLuid)>(
+        KernelBaseProxy::GetProcAddress_()(gdi32, "D3DKMTOpenAdapterFromLuid"));
+    auto queryInfo = reinterpret_cast<decltype(&D3DKMTQueryAdapterInfo)>(
+        KernelBaseProxy::GetProcAddress_()(gdi32, "D3DKMTQueryAdapterInfo"));
+    auto closeAdapter = reinterpret_cast<decltype(&D3DKMTCloseAdapter)>(
+        KernelBaseProxy::GetProcAddress_()(gdi32, "D3DKMTCloseAdapter"));
+
+    if (openAdapter == nullptr || queryInfo == nullptr || closeAdapter == nullptr)
+        return statusUnsuccessful;
+
+    D3DKMT_OPENADAPTERFROMLUID openData {};
+    openData.AdapterLuid = luid;
+
+    if (openAdapter(&openData) != 0)
+        return statusUnsuccessful;
+
+    D3DKMT_QUERYADAPTERINFO query {};
+    query.hAdapter = openData.hAdapter;
+    query.Type = type;
+    query.pPrivateDriverData = data;
+    query.PrivateDriverDataSize = size;
+
+    const auto status = queryInfo(&query);
+
+    D3DKMT_CLOSEADAPTER closeData {};
+    closeData.hAdapter = openData.hAdapter;
+    closeAdapter(&closeData);
+
+    return status;
+}
+
+bool IdentifyGpu::queryAmdAsicInfo(LUID luid, uint32_t vendorId, uint32_t deviceId, uint32_t& family,
+                                   uint32_t& revision)
+{
+    family = 0;
+    revision = 0;
+
+    // AMD private driver data, the driver dlls query it the same way
+    constexpr NTSTATUS statusBufferTooSmall = 0xC0000023;
+    constexpr UINT singleSize = 608;
+    constexpr size_t familyIndex = 12;
+    constexpr size_t revisionIndex = 13;
+
+    // Newer format with multiple entries, used when the single one doesn't fit
+    constexpr size_t multiCountOffset = 0x8;
+    constexpr size_t multiVendorIdsOffset = 0xC;  // uint16_t[4]
+    constexpr size_t multiDeviceIdsOffset = 0x14; // uint16_t[4]
+    constexpr size_t multiEntrySize = 0x3A00;
+    constexpr size_t multiFamilyOffset = 0x1364;
+    constexpr size_t multiRevisionOffset = 0x1368;
+    constexpr UINT multiHeaderSize = 0x960;
+    constexpr uint32_t multiMaxEntries = 4;
+
+    std::vector<uint8_t> buffer(singleSize);
+
+    auto query = [&]
+    { return queryAdapterInfo(luid, KMTQAITYPE_UMDRIVERPRIVATE, buffer.data(), static_cast<UINT>(buffer.size())); };
+    auto read32 = [&](size_t offset) { return *reinterpret_cast<uint32_t*>(buffer.data() + offset); };
+    auto read16 = [&](size_t offset) { return *reinterpret_cast<uint16_t*>(buffer.data() + offset); };
+
+    auto status = query();
+
+    if (status == statusBufferTooSmall)
+    {
+        // First query gets the entry count
+        buffer.assign(multiHeaderSize + multiEntrySize, 0);
+        status = query();
+
+        auto count = std::min(read32(multiCountOffset), multiMaxEntries);
+
+        if (count > 1)
         {
-            gpuInfo.fsr4Support = FSR4Support::None;
-            gpuInfo.fsr4ForcedSupport = false;
+            buffer.assign(multiHeaderSize + multiEntrySize * count, 0);
+            status = query();
+        }
+
+        if (status >= 0)
+        {
+            for (uint32_t i = 0; i < count; i++)
+            {
+                if (read16(multiVendorIdsOffset + i * 2) == static_cast<uint16_t>(vendorId) &&
+                    read16(multiDeviceIdsOffset + i * 2) == static_cast<uint16_t>(deviceId))
+                {
+                    family = read32(i * multiEntrySize + multiFamilyOffset);
+                    revision = read32(i * multiEntrySize + multiRevisionOffset);
+                    break;
+                }
+            }
         }
     }
+    else if (status >= 0)
+    {
+        family = read32(familyIndex * sizeof(uint32_t));
+        revision = read32(revisionIndex * sizeof(uint32_t));
+    }
+
+    return family != 0;
+}
+
+FSR4Support IdentifyGpu::getFsr4ModelForAsic(uint32_t family, uint32_t revision, uint32_t deviceId, bool asicInfoValid)
+{
+    // Family ids and revision ranges (min <= revision < max) from amdgpu_asic_addr.h
+    constexpr uint32_t familyNv = 143;  // Navi 1x/2x
+    constexpr uint32_t familyVgh = 144; // Van Gogh
+    constexpr uint32_t familyNv3 = 145; // Navi 3x
+    constexpr uint32_t familyPhx = 148; // Phoenix / Hawk Point
+    constexpr uint32_t familyStx = 150; // Strix
+    constexpr uint32_t familyNv4 = 152; // Navi 4x
+
+    struct Asic
+    {
+        uint32_t family, min, max;
+    };
+
+    constexpr Asic navi12 { familyNv, 0x0A, 0x14 };
+    constexpr Asic navi14 { familyNv, 0x14, 0x28 };
+    constexpr Asic navi21 { familyNv, 0x28, 0x32 };
+    constexpr Asic navi22 { familyNv, 0x32, 0x3C };
+    constexpr Asic navi23 { familyNv, 0x3C, 0x46 };
+    constexpr Asic navi24 { familyNv, 0x46, 0x50 };
+    constexpr Asic vanGogh { familyVgh, 0x01, 0x80 }; // Driver checks a narrower range than the header's 0x01-0xFF
+    constexpr Asic navi31 { familyNv3, 0x01, 0x10 };
+    constexpr Asic navi33 { familyNv3, 0x10, 0x20 };
+    constexpr Asic navi32 { familyNv3, 0x20, 0xFF };
+    constexpr Asic phoenix1 { familyPhx, 0x01, 0x80 };
+    constexpr Asic phoenix2 { familyPhx, 0x80, 0xC0 };
+    constexpr Asic hawkPoint1 { familyPhx, 0xC0, 0xF0 };
+    constexpr Asic hawkPoint2 { familyPhx, 0xF0, 0xFF };
+    constexpr Asic strix1 { familyStx, 0x01, 0x40 };
+    constexpr Asic krackan1 { familyStx, 0x40, 0x50 };
+    constexpr Asic strixHalo { familyStx, 0xC0, 0xD0 };
+
+    auto is = [&](const Asic& asic) { return family == asic.family && revision >= asic.min && revision < asic.max; };
+
+    // Checked in the same order as the driver
+    // GFX12 (RDNA4)
+    if (family == familyNv4)
+        return FSR4Support::FP8;
+
+    // Navi 3x (RDNA3) or Strix Halo
+    // Driver also falls back to it for device 0x7481 when it can't get the asic info
+    if (is(navi31) || is(navi32) || is(navi33) || is(strixHalo) || (!asicInfoValid && deviceId == 0x7481))
+        return FSR4Support::INT8;
+
+    // Navi 2x (RDNA2)
+    if (is(navi21) || is(navi22) || is(navi23) || is(navi24))
+        return FSR4Support::INT8_2;
+
+    if (is(strix1) || is(vanGogh))
+        return FSR4Support::INT8Lite;
+
+    // Not officially supported, we are adding support for them
+    // Navi 10 is left out as it lacks hardware INT8
+    if (is(phoenix1) || is(phoenix2) || is(hawkPoint1) || is(hawkPoint2) || is(krackan1) || is(navi12) || is(navi14))
+        return FSR4Support::INT8Lite;
+
+    return FSR4Support::None;
 }

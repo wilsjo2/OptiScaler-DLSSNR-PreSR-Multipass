@@ -9,6 +9,7 @@ class RCAS_Vk : public Shader_Vk, public RCAS_Common
     VkBuffer _constantBufferDA = VK_NULL_HANDLE;
     VkDeviceMemory _constantBufferMemoryDA = VK_NULL_HANDLE;
     void* _mappedConstantBufferDA = nullptr;
+    VkDeviceSize _constantStrideDA = 0;
 
     VkDescriptorPool _descriptorPoolDA = VK_NULL_HANDLE;
     std::vector<VkDescriptorSet> _descriptorSetsDA;
@@ -19,13 +20,27 @@ class RCAS_Vk : public Shader_Vk, public RCAS_Common
     VkPipeline _pipelineDA = VK_NULL_HANDLE;
     VkPipeline _pipelineDASDA = VK_NULL_HANDLE;
 
-    void UpdateDescriptorSet(VkCommandBuffer cmdList, int setIndex, VkImageView inputView, VkImageView motionView,
-                             VkImageView outputView);
-    void UpdateDescriptorSetDA(VkDescriptorSet descriptorSet, VkBuffer constantBuffer, VkImageView inputView,
+    // RCAS is used when the BaBa Neural / OptiSharpen pipeline can't be created
+    // Uses the same resources as the plain RCAS. OptiSharpen has one per variant, created when first used.
+    VkPipeline _pipelineBaba = VK_NULL_HANDLE;
+    std::array<VkPipeline, (size_t) OptiVariant::Count> _pipelineOpti {};
+    std::array<bool, (size_t) OptiVariant::Count> _optiPipelineFailed {};
+    bool _neuralFallbackLogged = false;
+
+    bool EnsureOptiPipeline(OptiVariant InVariant);
+
+    void UpdateDescriptorSet(VkDescriptorBufferInfo bufferInfo, int setIndex, VkImageView inputView,
+                             VkImageView motionView, VkImageView outputView);
+    void UpdateDescriptorSetDA(VkDescriptorSet descriptorSet, VkDescriptorBufferInfo bufferInfo, VkImageView inputView,
                                VkImageView motionView, VkImageView depthView, VkImageView outputView);
 
     bool DispatchRCAS(VkCommandBuffer InCmdList, RcasConstants InConstants, const VkImageInfo& InResourceInfo,
                       const VkImageInfo& InMotionVectorsInfo, const VkImageInfo& OutResourceInfo);
+
+    // BaBa Neural or OptiSharpen, same bindings and constants. InVariant only matters for OptiSharpen.
+    bool DispatchNeural(SharpenShader InShader, OptiVariant InVariant, VkCommandBuffer InCmdList,
+                        RcasConstants InConstants, const VkImageInfo& InResourceInfo,
+                        const VkImageInfo& InMotionVectorsInfo, const VkImageInfo& OutResourceInfo);
 
     // Merged Dispatch for DA and DASDA
     bool DispatchDepthAdaptive(VkCommandBuffer InCmdList, RcasConstants InConstants, const VkImageInfo& InResourceInfo,

@@ -29,12 +29,14 @@ class DxgiProxy
         {
             _dll = GetModuleHandle(L"dxgi.dll");
 
-            if (_dll == dllModule)
+            const bool isSelf = _dll == dllModule;
+            if (isSelf)
                 _dll = originalModule;
 
+            // As dxgi.dll the default search order would find OptiScaler itself
             if (_dll == nullptr)
             {
-                _dll = NtdllProxy::LoadLibraryExW_Ldr(L"dxgi.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+                _dll = NtdllProxy::LoadLibraryExW_Ldr(L"dxgi.dll", NULL, isSelf ? LOAD_LIBRARY_SEARCH_SYSTEM32 : 0);
             }
         }
         else
@@ -99,7 +101,10 @@ class DxgiProxy
             return nullptr;
         }
 
-        //_CreateDxgiFactory = addr;
+        // As the proxy dll we hooked our own export, its trampoline would call back into the proxy
+        if (HookModule() == _dll)
+            _CreateDxgiFactory = addr;
+
         return addr;
     }
 
@@ -117,7 +122,10 @@ class DxgiProxy
             return nullptr;
         }
 
-        //_CreateDxgiFactory1 = addr;
+        // As the proxy dll we hooked our own export, its trampoline would call back into the proxy
+        if (HookModule() == _dll)
+            _CreateDxgiFactory1 = addr;
+
         return addr;
     }
 
@@ -135,7 +143,10 @@ class DxgiProxy
             return nullptr;
         }
 
-        //_CreateDxgiFactory2 = addr;
+        // As the proxy dll we hooked our own export, its trampoline would call back into the proxy
+        if (HookModule() == _dll)
+            _CreateDxgiFactory2 = addr;
+
         return addr;
     }
 
@@ -153,7 +164,10 @@ class DxgiProxy
             return nullptr;
         }
 
-        //_DeclareAdepterRemovalSupport = addr;
+        // As the proxy dll we hooked our own export, its trampoline would call back into the proxy
+        if (HookModule() == _dll)
+            _DeclareAdepterRemovalSupport = addr;
+
         return addr;
     }
 
@@ -171,7 +185,9 @@ class DxgiProxy
             return nullptr;
         }
 
-        //_GetDebugInterface = addr;
+        // As the proxy dll we hooked our own export, its trampoline would call back into the proxy
+        if (HookModule() == _dll)
+            _GetDebugInterface = addr;
         return addr;
     }
 

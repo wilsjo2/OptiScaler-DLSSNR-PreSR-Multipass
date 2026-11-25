@@ -19,6 +19,8 @@ Shader_Dx11::~Shader_Dx11()
     SAFE_RELEASE(_srvInput);
     // The cached output identity is borrowed from the UAV.
     SAFE_RELEASE(_uavOutput);
+
+    // _currentInResource/_currentOutResource are only cache keys, InitializeSRV/UAV hold no reference on them
 }
 
 DXGI_FORMAT Shader_Dx11::TranslateTypelessFormats(DXGI_FORMAT format)
@@ -32,7 +34,7 @@ DXGI_FORMAT Shader_Dx11::TranslateTypelessFormats(DXGI_FORMAT format)
     case DXGI_FORMAT_R16G16B16A16_TYPELESS:
         return DXGI_FORMAT_R16G16B16A16_FLOAT;
     case DXGI_FORMAT_R10G10B10A2_TYPELESS:
-        return DXGI_FORMAT_R10G10B10A2_UINT;
+        return DXGI_FORMAT_R10G10B10A2_UNORM;
     case DXGI_FORMAT_R8G8B8A8_TYPELESS:
         return DXGI_FORMAT_R8G8B8A8_UNORM;
     case DXGI_FORMAT_B8G8R8A8_TYPELESS:
@@ -112,9 +114,17 @@ HRESULT Shader_Dx11::CreateComputeShader(ID3D11Device* device, ID3D11ComputeShad
 {
     ComPtr<ID3DBlob> shaderBlob;
 
-    // Compile if not using precompiled
-    if (!Config::Instance()->UsePrecompiledShaders.value_or_default() && shaderCode)
-        shaderBlob = CompileShader(shaderCode, "CSMain", "cs_5_0");
+    // Compile if not using precompiled or when there is no precompiled version
+    const bool hasPrecompiled = bytecode != nullptr && bytecodeSize > 0;
+
+    if ((!hasPrecompiled || !Config::Instance()->UsePrecompiledShaders.value_or_default()) && shaderCode)
+        shaderBlob.Attach(CompileShader(shaderCode, "CSMain", "cs_5_0"));
+
+    if (!hasPrecompiled && shaderBlob.Get() == nullptr)
+    {
+        LOG_ERROR("[{0}] No precompiled shader and the compilation failed", _name);
+        return E_FAIL;
+    }
 
     auto shaderBlob_p = shaderBlob.Get();
 
@@ -128,21 +138,20 @@ HRESULT Shader_Dx11::CreateComputeShader(ID3D11Device* device, ID3D11ComputeShad
 }
 
 bool Shader_Dx11::InitializeSRV(ID3D11Texture2D* resource, ID3D11Texture2D*& currentResource,
-                                ID3D11ShaderResourceView*& targetSrv)
+                                ID3D11ShaderResourceView*& targetSrv, DXGI_FORMAT format)
 {
     if (!_init || !_device || !resource)
         return false;
 
     if (resource != currentResource || targetSrv == nullptr)
     {
-        if (targetSrv != nullptr)
-            targetSrv->Release();
+        SAFE_RELEASE(targetSrv);
 
         D3D11_TEXTURE2D_DESC desc;
         resource->GetDesc(&desc);
 
         D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-        srvDesc.Format = TranslateTypelessFormats(desc.Format);
+        srvDesc.Format = format != DXGI_FORMAT_UNKNOWN ? format : TranslateTypelessFormats(desc.Format);
         srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
         srvDesc.Texture2D.MipLevels = desc.MipLevels;
 
@@ -167,8 +176,7 @@ bool Shader_Dx11::InitializeUAV(ID3D11Texture2D* resource, ID3D11Texture2D*& cur
 
     if (resource != currentResource || targetUav == nullptr)
     {
-        if (targetUav != nullptr)
-            targetUav->Release();
+        SAFE_RELEASE(targetUav);
 
         D3D11_TEXTURE2D_DESC desc;
         resource->GetDesc(&desc);

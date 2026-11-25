@@ -1,11 +1,14 @@
 #pragma once
-#include <vulkan/vulkan.hpp>
+#include <vulkan/vulkan.h>
 #include "IFeature.h"
 
 #include <shaders/rcas/RCAS_Vk.h>
 #include <shaders/output_scaling/OS_Vk.h>
 #include <shaders/magnifier/Magnifier_Vk.h>
 #include <shaders/dlssnr/DlssNr_Vk.h>
+#include <shaders/resource_copy/RC_Vk.h>
+#include <nvsdk_ngx_vk.h>
+#include <gpu_time/GpuTime_Vk.h>
 
 class IFeature_Vk : public virtual IFeature
 {
@@ -21,6 +24,20 @@ class IFeature_Vk : public virtual IFeature
     std::unique_ptr<RCAS_Vk> RCAS = nullptr;
     std::unique_ptr<Magnifier_Vk> Magnifier = nullptr;
 
+    std::unique_ptr<GpuTime_Vk> UpscalerTime = nullptr;
+
+    // Created on the first view that doesn't start at (0, 0)
+    std::array<std::unique_ptr<ResourceCopy_Vk>, (size_t) SubrectSlot::Count> SubrectCopy;
+    std::array<NVSDK_NGX_Resource_VK, (size_t) SubrectSlot::Count> _subrectViews {};
+    uint32_t _subrectCopied = 0; // Bit per slot copied this frame
+
+    // Masks with integer formats can't be read as float, they are treated as not given
+    NVSDK_NGX_Resource_VK* MaskInput(NVSDK_NGX_Resource_VK* InResource);
+
+    // Resource for backends without subrect support, a copy of the view when it doesn't start at (0, 0)
+    NVSDK_NGX_Resource_VK* SubrectInput(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Resource_VK* InResource,
+                                        SubrectSlot InSlot);
+
     virtual bool InitInternal(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Parameter* InParameters) = 0;
     virtual bool EvaluateInternal(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Parameter* InParameters) = 0;
 
@@ -30,10 +47,14 @@ class IFeature_Vk : public virtual IFeature
                       NVSDK_NGX_Parameter* InParameters);
     virtual bool Evaluate(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Parameter* InParameters);
 
+    std::optional<double> ReadUpscalerTime(void* unused) override;
+    void ReadDetailedGpuTimes(void* unused, std::vector<DetailedGpuTime>& detailedGpuTimes) override;
+
     IFeature_Vk(unsigned int InHandleId, NVSDK_NGX_Parameter* InParameters) : IFeature(InHandleId, InParameters) {}
 
     bool IsWithDx12() override { return false; }
     API Api() const override { return API::Vulkan; }
+    virtual VkDevice GetDevice() const { return Device; }
 
     virtual ~IFeature_Vk();
 };

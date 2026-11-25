@@ -6,13 +6,16 @@
 #include <with_dx12/dx11_with_dx12_sync.h>
 
 #include <hooks/FG_Hooks.h>
+#include <hooks/DxgiFactory_Hooks.h>
 #include <menu/menu_overlay_dx.h>
+#include <wrapped/wrapped_factory.h>
 
 #include <hudfix/Hudfix_Dx11.h>
 #include <resource_tracking/ResTrack_dx11.h>
 
 #include <Util.h>
 #include <Config.h>
+#include <misc/IdentifyGpu.h>
 
 #include <d3d11.h>
 #include <d3d11_4.h>
@@ -121,6 +124,43 @@ DXGI_FORMAT ResolveBufferFormat(IDXGISwapChain* swapchain, IDXGISwapChain1* swap
     return DXGI_FORMAT_UNKNOWN;
 }
 
+// FG swapchain is flip model, game's resize params can be for blt model
+bool PrepareFGResize(IDXGISwapChain* fgSwapChain, UINT& bufferCount, DXGI_FORMAT& format, UINT& flags)
+{
+    if (format != DXGI_FORMAT_UNKNOWN && !DxgiFactoryHooks::PrepareDx12FlipFormat(format))
+        return false;
+
+    // 0 keeps the current count
+    if (bufferCount == 1)
+        bufferCount = 2;
+
+    flags &= ~DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE;
+
+    // ALLOW_TEARING can't change on resize
+    DXGI_SWAP_CHAIN_DESC desc {};
+    if (fgSwapChain != nullptr && SUCCEEDED(fgSwapChain->GetDesc(&desc)))
+        flags = (flags & ~DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) | (desc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING);
+
+    return true;
+}
+
+// Game's flags are for its swapchain, DXGI rejects ALLOW_TEARING on a swapchain without the flag, in fullscreen or
+// with a sync interval
+UINT ValidPresentFlags(IDXGISwapChain* swapchain, UINT syncInterval, UINT flags)
+{
+    if ((flags & DXGI_PRESENT_ALLOW_TEARING) == 0)
+        return flags;
+
+    DXGI_SWAP_CHAIN_DESC desc {};
+    if (syncInterval != 0 || swapchain == nullptr || FAILED(swapchain->GetDesc(&desc)) ||
+        (desc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) == 0 || !desc.Windowed)
+    {
+        flags &= ~DXGI_PRESENT_ALLOW_TEARING;
+    }
+
+    return flags;
+}
+
 bool IsSame(IDXGISwapChain* swapchain, UINT bufferCount, UINT width, UINT height, DXGI_FORMAT format, UINT flags)
 {
     if (swapchain == nullptr)
@@ -191,6 +231,9 @@ Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Devi
     }
 
     State::Instance().swapchainInteropApi = SwapchainInteropApi::Dx11wDx12;
+
+    // The DX12 swapchain presenting under this one isn't the current swapchain, its present doesn't set the api
+    State::Instance().swapchainApi = DX12;
 
     _RefreshCachedSwapchainDesc();
 
@@ -348,7 +391,15 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::GetPrivateData(REFGUID Name, UINT* pDataS
 
 HRESULT STDMETHODCALLTYPE Dx11wDx12SC::GetParent(REFIID riid, void** ppParent)
 {
-    return _real != nullptr ? _real->GetParent(riid, ppParent) : DXGI_ERROR_DEVICE_REMOVED;
+    if (_real == nullptr)
+        return DXGI_ERROR_DEVICE_REMOVED;
+
+    auto result = _real->GetParent(riid, ppParent);
+
+    if (result == S_OK && Config::Instance()->DxgiFactoryWrapping.value_or_default())
+        WrappedIDXGIFactory7::WrapParent(riid, ppParent, _ReturnAddress());
+
+    return result;
 }
 
 HRESULT STDMETHODCALLTYPE Dx11wDx12SC::GetDevice(REFIID riid, void** ppDevice)
@@ -364,8 +415,21 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
     if (_fg == nullptr)
         _fg = State::Instance().currentFG;
 
+    // Occlusion test belongs to the game window's swapchain, the real one is on a hidden window
     if ((Flags & DXGI_PRESENT_TEST) != 0)
-        return _real->Present(SyncInterval, Flags);
+        return _fgSwapChain->Present(SyncInterval, ValidPresentFlags(_fgSwapChain, SyncInterval, Flags));
+
+    if (_fgColorSpaceDirty && _gameColorSpace.has_value())
+    {
+        _fgColorSpaceDirty = false;
+
+        auto csResult = _fgSwapChain->SetColorSpace1(_gameColorSpace.value());
+        LOG_DEBUG("Re-applied {} to FG swapchain: {:X}", (UINT) _gameColorSpace.value(), (UINT) csResult);
+    }
+
+    // The FG library's swapchain isn't the current one, game's frames are counted here
+    if (State::Instance().currentSwapchain == this)
+        State::Instance().frameCount++;
 
     const bool dx11HudfixPresent = Config::Instance()->FGHUDFix.value_or_default() &&
                                    State::Instance().activeFgInput == FGInput::Upscaler &&
@@ -376,22 +440,24 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
         Hudfix_Dx11::PresentStart();
     }
 
-    if (!_InitInteropObjects())
-        return DXGI_ERROR_DEVICE_REMOVED;
+    if (State::Instance().activeFgInput == FGInput::Upscaler && State::Instance().currentSwapchain == this)
+        Hudfix_Dx11::PublishGameHudless(Dx11WithDx12::GetD3D11DeviceContext());
 
-    auto dx11Index = _GetDx11BackBufferIndexForPresent();
+    // The device is fine when the interop copy fails, keep presenting the FG swapchain
+    bool frameCopied = _InitInteropObjects();
+    UINT dx11Index = 0;
 
-    if (!_RequestSharedBackBuffer(dx11Index))
-        return DXGI_ERROR_DEVICE_REMOVED;
+    if (frameCopied)
+    {
+        dx11Index = _GetDx11BackBufferIndexForPresent();
 
-    if (!_CopyDx11BackBufferToShared(dx11Index))
-        return DXGI_ERROR_DEVICE_REMOVED;
+        frameCopied = _RequestSharedBackBuffer(dx11Index) && _WaitForCopyAllocator(_currentFakeIndex) &&
+                      _CopyDx11BackBufferToShared(dx11Index) && _WaitDx11ThenDx12() &&
+                      _CopyDx11SharedToDx12FGBackBuffer(dx11Index);
+    }
 
-    if (!_WaitDx11ThenDx12())
-        return DXGI_ERROR_DEVICE_REMOVED;
-
-    if (!_CopyDx11SharedToDx12FGBackBuffer(dx11Index))
-        return DXGI_ERROR_DEVICE_REMOVED;
+    if (!frameCopied)
+        LOG_ERROR("Interop copy failed, presenting without the new frame");
 
     const bool fgHookedPresenter =
         State::Instance().currentFGSwapchain == _fgSwapChain && !FGHooks::IsDx12InteropPresentSC(_fgSwapChain);
@@ -416,7 +482,8 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
               dx11Index, _real3 != nullptr ? _real3->GetCurrentBackBufferIndex() : 0xFFFFFFFF, _currentFakeIndex,
               _bufferCount);
 
-    if (_real != nullptr)
+    // Some memes with Vk swapchains on Lunyx and overlays
+    if (_real != nullptr && !State::Instance().isRunningOnLinux)
     {
         UINT realFlags = Flags;
 
@@ -427,15 +494,15 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
             LOG_WARN("hidden real DX11 Present failed: {:X}", (UINT) realPresentResult);
     }
 
-    auto result = _fgSwapChain->Present(SyncInterval, Flags);
+    auto result = _fgSwapChain->Present(SyncInterval, ValidPresentFlags(_fgSwapChain, SyncInterval, Flags));
 
     if (dx11HudfixPresent)
         Hudfix_Dx11::PresentEnd();
 
-    if (SUCCEEDED(result))
-        _AdvanceFakeBackBufferIndex();
-    else
+    if (FAILED(result))
         LOG_ERROR("fg Present failed: {:X}", (UINT) result);
+    else if (frameCopied)
+        _AdvanceFakeBackBufferIndex();
 
     return result;
 }
@@ -473,7 +540,14 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::GetDesc(DXGI_SWAP_CHAIN_DESC* pDesc)
 
     auto result = _real->GetDesc(pDesc);
     if (SUCCEEDED(result) && pDesc != nullptr)
+    {
         pDesc->OutputWindow = _handle;
+
+        // Real one is always windowed on its hidden window
+        BOOL fullscreen = FALSE;
+        if (_fgSwapChain != nullptr && SUCCEEDED(_fgSwapChain->GetFullscreenState(&fullscreen, nullptr)))
+            pDesc->Windowed = !fullscreen;
+    }
 
     return result;
 }
@@ -486,7 +560,23 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
 
     if (!DlssNr::WaitForFinishedPicture())
         return DXGI_ERROR_DEVICE_REMOVED;
-    const bool skipFgResize = IsSame(_fgSwapChain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
+
+    DxgiFactoryHooks::ResolveInteropSize(_handle, Width, Height);
+
+    UINT fgBufferCount = BufferCount;
+    DXGI_FORMAT fgFormat = NewFormat;
+    UINT fgFlags = SwapChainFlags;
+
+    if (!PrepareFGResize(_fgSwapChain, fgBufferCount, fgFormat, fgFlags))
+        return DXGI_ERROR_INVALID_CALL;
+
+    // Flip model presents fail after a fullscreen change until the buffers are resized, DXGI can change it on its own
+    BOOL fgFullscreen = FALSE;
+    if (_fgSwapChain != nullptr)
+        _fgSwapChain->GetFullscreenState(&fgFullscreen, nullptr);
+
+    const bool skipFgResize =
+        fgFullscreen == _fgResizedFullscreen && IsSame(_fgSwapChain, fgBufferCount, Width, Height, fgFormat, fgFlags);
     const bool synchronizeXeFGPresent = skipFgResize && State::Instance().activeFgOutput == FGOutput::XeFG &&
                                         State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
 
@@ -530,7 +620,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
         }
         else
         {
-            fgResult = _fgSwapChain->ResizeBuffers(BufferCount, Width, Height, NewFormat, SwapChainFlags);
+            fgResult = _fgSwapChain->ResizeBuffers(fgBufferCount, Width, Height, fgFormat, fgFlags);
         }
     }
 
@@ -538,9 +628,11 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers(UINT BufferCount, UINT Widt
 
     if (SUCCEEDED(realResult) && SUCCEEDED(fgResult))
     {
+        _fgResizedFullscreen = fgFullscreen;
+        _fgColorSpaceDirty = true;
         _RefreshCachedSwapchainDesc();
 
-        if (Config::Instance()->FGEnabled.value_or_default())
+        if (Config::Instance()->IsFGEnabled())
         {
             State::Instance().fgResetCapturedResources = true;
             State::Instance().fgOnlyUseCapturedResources = false;
@@ -717,11 +809,19 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::CheckColorSpaceSupport(DXGI_COLOR_SPACE_T
 
 HRESULT STDMETHODCALLTYPE Dx11wDx12SC::SetColorSpace1(DXGI_COLOR_SPACE_TYPE ColorSpace)
 {
+    LOG_DEBUG("Dx11wDx12SC SetColorSpace1: {}", (UINT) ColorSpace);
+
     if (_fgSwapChain != nullptr)
     {
-        const auto result = _fgSwapChain->SetColorSpace1(ColorSpace);
+        auto result = _fgSwapChain->SetColorSpace1(ColorSpace);
+
         if (SUCCEEDED(result))
+        {
+            _gameColorSpace = ColorSpace;
+            _fgColorSpaceDirty = true;
             DlssNr::FinishedPictureColorSpace(_fgSwapChain, ColorSpace);
+        }
+
         return result;
     }
 
@@ -740,7 +840,22 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
     if (_real3 == nullptr)
         return ResizeBuffers(BufferCount, Width, Height, Format, SwapChainFlags);
 
-    const bool skipFgResize = IsSame(_fgSwapChain, BufferCount, Width, Height, Format, SwapChainFlags);
+    DxgiFactoryHooks::ResolveInteropSize(_handle, Width, Height);
+
+    UINT fgBufferCount = BufferCount;
+    DXGI_FORMAT fgFormat = Format;
+    UINT fgFlags = SwapChainFlags;
+
+    if (!PrepareFGResize(_fgSwapChain, fgBufferCount, fgFormat, fgFlags))
+        return DXGI_ERROR_INVALID_CALL;
+
+    // Flip model presents fail after a fullscreen change until the buffers are resized, DXGI can change it on its own
+    BOOL fgFullscreen = FALSE;
+    if (_fgSwapChain != nullptr)
+        _fgSwapChain->GetFullscreenState(&fgFullscreen, nullptr);
+
+    const bool skipFgResize =
+        fgFullscreen == _fgResizedFullscreen && IsSame(_fgSwapChain, fgBufferCount, Width, Height, fgFormat, fgFlags);
     const bool synchronizeXeFGPresent = skipFgResize && State::Instance().activeFgOutput == FGOutput::XeFG &&
                                         State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
 
@@ -785,7 +900,7 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
         }
         else
         {
-            fgResult = _fgSwapChain->ResizeBuffers(BufferCount, Width, Height, Format, SwapChainFlags);
+            fgResult = _fgSwapChain->ResizeBuffers(fgBufferCount, Width, Height, fgFormat, fgFlags);
         }
     }
 
@@ -793,9 +908,11 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
 
     if (SUCCEEDED(realResult) && SUCCEEDED(fgResult))
     {
+        _fgResizedFullscreen = fgFullscreen;
+        _fgColorSpaceDirty = true;
         _RefreshCachedSwapchainDesc();
 
-        if (Config::Instance()->FGEnabled.value_or_default())
+        if (Config::Instance()->IsFGEnabled())
         {
             State::Instance().fgResetCapturedResources = true;
             State::Instance().fgOnlyUseCapturedResources = false;
@@ -804,6 +921,14 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::ResizeBuffers1(UINT BufferCount, UINT Wid
 
         State::Instance().scChanged = true;
         State::Instance().SCAllowTearing = (SwapChainFlags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0;
+
+        if (State::Instance().currentFeature == nullptr)
+        {
+            State::Instance().screenWidth = static_cast<float>(Width);
+            State::Instance().screenHeight = static_cast<float>(Height);
+            State::Instance().lastMipBias = 100.0f;
+            State::Instance().lastMipBiasMax = -100.0f;
+        }
     }
 
     return FAILED(realResult) ? realResult : fgResult;
@@ -853,6 +978,9 @@ bool Dx11wDx12SC::_InitInteropObjects()
     }
 
     HRESULT result = S_OK;
+
+    // A failed FG resize skips the refresh, the cached count can be stale
+    _RefreshCachedSwapchainDesc();
 
     const UINT copyAllocatorCount = std::max<UINT>(_bufferCount != 0 ? _bufferCount : 3, 3);
 
@@ -1031,6 +1159,7 @@ bool Dx11wDx12SC::_RequestSharedBackBuffer(UINT index)
         if (FAILED(result) || dxgiResource == nullptr)
         {
             LOG_ERROR("shadow IDXGIResource1 query {} failed: {:X}", _currentFakeIndex, (UINT) result);
+            SafeRelease(_sharedDx11BackBufferCopies[_currentFakeIndex]);
             sourceTexture->Release();
             return false;
         }
@@ -1042,6 +1171,8 @@ bool Dx11wDx12SC::_RequestSharedBackBuffer(UINT index)
         if (FAILED(result) || _sharedBackBufferHandles[_currentFakeIndex] == nullptr)
         {
             LOG_ERROR("shadow CreateSharedHandle {} failed: {:X}", _currentFakeIndex, (UINT) result);
+            SafeRelease(_sharedDx11BackBufferCopies[_currentFakeIndex]);
+            _sharedBackBufferHandles[_currentFakeIndex] = nullptr;
             sourceTexture->Release();
             return false;
         }
@@ -1177,6 +1308,13 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
     }
 
     const UINT copySlot = _currentFakeIndex;
+
+    if (copySlot >= _copyAllocators.size() || copySlot >= _copyCommandLists.size())
+    {
+        LOG_ERROR("copy slot {} out of range {}", copySlot, _copyAllocators.size());
+        return false;
+    }
+
     auto allocator = _copyAllocators[copySlot];
 
     if (allocator == nullptr)
@@ -1256,10 +1394,18 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
 
 bool Dx11wDx12SC::_WaitForInteropCopyOnPresentQueue(ID3D12CommandQueue* presentQueue)
 {
-    if (presentQueue == nullptr || _copyFence == nullptr)
+    // Nothing copied yet, nothing to wait for
+    if (_copyFence == nullptr || _lastInteropCopyFenceValue == 0)
+        return true;
+
+    if (presentQueue == nullptr)
         return false;
 
     if (_lastInteropCopyFenceValue == 0)
+        return true;
+
+    // The copy ran on this queue, its order already covers it
+    if (presentQueue == _dx12CommandQueue)
         return true;
 
     auto result = presentQueue->Wait(_copyFence, _lastInteropCopyFenceValue);
@@ -1366,15 +1512,10 @@ void Dx11wDx12SC::_RefreshCachedSwapchainDesc()
 {
     _bufferCount = ResolveBufferCount(_real, _real1);
     _bufferFormat = ResolveBufferFormat(_real, _real1);
-    _currentFakeIndex = _bufferCount > 0 ? _currentFakeIndex : 0;
+    _currentFakeIndex = _bufferCount > 0 ? _currentFakeIndex % _bufferCount : 0;
 }
 
-UINT Dx11wDx12SC::_GetDx11BackBufferIndexForPresent() const
-{
-    if (_real3 != nullptr)
-        return _real3->GetCurrentBackBufferIndex();
-
-    return _bufferCount > 0 ? _currentFakeIndex : 0;
-}
+// D3D11 always renders to buffer 0, the runtime rotates the buffers
+UINT Dx11wDx12SC::_GetDx11BackBufferIndexForPresent() const { return 0; }
 
 void Dx11wDx12SC::_AdvanceFakeBackBufferIndex() { _currentFakeIndex = (_currentFakeIndex + 1) % _bufferCount; }

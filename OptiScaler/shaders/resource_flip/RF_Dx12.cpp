@@ -9,7 +9,7 @@
 #include "precompiled/RF_Shader.h"
 
 bool RF_Dx12::Dispatch(ID3D12GraphicsCommandList* InCmdList, ID3D12Resource* InResource, ID3D12Resource* OutResource,
-                       UINT64 width, UINT height, bool velocity)
+                       UINT64 width, UINT height, bool velocity, bool color)
 {
     if (!_init || _device == nullptr || InCmdList == nullptr || InResource == nullptr || OutResource == nullptr)
         return false;
@@ -30,12 +30,22 @@ bool RF_Dx12::Dispatch(ID3D12GraphicsCommandList* InCmdList, ID3D12Resource* InR
 
     constants.height = height - 1;
     constants.width = static_cast<UINT>(width - 1);
-    constants.offset = Config::Instance()->FGResourceFlipOffset.value_or_default() ? inDesc.Height - height : 0;
+    constants.offset = Config::Instance()->FGResourceFlipOffset.value_or_default() && inDesc.Height > height
+                           ? inDesc.Height - height
+                           : 0;
     constants.velocity = velocity ? 1 : 0;
 
-    LOG_DEBUG("Width: {}, Height: {}, Offset", constants.width, constants.height, constants.offset);
+    // UAVs can't be sRGB, the output has the UNORM format
+    if (color)
+    {
+        const bool srgb =
+            inDesc.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || inDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+        constants.velocity = srgb ? 3 : 2;
+    }
 
-    if (!CreateConstantsBuffer(_device, _constantBuffer, constants, currentHeap.GetCbvCPU(0)))
+    LOG_DEBUG("Width: {}, Height: {}, Offset: {}", constants.width, constants.height, constants.offset);
+
+    if (!CreateConstantsBuffer(_device, currentHeap, constants, currentHeap.GetCbvCPU(0)))
     {
         LOG_ERROR("[{0}] Failed to create a constants buffer", _name);
         return false;
@@ -52,7 +62,12 @@ bool RF_Dx12::Dispatch(ID3D12GraphicsCommandList* InCmdList, ID3D12Resource* InR
     UINT dispatchWidth = 0;
     UINT dispatchHeight = 0;
 
-    if ((State::Instance().currentFeature->GetFeatureFlags() & NVSDK_NGX_DLSS_Feature_Flags_MVLowRes) == 0)
+    if (color)
+    {
+        dispatchWidth = static_cast<UINT>((width + InNumThreadsX - 1) / InNumThreadsX);
+        dispatchHeight = (height + InNumThreadsY - 1) / InNumThreadsY;
+    }
+    else if ((State::Instance().currentFeature->GetFeatureFlags() & NVSDK_NGX_DLSS_Feature_Flags_MVLowRes) == 0)
     {
         dispatchWidth =
             static_cast<UINT>((State::Instance().currentFeature->DisplayWidth() + InNumThreadsX - 1) / InNumThreadsX);
@@ -64,6 +79,9 @@ bool RF_Dx12::Dispatch(ID3D12GraphicsCommandList* InCmdList, ID3D12Resource* InR
             static_cast<UINT>((State::Instance().currentFeature->RenderWidth() + InNumThreadsX - 1) / InNumThreadsX);
         dispatchHeight = (State::Instance().currentFeature->RenderHeight() + InNumThreadsY - 1) / InNumThreadsY;
     }
+
+    // Covers the used area moved down by the offset
+    dispatchHeight += (constants.offset + InNumThreadsY - 1) / InNumThreadsY;
 
     InCmdList->Dispatch(dispatchWidth, dispatchHeight, 1);
 
@@ -86,19 +104,6 @@ RF_Dx12::RF_Dx12(std::string InName, ID3D12Device* InDevice) : Shader_Dx12(InNam
         return;
     }
 
-    D3D12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Buffer(sizeof(RFConstants));
-    auto heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
-
-    auto result =
-        InDevice->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ,
-                                          nullptr, IID_PPV_ARGS(&_constantBuffer));
-
-    if (result != S_OK)
-    {
-        LOG_ERROR("[{0}] CreateCommittedResource error {1:x}", _name, (unsigned int) result);
-        return;
-    }
-
     if (!CreateComputePipeline(InDevice, &_pipelineState, RF_cso, sizeof(RF_cso), rfCode.c_str()))
     {
         LOG_ERROR("[{0}] Failed to create compute pipeline", _name);
@@ -110,7 +115,7 @@ RF_Dx12::RF_Dx12(std::string InName, ID3D12Device* InDevice) : Shader_Dx12(InNam
 
 RF_Dx12::~RF_Dx12()
 {
-    if (!_init || State::Instance().isShuttingDown)
+    if (State::Instance().isShuttingDown)
         return;
 
     for (int i = 0; i < RF_NUM_OF_HEAPS; i++)

@@ -66,6 +66,8 @@ bool Magnifier_Vk::Dispatch(VkCommandBuffer InCmdList, const VkImageInfo& InReso
 
     LOG_DEBUG("[{0}] Start!", _name);
 
+    ScopedGpuTime_Vk scopedGpuTime(GpuTime.get(), InCmdList);
+
     if (!InitializeViews(InResourceInfo.ImageView, OutResourceInfo.ImageView))
         return false;
 
@@ -75,12 +77,9 @@ bool Magnifier_Vk::Dispatch(VkCommandBuffer InCmdList, const VkImageInfo& InReso
 
     FilloutStruct((float) OutResourceInfo.Width, (float) OutResourceInfo.Height, constants);
 
-    if (_mappedConstantBuffer)
-        memcpy(_mappedConstantBuffer, &constants, sizeof(InternalMagnifierParams));
-
     VkDescriptorSet descriptorSet = _descriptorSets[_currentSetIndex];
 
-    VkDescriptorBufferInfo bufferInfo { _constantBuffer, 0, sizeof(InternalMagnifierParams) };
+    const auto bufferInfo = WriteConstants(&constants, sizeof(InternalMagnifierParams));
     VkDescriptorImageInfo sourceInfo { _textureSampler, InResourceInfo.ImageView,
                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
     VkDescriptorImageInfo destInfo { VK_NULL_HANDLE, OutResourceInfo.ImageView, VK_IMAGE_LAYOUT_GENERAL };

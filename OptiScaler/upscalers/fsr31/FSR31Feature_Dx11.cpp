@@ -64,6 +64,10 @@ bool FSR31FeatureDx11::CopyTexture(ID3D11Resource* InResource, D3D11_TEXTURE2D_R
 
     if (desc.BindFlags == bindFlags)
     {
+        // Our copy isn't needed anymore
+        if (!OutTextureRes->usingOriginal && OutTextureRes->Texture != nullptr)
+            OutTextureRes->Texture->Release();
+
         ASSIGN_DESC(OutTextureRes->Desc, desc);
         OutTextureRes->Texture = originalTexture;
         OutTextureRes->usingOriginal = true;
@@ -129,11 +133,6 @@ bool FSR31FeatureDx11::EvaluateInternal(ID3D11DeviceContext* DeviceContext, NVSD
     if (Config::Instance()->FsrDebugView.value_or_default())
         params.flags = Fsr31::FFX_FSR3_UPSCALER_FLAG_DRAW_DEBUG_VIEW;
 
-    if (Config::Instance()->FsrNonLinearPQ.value_or_default())
-        params.flags = FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_PQ;
-    else if (Config::Instance()->FsrNonLinearSRGB.value_or_default())
-        params.flags = FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB;
-
     InParameters->Get(NVSDK_NGX_Parameter_Jitter_Offset_X, &params.jitterOffset.x);
     InParameters->Get(NVSDK_NGX_Parameter_Jitter_Offset_Y, &params.jitterOffset.y);
 
@@ -142,7 +141,7 @@ bool FSR31FeatureDx11::EvaluateInternal(ID3D11DeviceContext* DeviceContext, NVSD
 
     LOG_DEBUG("Jitter Offset: {0}x{1}", params.jitterOffset.x, params.jitterOffset.y);
 
-    unsigned int reset;
+    unsigned int reset = 0;
     InParameters->Get(NVSDK_NGX_Parameter_Reset, &reset);
     params.reset = (reset == 1);
 
@@ -152,9 +151,11 @@ bool FSR31FeatureDx11::EvaluateInternal(ID3D11DeviceContext* DeviceContext, NVSD
 
     params.commandList = Fsr31::ffxGetCommandListDX11(DeviceContext);
 
-    ID3D11Resource* paramColor;
+    ID3D11Resource* paramColor = nullptr;
     if (InParameters->Get(NVSDK_NGX_Parameter_Color, &paramColor) != NVSDK_NGX_Result_Success)
         InParameters->Get(NVSDK_NGX_Parameter_Color, (void**) &paramColor);
+
+    paramColor = SubrectInput(DeviceContext, paramColor, SubrectSlot::Color);
 
     if (paramColor)
     {
@@ -179,9 +180,11 @@ bool FSR31FeatureDx11::EvaluateInternal(ID3D11DeviceContext* DeviceContext, NVSD
         return false;
     }
 
-    ID3D11Resource* paramVelocity;
+    ID3D11Resource* paramVelocity = nullptr;
     if (InParameters->Get(NVSDK_NGX_Parameter_MotionVectors, &paramVelocity) != NVSDK_NGX_Result_Success)
         InParameters->Get(NVSDK_NGX_Parameter_MotionVectors, (void**) &paramVelocity);
+
+    paramVelocity = SubrectInput(DeviceContext, paramVelocity, SubrectSlot::MV);
 
     if (paramVelocity)
     {
@@ -195,7 +198,7 @@ bool FSR31FeatureDx11::EvaluateInternal(ID3D11DeviceContext* DeviceContext, NVSD
         return false;
     }
 
-    ID3D11Resource* paramOutput;
+    ID3D11Resource* paramOutput = nullptr;
     if (InParameters->Get(NVSDK_NGX_Parameter_Output, &paramOutput) != NVSDK_NGX_Result_Success)
         InParameters->Get(NVSDK_NGX_Parameter_Output, (void**) &paramOutput);
 
@@ -210,9 +213,11 @@ bool FSR31FeatureDx11::EvaluateInternal(ID3D11DeviceContext* DeviceContext, NVSD
         return false;
     }
 
-    ID3D11Resource* paramDepth;
+    ID3D11Resource* paramDepth = nullptr;
     if (InParameters->Get(NVSDK_NGX_Parameter_Depth, &paramDepth) != NVSDK_NGX_Result_Success)
         InParameters->Get(NVSDK_NGX_Parameter_Depth, (void**) &paramDepth);
+
+    paramDepth = SubrectInput(DeviceContext, paramDepth, SubrectSlot::Depth);
 
     if (paramDepth)
     {
@@ -256,6 +261,8 @@ bool FSR31FeatureDx11::EvaluateInternal(ID3D11DeviceContext* DeviceContext, NVSD
     if (InParameters->Get(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, &paramReactiveMask) !=
         NVSDK_NGX_Result_Success)
         InParameters->Get(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, (void**) &paramReactiveMask);
+
+    paramReactiveMask = SubrectInput(DeviceContext, MaskInput(paramReactiveMask), SubrectSlot::Mask);
 
     if (!Config::Instance()->DisableReactiveMask.value_or(paramReactiveMask == nullptr))
     {
@@ -404,6 +411,7 @@ FSR31FeatureDx11::~FSR31FeatureDx11()
             spdlog::error("FSR31FeatureDx11::~FSR31FeatureDx11 ffxFsr3ContextDestroy error: {0:x}", errorCode);
 
         free(_upscalerContextDesc.backendInterfaceUpscaling.scratchBuffer);
+        ReleaseResources();
     }
 
     SetInit(false);
@@ -434,13 +442,6 @@ bool FSR31FeatureDx11::InitFSR3(const NVSDK_NGX_Parameter* InParameters)
 
     {
         ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
-
-        uint64_t versionCount = 0;
-        State::Instance().ffxUpscalerVersionIds.resize(versionCount);
-        State::Instance().ffxUpscalerVersionNames.resize(versionCount);
-        State::Instance().ffxUpscalerVersionIds.push_back(1);
-        auto version_number = "3.1.2";
-        State::Instance().ffxUpscalerVersionNames.push_back(version_number);
 
         const size_t scratchBufferSize = Fsr31::ffxGetScratchMemorySizeDX11(1);
         void* scratchBuffer = calloc(scratchBufferSize, 1);
@@ -479,13 +480,6 @@ bool FSR31FeatureDx11::InitFSR3(const NVSDK_NGX_Parameter* InParameters)
 
         if (!LowResMV())
             _upscalerContextDesc.flags |= Fsr31::FFX_FSR3_ENABLE_DISPLAY_RESOLUTION_MOTION_VECTORS;
-
-        if (Config::Instance()->FsrNonLinearPQ.value_or_default() ||
-            Config::Instance()->FsrNonLinearSRGB.value_or_default())
-        {
-            _upscalerContextDesc.flags |= FFX_UPSCALE_ENABLE_NON_LINEAR_COLORSPACE;
-            LOG_INFO("contextDesc.initFlags (NonLinearColorSpace) {0:b}", _upscalerContextDesc.flags);
-        }
 
         if (Config::Instance()->OutputScalingEnabled.value_or_default() &&
             (LowResMV() || RenderWidth() == DisplayWidth()))
@@ -545,51 +539,24 @@ bool FSR31FeatureDx11::InitFSR3(const NVSDK_NGX_Parameter* InParameters)
             _upscalerContextDesc.maxUpscaleSize.height = TargetHeight();
         }
 
-        // Set stability values as default if not set by user
-        {
-            auto config = Config::Instance();
-            auto const scaleRatioX = (float) TargetWidth() / (float) RenderWidth();
-            auto const scaleRatioY = (float) TargetHeight() / (float) RenderHeight();
-            auto const scaleRatio = std::max(scaleRatioX, scaleRatioY);
-
-            if (scaleRatio > 0.0f && !std::isinf(scaleRatio))
-            {
-                if (config->FsrVelocity.value_for_config() == std::nullopt)
-                    config->FsrVelocity.set_volatile_value(0.5f);
-
-                if (config->FsrReactiveScale.value_for_config() == std::nullopt)
-                    config->FsrReactiveScale.set_volatile_value(0.25f);
-
-                if (config->FsrShadingScale.value_for_config() == std::nullopt)
-                    config->FsrShadingScale.set_volatile_value(0.5f / scaleRatio);
-
-                if (config->FsrAccAddPerFrame.value_for_config() == std::nullopt)
-                    config->FsrAccAddPerFrame.set_volatile_value(scaleRatio / 10.0f);
-
-                if (config->FsrMinDisOccAcc.value_for_config() == std::nullopt)
-                    config->FsrMinDisOccAcc.set_volatile_value(scaleRatio / 20.0f);
-            }
-        }
-
-        if (Config::Instance()->FfxUpscalerIndex.value_or_default() < 0 ||
-            Config::Instance()->FfxUpscalerIndex.value_or_default() >= State::Instance().ffxUpscalerVersionIds.size())
-            Config::Instance()->FfxUpscalerIndex.set_volatile_value(0);
-
         LOG_DEBUG("_createContext!");
         auto ret = ffxFsr3ContextCreate(&_upscalerContext, &_upscalerContextDesc);
 
         if (ret != Fsr31::FFX_OK)
         {
             LOG_ERROR("_createContext error: {0}", ResultToString(ret));
+
+            // The destructor frees it only for inited features
+            free(_upscalerContextDesc.backendInterfaceUpscaling.scratchBuffer);
+            _upscalerContextDesc.backendInterfaceUpscaling.scratchBuffer = nullptr;
+
             return false;
         }
 
         LOG_INFO("_createContext success!");
 
-        auto version =
-            State::Instance().ffxUpscalerVersionNames[Config::Instance()->FfxUpscalerIndex.value_or_default()];
         _name = "FSR";
-        parse_version(version);
+        parse_version("3.1.2");
     }
 
     SetInit(true);

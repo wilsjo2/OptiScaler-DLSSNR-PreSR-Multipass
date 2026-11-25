@@ -3,6 +3,10 @@
 #include "dx11_with_dx12.h"
 #include "with_dx12.h"
 
+#include <State.h>
+#include <Util.h>
+#include <misc/DeferredRelease.h>
+
 #define ASSIGN_DESC(dest, src)                                                                                         \
     dest.Width = src.Width;                                                                                            \
     dest.Height = src.Height;                                                                                          \
@@ -30,35 +34,13 @@ Dx11WithDx12::D3D11_TEXTURE2D_DESC_C CaptureDesc(const D3D11_TEXTURE2D_DESC& des
     return result;
 }
 
-Dx11WithDx12::D3D11_UPSCALER_RESOURCE_CACHE_C& Dx11WithDx12::GetUpscalerResourceCache()
-{
-    return UpscalerResourceCache;
-}
-
-Dx11WithDx12::D3D11_TEXTURE2D_RESOURCE_C* Dx11WithDx12::GetUpscalerOutputResource(UINT frameIndex)
-{
-    return &UpscalerResourceCache.Output[frameIndex % DX11_WITH_DX12_CACHED_FRAMES];
-}
-
-void Dx11WithDx12::SetUpscalerFrameIndex(UINT frameIndex)
-{
-    UpscalerFrameIndex = frameIndex % DX11_WITH_DX12_CACHED_FRAMES;
-}
-
-UINT Dx11WithDx12::GetUpscalerFrameIndex() { return UpscalerFrameIndex; }
-
+// Frame ids are shared by all caches and never reset, so a stale id can't match a newer frame
 UINT64 Dx11WithDx12::NextUpscalerFrameId() { return ++UpscalerLocalFrameId; }
 
-void Dx11WithDx12::ResetUpscalerFrameId() { UpscalerLocalFrameId = 0; }
-
-UINT64 Dx11WithDx12::GetLastPreparedUpscalerFrameId() { return LastPreparedUpscalerFrameId; }
-
-Dx11WithDx12::ResourceMask Dx11WithDx12::GetLastPreparedUpscalerMask() { return LastPreparedUpscalerMask; }
-
-void Dx11WithDx12::ClearLastPreparedUpscalerFrameState()
+void Dx11WithDx12::ClearLastPreparedUpscalerFrameState(D3D11_UPSCALER_RESOURCE_CACHE_C& cache)
 {
-    LastPreparedUpscalerFrameId = 0;
-    LastPreparedUpscalerMask = ResourceMask::None;
+    cache.LastPreparedFrameId = 0;
+    cache.LastPreparedMask = ResourceMask::None;
 }
 
 ID3D11Device5* Dx11WithDx12::GetD3D11Device() { return Dx11Device; }
@@ -69,12 +51,14 @@ ID3D12Device* Dx11WithDx12::GetD3D12Device() { return Dx12Device; }
 
 ID3D12CommandQueue* Dx11WithDx12::GetD3D12CommandQueue() { return Dx12CommandQueue; }
 
-void Dx11WithDx12::ReleaseSharedResource(D3D11_TEXTURE2D_RESOURCE_C* resource)
+// Keeps the depth transfer, it can be reused when the shared texture is recreated
+void Dx11WithDx12::ReleaseSharedTexture(D3D11_TEXTURE2D_RESOURCE_C* resource)
 {
     if (resource == nullptr)
         return;
 
-    SAFE_RELEASE(resource->Dx12Resource);
+    // D3D12 queue can still be using it
+    DeferredRelease::Release(resource->Dx12Resource);
 
     if (resource->Dx11Handle != NULL && resource->UsesNTHandle)
         CloseHandle(resource->Dx11Handle);
@@ -97,6 +81,19 @@ void Dx11WithDx12::ReleaseSharedResource(D3D11_TEXTURE2D_RESOURCE_C* resource)
     resource->LastPreparedDepth = false;
 }
 
+void Dx11WithDx12::ReleaseSharedResource(D3D11_TEXTURE2D_RESOURCE_C* resource)
+{
+    if (resource == nullptr)
+        return;
+
+    // Shared texture can be the depth transfer's buffer
+    ReleaseSharedTexture(resource);
+
+    delete resource->DepthTransfer;
+    resource->DepthTransfer = nullptr;
+    resource->DepthTransferSourceDesc = {};
+}
+
 void Dx11WithDx12::ReleaseSyncResourcesLocked()
 {
     SAFE_RELEASE(Dx11FenceTextureCopy);
@@ -106,6 +103,12 @@ void Dx11WithDx12::ReleaseSyncResourcesLocked()
     {
         CloseHandle(Dx11SharedHandleForTextureCopy);
         Dx11SharedHandleForTextureCopy = NULL;
+    }
+
+    if (Dx12TextureCopyEvent != NULL)
+    {
+        CloseHandle(Dx12TextureCopyEvent);
+        Dx12TextureCopyEvent = NULL;
     }
 
     TextureCopyFenceValue = 1;
@@ -230,6 +233,15 @@ bool Dx11WithDx12::SyncDx11ToDx12()
     return true;
 }
 
+// vkd3d-proton can map multiple D3D12 queues onto a single VkQueue (e.g. RADV has only one graphics queue).
+// With the DX11 FG swapchain interop also waiting on D3D11 from D3D12, a GPU side D3D11 wait on D3D12 can
+// end up in a cycle and deadlock. Wait on the CPU instead so D3D11 never blocks on D3D12 on the GPU.
+bool Dx11WithDx12::UseCpuWaitForDx12()
+{
+    return State::Instance().isRunningOnLinux &&
+           State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
+}
+
 bool Dx11WithDx12::SyncDx12ToDx11()
 {
     std::lock_guard<std::mutex> lock(SyncMutex);
@@ -247,6 +259,47 @@ bool Dx11WithDx12::SyncDx12ToDx11()
         return false;
     }
 
+    if (UseCpuWaitForDx12())
+    {
+        // Upscaler work is short, polling avoids the event wake up latency under Wine
+        const auto spinStart = Util::MillisecondsNow();
+        while (Util::MillisecondsNow() - spinStart < 2.0)
+        {
+            if (Dx12FenceTextureCopy->GetCompletedValue() >= fenceValue)
+                return true;
+
+            YieldProcessor();
+        }
+
+        if (Dx12FenceTextureCopy->GetCompletedValue() >= fenceValue)
+            return true;
+
+        if (Dx12TextureCopyEvent == NULL)
+            Dx12TextureCopyEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+
+        if (Dx12TextureCopyEvent == NULL)
+        {
+            LOG_ERROR("Dx11WithDx12 can't create texture copy event");
+            return false;
+        }
+
+        result = Dx12FenceTextureCopy->SetEventOnCompletion(fenceValue, Dx12TextureCopyEvent);
+        if (result != S_OK)
+        {
+            LOG_ERROR("Dx11WithDx12 SetEventOnCompletion failed for fence {}: {:X}", fenceValue, (UINT) result);
+            return false;
+        }
+
+        if (WaitForSingleObject(Dx12TextureCopyEvent, 5000) != WAIT_OBJECT_0)
+        {
+            LOG_ERROR("Dx11WithDx12 CPU wait timed out for fence {}, completed: {}", fenceValue,
+                      Dx12FenceTextureCopy->GetCompletedValue());
+            return false;
+        }
+
+        return true;
+    }
+
     result = Dx11DeviceContext->Wait(Dx11FenceTextureCopy, fenceValue);
     if (result != S_OK)
     {
@@ -258,27 +311,30 @@ bool Dx11WithDx12::SyncDx12ToDx11()
     return true;
 }
 
-void Dx11WithDx12::ResetUpscalerResourceCache(bool releaseSyncResources)
+void Dx11WithDx12::ResetUpscalerResourceCache(D3D11_UPSCALER_RESOURCE_CACHE_C& cache, bool releaseSyncResources)
 {
-    ReleaseSharedResource(&UpscalerResourceCache.Color);
-    ReleaseSharedResource(&UpscalerResourceCache.Mv);
-    ReleaseSharedResource(&UpscalerResourceCache.Depth);
-    ReleaseSharedResource(&UpscalerResourceCache.Reactive);
-    ReleaseSharedResource(&UpscalerResourceCache.Exposure);
+    ReleaseSharedResource(&cache.Color);
+    ReleaseSharedResource(&cache.Reactive);
+    ReleaseSharedResource(&cache.Exposure);
+
+    for (UINT i = 0; i < DX11_WITH_DX12_INPUT_FRAMES; ++i)
+    {
+        ReleaseSharedResource(&cache.Mv[i]);
+        ReleaseSharedResource(&cache.Depth[i]);
+    }
 
     for (UINT i = 0; i < DX11_WITH_DX12_CACHED_FRAMES; ++i)
     {
-        ReleaseSharedResource(&UpscalerResourceCache.Output[i]);
-        UpscalerResourceCache.ParamOutput[i] = nullptr;
+        ReleaseSharedResource(&cache.Output[i]);
+        cache.ParamOutput[i] = nullptr;
     }
 
-    ClearLastPreparedUpscalerFrameState();
+    ClearLastPreparedUpscalerFrameState(cache);
+    cache.FrameIndex = 0;
+    cache.Generation = CacheGeneration;
 
     if (releaseSyncResources)
         ReleaseSyncResources();
-
-    ClearLastPreparedUpscalerFrameState();
-    ResetUpscalerFrameId();
 }
 
 void Dx11WithDx12::Init(ID3D11Device* dx11Device, ID3D11DeviceContext* dx11Context)
@@ -337,7 +393,6 @@ void Dx11WithDx12::Init(ID3D11Device* dx11Device, ID3D11DeviceContext* dx11Conte
     if (dx11DeviceResult != S_OK || newDx11Device == nullptr)
     {
         LOG_ERROR("QueryInterface ID3D11Device5 result: {0:x}", dx11DeviceResult);
-        newDx11Context->Release();
         return;
     }
 
@@ -348,12 +403,9 @@ void Dx11WithDx12::Init(ID3D11Device* dx11Device, ID3D11DeviceContext* dx11Conte
 
     if (dx11Changed || dx12Changed)
     {
-        ResetUpscalerResourceCache(true);
-
-        if (DT != nullptr || DT.get() != nullptr)
-            DT.reset();
-
-        DT = std::make_unique<DepthTransfer_Dx11>("DT", newDx11Device);
+        // Caches are owned by features, they will release their resources on next use
+        CacheGeneration++;
+        ReleaseSyncResources();
     }
 
     Dx11DeviceContext = newDx11Context;
@@ -394,9 +446,16 @@ bool Dx11WithDx12::CopyTextureFrom11To12(ID3D11Resource* InResource, D3D11_TEXTU
             OutResource->Dx11Handle != nullptr && OutResource->Desc.Format == DXGI_FORMAT_R32_FLOAT &&
             OutResource->UsesNTHandle == useNTHandle && TextureDescEquals(OutResource->SourceDesc, sourceDescCache);
 
+        // Each cache entry has its own depth transfer so its buffer isn't shared between frames or features
+        auto& DT = OutResource->DepthTransfer;
+
+        if (DT == nullptr)
+            DT = new DepthTransfer_Dx11("DT", Dx11Device);
+
         if (!sharedTextureMatches)
         {
-            ReleaseSharedResource(OutResource);
+            // Keeps the depth transfer, only the shared texture and its handle are recreated
+            ReleaseSharedTexture(OutResource);
             if (!DT->CreateBufferResource(Dx11Device, InResource, OutResource->SharedTexture, useNTHandle))
             {
                 LOG_ERROR("DepthTransfer_Dx11 buffer creation failed");
@@ -418,7 +477,7 @@ bool Dx11WithDx12::CopyTextureFrom11To12(ID3D11Resource* InResource, D3D11_TEXTU
             if (FAILED(result) || OutResource->Dx11Handle == nullptr)
             {
                 LOG_ERROR("DepthTransfer_Dx11 shared handle creation failed: {:X}", (UINT) result);
-                ReleaseSharedResource(OutResource);
+                ReleaseSharedTexture(OutResource);
                 originalTexture->Release();
                 return false;
             }
@@ -710,18 +769,20 @@ bool Dx11WithDx12::CheckMask(ResourceMask mask, ResourceMask resource)
     return (mask & resource) != ResourceMask::None;
 }
 
-bool Dx11WithDx12::HasPreparedUpscalerResources(ResourceMask mask, UINT64 frameId)
+bool Dx11WithDx12::HasPreparedUpscalerResources(const D3D11_UPSCALER_RESOURCE_CACHE_C& cache, ResourceMask mask,
+                                                UINT64 frameId)
 {
-    const auto currentFrameId = frameId != 0 ? frameId : LastPreparedUpscalerFrameId;
+    const auto currentFrameId = frameId != 0 ? frameId : cache.LastPreparedFrameId;
 
-    if (currentFrameId == 0)
+    if (currentFrameId == 0 || cache.Generation != CacheGeneration)
         return false;
 
-    if ((LastPreparedUpscalerMask & mask) != mask)
+    if ((cache.LastPreparedMask & mask) != mask)
         return false;
 
-    auto& cache = GetUpscalerResourceCache();
-    const auto outputIndex = UpscalerFrameIndex % DX11_WITH_DX12_CACHED_FRAMES;
+    const auto outputIndex = cache.FrameIndex % DX11_WITH_DX12_CACHED_FRAMES;
+    const auto& mv = cache.CurrentMv();
+    const auto& depth = cache.CurrentDepth();
 
     if (CheckMask(mask, ResourceMask::Color) &&
         (cache.Color.Dx12Resource == nullptr || cache.Color.LastPreparedFrame != currentFrameId))
@@ -729,14 +790,13 @@ bool Dx11WithDx12::HasPreparedUpscalerResources(ResourceMask mask, UINT64 frameI
         return false;
     }
 
-    if (CheckMask(mask, ResourceMask::Mv) &&
-        (cache.Mv.Dx12Resource == nullptr || cache.Mv.LastPreparedFrame != currentFrameId))
+    if (CheckMask(mask, ResourceMask::Mv) && (mv.Dx12Resource == nullptr || mv.LastPreparedFrame != currentFrameId))
     {
         return false;
     }
 
     if (CheckMask(mask, ResourceMask::Depth) &&
-        (cache.Depth.Dx12Resource == nullptr || cache.Depth.LastPreparedFrame != currentFrameId))
+        (depth.Dx12Resource == nullptr || depth.LastPreparedFrame != currentFrameId))
     {
         return false;
     }
@@ -809,11 +869,10 @@ bool PrepareCachedResource(const char* name, const NVSDK_NGX_Parameter* paramete
 }
 } // namespace
 
-Dx11WithDx12::PrepareResourcesResult Dx11WithDx12::PrepareUpscalerResources(const NVSDK_NGX_Parameter* parameters,
-                                                                            ResourceMask mask, UINT frameIndex,
-                                                                            UINT64 frameId, bool dontUseNTShared,
-                                                                            bool reactiveRequired,
-                                                                            bool syncAfterPrepare)
+Dx11WithDx12::PrepareResourcesResult
+Dx11WithDx12::PrepareUpscalerResources(D3D11_UPSCALER_RESOURCE_CACHE_C& cache, const NVSDK_NGX_Parameter* parameters,
+                                       ResourceMask mask, UINT frameIndex, UINT64 frameId, bool dontUseNTShared,
+                                       bool reactiveRequired, bool syncAfterPrepare)
 {
     PrepareResourcesResult result = {};
 
@@ -835,8 +894,14 @@ Dx11WithDx12::PrepareResourcesResult Dx11WithDx12::PrepareUpscalerResources(cons
         return result;
     }
 
-    auto& cache = GetUpscalerResourceCache();
+    if (cache.Generation != CacheGeneration)
+    {
+        LOG_INFO("Dx11WithDx12 resource cache belongs to old devices, releasing it");
+        ResetUpscalerResourceCache(cache);
+    }
+
     const auto outputIndex = frameIndex % DX11_WITH_DX12_CACHED_FRAMES;
+    const auto inputIndex = frameIndex % DX11_WITH_DX12_INPUT_FRAMES;
     cache.frameId = frameId;
     bool ok = true;
     bool missing = false;
@@ -852,16 +917,17 @@ Dx11WithDx12::PrepareResourcesResult Dx11WithDx12::PrepareUpscalerResources(cons
     if (CheckMask(mask, ResourceMask::Mv))
     {
         missing = false;
-        ok &= PrepareCachedResource("MotionVectors", parameters, NVSDK_NGX_Parameter_MotionVectors, &cache.Mv, true,
-                                    false, true, dontUseNTShared, frameId, Dx12Device, &missing);
+        ok &=
+            PrepareCachedResource("MotionVectors", parameters, NVSDK_NGX_Parameter_MotionVectors, &cache.Mv[inputIndex],
+                                  true, false, true, dontUseNTShared, frameId, Dx12Device, &missing);
         result.MissingMv = missing;
     }
 
     if (CheckMask(mask, ResourceMask::Depth))
     {
         missing = false;
-        ok &= PrepareCachedResource("Depth", parameters, NVSDK_NGX_Parameter_Depth, &cache.Depth, true, true, true,
-                                    dontUseNTShared, frameId, Dx12Device, &missing);
+        ok &= PrepareCachedResource("Depth", parameters, NVSDK_NGX_Parameter_Depth, &cache.Depth[inputIndex], true,
+                                    true, true, dontUseNTShared, frameId, Dx12Device, &missing);
         result.MissingDepth = missing;
     }
 
@@ -904,15 +970,16 @@ Dx11WithDx12::PrepareResourcesResult Dx11WithDx12::PrepareUpscalerResources(cons
 
     if (ok)
     {
-        UpscalerFrameIndex = outputIndex;
-        LastPreparedUpscalerFrameId = frameId;
-        LastPreparedUpscalerMask = mask;
+        cache.FrameIndex = frameIndex;
+        cache.LastPreparedFrameId = frameId;
+        cache.LastPreparedMask = mask;
     }
 
     return result;
 }
 
-bool Dx11WithDx12::CopyUpscalerOutputToDx11(UINT frameIndex)
+bool Dx11WithDx12::CopyUpscalerOutputToDx11(D3D11_UPSCALER_RESOURCE_CACHE_C& cache, UINT frameIndex,
+                                            const D3D11_BOX* InView, UINT InDstX, UINT InDstY)
 {
     if (Dx11DeviceContext == nullptr)
     {
@@ -920,7 +987,6 @@ bool Dx11WithDx12::CopyUpscalerOutputToDx11(UINT frameIndex)
         return false;
     }
 
-    auto& cache = GetUpscalerResourceCache();
     const auto outputIndex = frameIndex % DX11_WITH_DX12_CACHED_FRAMES;
 
     if (cache.ParamOutput[outputIndex] == nullptr || cache.Output[outputIndex].SharedTexture == nullptr)
@@ -935,7 +1001,18 @@ bool Dx11WithDx12::CopyUpscalerOutputToDx11(UINT frameIndex)
         return false;
     }
 
-    Dx11DeviceContext->CopyResource(cache.ParamOutput[outputIndex], cache.Output[outputIndex].SharedTexture);
+    // An already shared output is written in place, copying a resource onto itself is invalid
+    auto output = cache.ParamOutput[outputIndex];
+    auto shared = cache.Output[outputIndex].SharedTexture;
+
+    if (output != static_cast<ID3D11Resource*>(shared) && InView != nullptr)
+        Dx11DeviceContext->CopySubresourceRegion(output, 0, InDstX, InDstY, 0, shared, 0, InView);
+    else if (output != static_cast<ID3D11Resource*>(shared))
+        Dx11DeviceContext->CopyResource(output, shared);
+
+    // After a CPU wait the D3D11 queue is idle, submit right away instead of waiting for the next flush
+    if (UseCpuWaitForDx12())
+        Dx11DeviceContext->Flush();
 
     // Games flush should be enough, so disabled for now
     // Dx11DeviceContext->Flush();

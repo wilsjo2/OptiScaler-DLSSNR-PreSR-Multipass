@@ -1,4 +1,6 @@
 #pragma once
+// Before ResTrack_Dx12.h: Hudfix_Dx12.h's CaptureInfo::Upscaler enumerator hides the Upscaler type
+#include <proxies/NVNGX_Proxy.h>
 #include "DlssNr_Dx12_ModelState.h"
 #include <dlssnr/DlssNr_Placement.h>
 #include <dlssnr/DlssNr_FinishedReady.h>
@@ -32,7 +34,6 @@
 #include <State.h>
 #include <Util.h>
 
-#include <proxies/NVNGX_Proxy.h>
 #include <hooks/D3D12_Hooks.h>
 #include <gpu_time/GpuTime_Dx12.h>
 #include "DlssNr_GpuTime.h"

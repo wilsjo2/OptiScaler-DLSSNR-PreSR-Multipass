@@ -1,16 +1,16 @@
 ﻿#include "pch.h"
 #include "ll_xell.h"
 
+#include <Util.h>
 #include <magic_enum.hpp>
 #include <proxies/XeLL_Proxy.h>
 #include <nvapi/fakenvapi/log.h>
+#include <wrl/client.h>
 
 void XeLL::xell_sleep(uint32_t frame_id)
 {
-    sent_sleep_frame_ids[frame_id % 64] = true;
-
-    // Don't call XeLL when trying to disable XeLL with XeFG active
-    if (!forced_mode || is_enabled())
+    // Don't call XeLL when trying to disable XeLL with XeFG active, or when another output does the sleeping
+    if (!markers_only && (!forced_mode || is_enabled()))
     {
         LOG_TRACE_LOWLATENCY("Sleeping with frame_id: {}", frame_id);
         o_xellSleep(xell_context, frame_id);
@@ -19,14 +19,7 @@ void XeLL::xell_sleep(uint32_t frame_id)
 
 void XeLL::add_marker(uint32_t frame_id, xell_latency_marker_type_t marker)
 {
-    if (!sent_sleep_frame_ids[frame_id % 64])
-    {
-        LOG_DEBUG("Skipping reporting {} for XeLL because sleep wasn't sent for frame id: {}",
-                  magic_enum::enum_name(marker), frame_id);
-        return;
-    }
-
-    if (!forced_mode || is_enabled())
+    if (markers_only || !forced_mode || is_enabled())
         o_xellAddMarkerData(xell_context, frame_id, marker);
 }
 
@@ -43,57 +36,27 @@ bool XeLL::init(IUnknown* pDevice)
         return false;
     }
 
-    ID3D12Device* dx12_pDevice = nullptr;
-    HRESULT hr = pDevice->QueryInterface(__uuidof(ID3D12Device), reinterpret_cast<void**>(&dx12_pDevice));
+    // Match the ReShade layer used by Streamline and the frame-generation queues.
+    Microsoft::WRL::ComPtr<IUnknown> originalDevice;
+    if (reshadeModule == nullptr)
+        originalDevice.Attach(Util::GetReShadeOriginal(pDevice));
+
+    auto device = originalDevice != nullptr ? originalDevice.Get() : pDevice;
+    HRESULT hr = device->QueryInterface(__uuidof(ID3D12Device), reinterpret_cast<void**>(&dx12_device));
     if (hr != S_OK)
         return false;
 
-    auto result = o_xellD3D12CreateContext(dx12_pDevice, &xell_context) == XELL_RESULT_SUCCESS;
+    if (originalDevice != nullptr)
+        LOG_DEBUG("Unwrapped ReShade device: {:X} -> {:X}", (size_t) pDevice, (size_t) dx12_device);
 
-    if (result)
+    // Created as OptiScaler's own, it goes straight to the real XeLL. Opti's XeFG gets it too.
+    auto result = InputXeLL::D3D12CreateLocalContext(dx12_device, (InputXeLL::xell_input_handle_t*) &xell_context) ==
+                  XELL_RESULT_SUCCESS;
+
+    if (!result)
     {
-        XellHooks::blockExternalContexts(true);
-
-#ifdef LOW_LATENCY_INPUTS
-        // Resend of XeLL-exclusive data we got from XeLL inputs
-
-        // Ok, this isn't ideal BUT when using low latency inputs this *should* be low latency xell inputs context
-        auto xellInputContext = (InputXeLL::xell_input_handle_t) XellHooks::getOurContext();
-
-        if (!xellInputContext)
-            return true;
-
-        auto resendResult = XELL_RESULT_SUCCESS;
-
-        do
-        {
-            if (xellInputContext->d3d12AppQueue)
-                resendResult = xellD3D12SetAppQueue(xellInputContext->d3d12AppQueue);
-
-            if (resendResult != XELL_RESULT_SUCCESS)
-                break;
-
-            // This might be problematic, pointer could be freed
-            if (xellInputContext->displayInfo)
-                resendResult = xellSetDisplayInfo(xellInputContext->displayInfo);
-
-            if (resendResult != XELL_RESULT_SUCCESS)
-                break;
-
-            resendResult = xellSetFgEnabled(xellInputContext->setFgEnabledParam1, xellInputContext->setFgEnabledParam2);
-
-            if (resendResult != XELL_RESULT_SUCCESS)
-                break;
-
-            resendResult = xellSetGeneratedFramesCount(xellInputContext->setGeneratedFramesCountFrameId,
-                                                       xellInputContext->framesCount);
-        } while (false);
-
-        if (resendResult != XELL_RESULT_SUCCESS)
-            LOG_WARN("XeLL resend failed: {}", magic_enum::enum_name(resendResult));
-#else
-        XellHooks::setOurContext(xell_context);
-#endif
+        dx12_device->Release();
+        dx12_device = nullptr;
     }
 
     return result;
@@ -101,9 +64,15 @@ bool XeLL::init(IUnknown* pDevice)
 
 void XeLL::deinit()
 {
-    XellHooks::blockExternalContexts(false);
-
     o_xellDestroyContext(xell_context);
+
+    // Held while the context lives
+    if (dx12_device != nullptr)
+    {
+        dx12_device->Release();
+        dx12_device = nullptr;
+    }
+
     LOG_INFO("XeLL deinitialized");
 }
 
@@ -134,24 +103,20 @@ void XeLL::set_sleep_mode(SleepMode* sleep_mode)
     xell_sleep_params.minimumIntervalUs = sleep_mode->minimum_interval_us;
     xell_sleep_params.bLowLatencyBoost = sleep_mode->low_latency_boost;
 
-    static uint32_t last_bLowLatencyMode = 0;
-    static uint32_t last_minimumIntervalUs = 0;
-    static uint32_t last_bLowLatencyBoost = 0;
-
     // With ForceXeLL we have FG enabled but not actually working
     // but their FPS limit thinks that the FG is working
     if (Config::Instance()->ForceXeLL.value_or_default())
         xell_sleep_params.minimumIntervalUs /= 2;
 
-    if (xell_sleep_params.bLowLatencyMode != last_bLowLatencyMode ||
-        xell_sleep_params.minimumIntervalUs != last_minimumIntervalUs ||
-        xell_sleep_params.bLowLatencyBoost != last_bLowLatencyBoost)
+    if (xell_sleep_params.bLowLatencyMode != last_low_latency_mode ||
+        xell_sleep_params.minimumIntervalUs != last_minimum_interval_us ||
+        xell_sleep_params.bLowLatencyBoost != last_low_latency_boost)
     {
         auto result = o_xellSetSleepMode(xell_context, &xell_sleep_params) == XELL_RESULT_SUCCESS;
 
-        last_bLowLatencyMode = xell_sleep_params.bLowLatencyMode;
-        last_minimumIntervalUs = xell_sleep_params.minimumIntervalUs;
-        last_bLowLatencyBoost = xell_sleep_params.bLowLatencyBoost;
+        last_low_latency_mode = xell_sleep_params.bLowLatencyMode;
+        last_minimum_interval_us = xell_sleep_params.minimumIntervalUs;
+        last_low_latency_boost = xell_sleep_params.bLowLatencyBoost;
     }
 }
 
@@ -202,11 +167,7 @@ void XeLL::set_marker(IUnknown* pDevice, const MarkerParams& marker_params)
 
 void XeLL::set_async_marker(IUnknown* pCommandQueue, const MarkerParams& marker_params)
 {
-    if (!pCommandQueue)
-    {
-        LOG_ERROR("Invalid pointer");
-        return;
-    }
+    // The command queue isn't needed, XeLL inputs without an app queue send these too
 
     // XeLL frame ids are uint64_t
     auto frame_id = (uint32_t) marker_params.frame_id;
@@ -238,46 +199,6 @@ void XeLL::sleep(std::optional<uint32_t> frame_id)
     }
 
     xell_sleep((uint32_t) sleep_last_id);
-}
-
-xell_result_t XeLL::xellD3D12SetAppQueue(ID3D12CommandQueue* appQueue) const
-{
-    if (!o_xellD3D12SetAppQueue)
-        return XELL_RESULT_ERROR_UNKNOWN;
-
-    return o_xellD3D12SetAppQueue(xell_context, appQueue);
-}
-
-xell_result_t XeLL::xellSetDisplayInfo(void* displayInfo) const
-{
-    if (!o_xellSetDisplayInfo)
-        return XELL_RESULT_ERROR_UNKNOWN;
-
-    return o_xellSetDisplayInfo(xell_context, displayInfo);
-}
-
-xell_result_t XeLL::xellSetFgEnabled(uint32_t param1, uint32_t param2) const
-{
-    if (!o_xellSetFgEnabled)
-        return XELL_RESULT_ERROR_UNKNOWN;
-
-    return o_xellSetFgEnabled(xell_context, param1, param2);
-}
-
-xell_result_t XeLL::xellSetGeneratedFramesCount(uint32_t frameId, uint32_t framesCount) const
-{
-    if (!o_xellSetGeneratedFramesCount)
-        return XELL_RESULT_ERROR_UNKNOWN;
-
-    return o_xellSetGeneratedFramesCount(xell_context, frameId, framesCount);
-}
-
-xell_result_t XeLL::xellGetLastPresentStartFrameId(uint32_t* p_frame_id) const
-{
-    if (!o_xellGetLastPresentStartFrameId)
-        return XELL_RESULT_ERROR_UNKNOWN;
-
-    return o_xellGetLastPresentStartFrameId(xell_context, p_frame_id);
 }
 
 xell_result_t XeLL::xellGetFramesReports(xell_frame_report_t* outdata) const

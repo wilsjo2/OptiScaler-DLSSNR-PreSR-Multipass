@@ -6,6 +6,7 @@
 #include <proxies/XeFG_Proxy.h>
 
 #include "shaders/depth_invert/DI_Dx12.h"
+#include "XeFG_DynamicMFG.h"
 
 #include <xell.h>
 #include <xell_d3d12.h>
@@ -25,6 +26,10 @@ class XeFG_Dx12 : public virtual IFGFeature_Dx12
     std::optional<bool> _haveHudless = std::nullopt;
     bool _uiComposition = false;
 
+    // Dynamic MFG
+    XeFG_DynamicMFG _dynamic;
+    void SetGenerationOff(bool off); // Dynamic MFG 1X
+
     std::unique_ptr<DI_Dx12> _depthInvert;
 
     static void xefgLogCallback(const char* message, xefg_swapchain_logging_level_t level, void* userData);
@@ -40,17 +45,20 @@ class XeFG_Dx12 : public virtual IFGFeature_Dx12
     bool CreateObjects(ID3D12Device* InDevice) override final;
 
   public:
+    // Uses a temporary context, works before our FG swapchain exists. Returns 0 on failure
+    static int QueryMaxInterpolationCount(ID3D12Device* device);
+
     // IFGFeature
     const char* Name() override final;
     feature_version Version() override final;
     HWND Hwnd() override final;
 
     // IFGFeature_Dx12
-    bool CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQueue, DXGI_SWAP_CHAIN_DESC* desc,
-                         IDXGISwapChain** swapChain, bool readyToRelease) override final;
-    bool CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* cmdQueue, HWND hwnd, DXGI_SWAP_CHAIN_DESC1* desc,
-                          DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pFullscreenDesc, IDXGISwapChain1** swapChain,
-                          bool readyToRelease) override final;
+    bool CreateSwapchainInternal(IDXGIFactory* factory, ID3D12CommandQueue* cmdQueue, DXGI_SWAP_CHAIN_DESC* desc,
+                                 IDXGISwapChain** swapChain) override final;
+    bool CreateSwapchain1Internal(IDXGIFactory* factory, ID3D12CommandQueue* cmdQueue, HWND hwnd,
+                                  DXGI_SWAP_CHAIN_DESC1* desc, DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pFullscreenDesc,
+                                  IDXGISwapChain1** swapChain) override final;
 
     bool ReleaseSwapchain(HWND hwnd) override final;
 

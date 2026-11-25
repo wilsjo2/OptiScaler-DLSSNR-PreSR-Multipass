@@ -7,6 +7,7 @@
 #include <ankerl/unordered_dense.h>
 #include <misc/IdentifyGpu.h>
 #include <framegen/nvngx/Nvngx_FG.h>
+#include <upscalers/nvngx/Nvngx_RR.h>
 
 /// @brief Calculates the resolution scaling ratio override based on the provided quality level and current
 /// configuration.
@@ -336,16 +337,17 @@ NVSDK_NGX_Result NVNGX_Parameters::Get(const char* key, ID3D12Resource** value) 
 
 void NVNGX_Parameters::Reset()
 {
-    if (!m_values.empty())
-    {
-        // Preserve usage type if set
-        uint32_t allocType = NGX_AllocTypes::Unknown;
-        NVSDK_NGX_Result result = Get(NGX_AllocTypes::AllocKey.data(), &allocType);
-        m_values.clear();
+    // Preserve usage type if set
+    uint32_t allocType = NGX_AllocTypes::Unknown;
+    NVSDK_NGX_Result result = Get(NGX_AllocTypes::AllocKey.data(), &allocType);
 
-        if (result != NVSDK_NGX_Result_Fail)
-            Set(NGX_AllocTypes::AllocKey.data(), allocType);
+    {
+        const std::lock_guard<std::mutex> lock(m_mutex);
+        m_values.clear();
     }
+
+    if (result != NVSDK_NGX_Result_Fail)
+        Set(NGX_AllocTypes::AllocKey.data(), allocType);
 
     LOG_DEBUG("Start");
 
@@ -357,6 +359,7 @@ void NVNGX_Parameters::Reset()
 
 std::vector<std::string> NVNGX_Parameters::enumerate() const
 {
+    const std::lock_guard<std::mutex> lock(m_mutex);
     std::vector<std::string> keys;
     for (auto& value : m_values)
     {
@@ -810,8 +813,14 @@ void InitNGXParameters(NVSDK_NGX_Parameter* InParams, API api)
         InParams->Set(NVSDK_NGX_Parameter_FrameInterpolation_FeatureInitResult, 1);
 
         // Streamline handle the max interpolated frame count
-        int countMax =
-            State::Instance().activeFgNvngx != FGNvngxReplacement::None ? Nvngx_FG::getMaxFakeFramesCount() : 1;
+        // Nvngx replacement overrides whatever the real driver table reports (e.g. 1 on RTX 40)
+        int countMax = 1;
+
+        if (State::Instance().activeFgNvngx != FGNvngxReplacement::None)
+            countMax = Nvngx_FG::streamlineMaxFakeFramesCount(api);
+        else
+            InParams->Get("DLSSG.MultiFrameCountMax", &countMax);
+
         InParams->Set("DLSSG.MultiFrameCountMax", countMax);
 
         if (State::Instance().NVNGX_Engine == NVSDK_NGX_ENGINE_TYPE_UNREAL ||
@@ -827,6 +836,9 @@ void InitNGXParameters(NVSDK_NGX_Parameter* InParams, API api)
             InParams->Set("FrameGeneration.MinDriverVersionMajor", 0);
         }
     }
+
+    // Ray reconstruction is available when it doesn't run on NVIDIA's DLSSD
+    Nvngx_RR::PopulateParameters(InParams, api);
 }
 
 NVNGX_Parameters* GetNGXParameters(API api, bool isPersistent)

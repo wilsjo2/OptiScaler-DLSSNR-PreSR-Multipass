@@ -5,6 +5,7 @@
 #include <shaders/format_transfer/FT_Dx12.h>
 #include <shaders/hud_copy/HudCopy_Dx12.h>
 #include <shaders/hudless_compare_compute/HCC_Dx12.h>
+#include <shaders/reproject/Reproject_Dx12.h>
 
 #include <ffx_framegeneration.h>
 
@@ -17,21 +18,30 @@ class FSRFG_Dx12 : public virtual IFGFeature_Dx12
     FfxApiSurfaceFormat _usingHudlessFormat = FFX_API_SURFACE_FORMAT_UNKNOWN;
     feature_version _version { 0, 0, 0 };
 
+    // Custom FG and swapchain provider, nullptr for the regular FFX one
+    CustomFfxModule* _custom = FfxApiProxy::ActiveCustomFgDx12();
+
     bool _linkedHudlesDesc = false;
 
     uint32_t _maxRenderWidth = 0;
     uint32_t _maxRenderHeight = 0;
 
-    std::unique_ptr<HudCopy_Dx12> _hudCopy[BUFFER_COUNT];
-    std::unique_ptr<HCC_Dx12> _hudlessCompareCompute[BUFFER_COUNT];
+    // Callbacks run on FFX's thread, guards what they use against ReleaseResourceCopies
+    std::mutex _callbackResourceMutex;
+
+    // Dispatched in order on the same queue, one buffer is enough
+    std::unique_ptr<HudCopy_Dx12> _hudCopy;
+    std::unique_ptr<HCC_Dx12> _hudlessCompareCompute;
 
     std::unique_ptr<FT_Dx12> _hudlessTransfer[BUFFER_COUNT];
     ID3D12Resource* _hudlessCopyResource[BUFFER_COUNT] {};
     std::unique_ptr<FT_Dx12> _uiTransfer[BUFFER_COUNT];
-    ID3D12Resource* _uiCopyResource[BUFFER_COUNT] {};
+
+    std::pair<InputDelta, uint64_t> _deltaSimToFake[BUFFER_COUNT];
 
     ID3D12GraphicsCommandList* _fgCommandList[BUFFER_COUNT] {};
     ID3D12CommandAllocator* _fgCommandAllocator[BUFFER_COUNT] {};
+    UINT64 _fgAllocatorFenceValues[BUFFER_COUNT] {}; // _scFence values
 
     static FfxApiResourceState GetFfxApiState(D3D12_RESOURCE_STATES state)
     {
@@ -71,6 +81,7 @@ class FSRFG_Dx12 : public virtual IFGFeature_Dx12
 
   protected:
     void ReleaseObjects() override final;
+    void ReleaseResourceCopies() override final;
     bool CreateObjects(ID3D12Device* InDevice) override final;
 
   public:
@@ -82,11 +93,11 @@ class FSRFG_Dx12 : public virtual IFGFeature_Dx12
     void* FrameGenerationContext() override final;
     void* SwapchainContext() override final;
 
-    bool CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQueue, DXGI_SWAP_CHAIN_DESC* desc,
-                         IDXGISwapChain** swapChain, bool readyToRelease) override final;
-    bool CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* cmdQueue, HWND hwnd, DXGI_SWAP_CHAIN_DESC1* desc,
-                          DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pFullscreenDesc, IDXGISwapChain1** swapChain,
-                          bool readyToRelease) override final;
+    bool CreateSwapchainInternal(IDXGIFactory* factory, ID3D12CommandQueue* cmdQueue, DXGI_SWAP_CHAIN_DESC* desc,
+                                 IDXGISwapChain** swapChain) override final;
+    bool CreateSwapchain1Internal(IDXGIFactory* factory, ID3D12CommandQueue* cmdQueue, HWND hwnd,
+                                  DXGI_SWAP_CHAIN_DESC1* desc, DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pFullscreenDesc,
+                                  IDXGISwapChain1** swapChain) override final;
     bool ReleaseSwapchain(HWND hwnd) override final;
 
     void CreateContext(ID3D12Device* device, FG_Constants& fgConstants) override final;
@@ -102,6 +113,7 @@ class FSRFG_Dx12 : public virtual IFGFeature_Dx12
     bool SetResource(Dx12Resource* inputResource) override final;
     void SetCommandQueue(FG_ResourceType type, ID3D12CommandQueue* queue) override final;
 
+    ffxReturnCode_t PresentCallback(ffxCallbackDescFrameGenerationPresent* params);
     ffxReturnCode_t DispatchCallback(ffxDispatchDescFrameGeneration* params);
 
     FSRFG_Dx12() : IFGFeature_Dx12(), IFGFeature()
@@ -113,4 +125,5 @@ class FSRFG_Dx12 : public virtual IFGFeature_Dx12
 
     // Inherited via IFGFeature_Dx12
     bool SetInterpolatedFrameCount(UINT interpolatedFrameCount) override;
+    // bool HasReprojection() override final { return true; };
 };

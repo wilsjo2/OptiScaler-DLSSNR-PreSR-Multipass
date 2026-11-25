@@ -8,15 +8,13 @@ void DLSSFeature::ProcessEvaluateParams(NVSDK_NGX_Parameter* InParameters)
 {
     LOG_FUNC();
 
-    // override sharpness
+    // override sharpness, _sharpness is zeroed by the base when RCAS runs this frame
     if (Config::Instance()->OverrideSharpness.value_or_default() && !Config::Instance()->RcasEnabled.value_or_default())
     {
-        auto sharpness = Config::Instance()->Sharpness.value_or_default();
-        sharpness = std::min(sharpness, 1.0f);
-        InParameters->Set(NVSDK_NGX_Parameter_Sharpness, sharpness);
+        InParameters->Set(NVSDK_NGX_Parameter_Sharpness, _sharpness);
     }
     // rcas enabled
-    else
+    else if (Config::Instance()->RcasEnabled.value_or_default())
     {
         InParameters->Set(NVSDK_NGX_Parameter_Sharpness, 0.0f);
     }
@@ -263,9 +261,18 @@ void DLSSFeature::ProcessInitParams(NVSDK_NGX_Parameter* InParameters)
     LOG_FUNC_RESULT(0);
 }
 
-void DLSSFeature::ReadVersion()
+void DLSSFeature::ReadVersion(const std::wstring& customDll)
 {
     LOG_FUNC();
+
+    if (!customDll.empty())
+    {
+        if (auto version = Util::GetFileVersionString(customDll); !version.empty())
+            _version.parse_version(version.c_str());
+
+        LOG_INFO("Custom DLSS v{0}.{1}.{2} loaded.", _version.major, _version.minor, _version.patch);
+        return;
+    }
 
     std::vector<std::string> possibleDlls;
 
@@ -314,8 +321,7 @@ void DLSSFeature::Shutdown()
 {
     LOG_FUNC();
 
-    if (NVNGXProxy::NVNGXModule() != nullptr)
-        UnhookApis();
+    // NGX requirement hooks are shared by all features and stay for the session
 
     LOG_FUNC_RESULT(0);
 }

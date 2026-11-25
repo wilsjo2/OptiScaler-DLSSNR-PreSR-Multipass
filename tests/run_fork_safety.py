@@ -178,7 +178,7 @@ int main() {
 }
 '''
 # Execute the actual render-index gate with missing resources and out-of-range indices.
-guard = section(dx, '                UINT backBufferIdx =', '                ID3D12CommandAllocator* commandAllocator')
+guard = section(dx, '            UINT backBufferIdx =', '            ImGui_ImplDX12_NewFrame();')
 guard_code = r'''
 struct IndexFixture {
  UINT index; unsigned releases=0;
@@ -195,10 +195,8 @@ void CheckRenderGuards() {
  IndexFixture fixture{16}; CheckIndex(&fixture); CHECK(rendered==0 && fixture.releases==1);
  fixture.index=15; CheckIndex(&fixture); CHECK(rendered==0 && fixture.releases==2);
  g_mainRenderTargetResource[15]=reinterpret_cast<ID3D12Resource*>(1);
- CheckIndex(&fixture); CHECK(rendered==0 && fixture.releases==3);
- g_commandAllocators[15]=reinterpret_cast<ID3D12CommandAllocator*>(1);
- CheckIndex(&fixture); CHECK(rendered==1 && fixture.releases==3);
- g_mainRenderTargetResource[15]=nullptr; g_commandAllocators[15]=nullptr;
+ CheckIndex(&fixture); CHECK(rendered==1 && fixture.releases==2);
+ g_mainRenderTargetResource[15]=nullptr;
 }
 '''
 if 'backBufferIdx >= NUM_BACK_BUFFERS' in guard:

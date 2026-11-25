@@ -1,15 +1,86 @@
 #pragma once
 #include "NVNGX_Parameter.h"
 
+#include <Util.h>
+
+#include <intrin.h>
+#include <set>
+
+// Modules using an NGX instance, the game, Streamline and mods can share one
+class NVNGXClients
+{
+  private:
+    std::mutex _mutex;
+    std::set<HMODULE> _modules;
+
+  public:
+    void Add(void* returnAddress)
+    {
+        auto module = Util::GetCallerModule(returnAddress);
+
+        // Nested calls and Opti's own inputs, they never shut down
+        if (module == dllModule)
+            return;
+
+        std::lock_guard<std::mutex> lock(_mutex);
+
+        if (_modules.insert(module).second)
+            LOG_INFO("{}", Util::WhoIsTheCaller(returnAddress));
+    }
+
+    // False while another module still uses the instance, also for a module's second shutdown
+    bool Remove(void* returnAddress)
+    {
+        auto module = Util::GetCallerModule(returnAddress);
+
+        if (module == dllModule)
+            return true;
+
+        std::lock_guard<std::mutex> lock(_mutex);
+
+        _modules.erase(module);
+
+        if (_modules.empty())
+            return true;
+
+        LOG_INFO("Skipping shutdown from {}, {} other module(s) still use NGX", Util::WhoIsTheCaller(returnAddress),
+                 _modules.size());
+
+        return false;
+    }
+};
+
+void NVNGXDx11DeviceDestroyed(IUnknown* device);
+void NVNGXDx12DeviceDestroyed(IUnknown* device);
+void NVNGXVkDeviceDestroyed(VkDevice device);
+
+// NGX init for Opti's own inputs, NVIDIA's runtime is started by the DLSS features once they're created
+NVSDK_NGX_Result NVNGXDx11InputInit(const char* InProjectId, NVSDK_NGX_EngineType InEngineType,
+                                    const char* InEngineVersion, const wchar_t* InApplicationDataPath,
+                                    ID3D11Device* InDevice, const NVSDK_NGX_FeatureCommonInfo* InFeatureInfo,
+                                    NVSDK_NGX_Version InSDKVersion);
+NVSDK_NGX_Result NVNGXDx12InputInit(const char* InProjectId, NVSDK_NGX_EngineType InEngineType,
+                                    const char* InEngineVersion, const wchar_t* InApplicationDataPath,
+                                    ID3D12Device* InDevice, const NVSDK_NGX_FeatureCommonInfo* InFeatureInfo,
+                                    NVSDK_NGX_Version InSDKVersion);
+NVSDK_NGX_Result NVNGXVkInputInit(const char* InProjectId, NVSDK_NGX_EngineType InEngineType,
+                                  const char* InEngineVersion, const wchar_t* InApplicationDataPath,
+                                  VkInstance InInstance, VkPhysicalDevice InPD, VkDevice InDevice,
+                                  PFN_vkGetInstanceProcAddr InGIPA, PFN_vkGetDeviceProcAddr InGDPA,
+                                  NVSDK_NGX_Version InSDKVersion, const NVSDK_NGX_FeatureCommonInfo* InFeatureInfo);
+
 template <typename FeatureType> struct ContextData
 {
     std::unique_ptr<FeatureType> feature;
     std::unique_ptr<NVNGX_Parameters> ownedCreateParams;
     NVSDK_NGX_Parameter* createParams = nullptr; // May also refer to the caller's passthrough parameters.
+    bool createParamsFromGame = false;           // The game's table, never destroyed by Opti
     void ClearCreateParams()
     {
         createParams = nullptr;
+        createParamsFromGame = false;
         ownedCreateParams.reset();
     }
     int changeBackendCounter = 0;
+    UINT64 lastEvalFrame = 0;
 };

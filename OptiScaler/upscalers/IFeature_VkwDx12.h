@@ -11,7 +11,7 @@
 
 #include <d3d12.h>
 #include <dxgi1_6.h>
-#include <vulkan/vulkan.hpp>
+#include <vulkan/vulkan.h>
 
 #ifdef VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan_win32.h>
@@ -83,9 +83,14 @@ class IFeature_VkwDx12 : public virtual IFeature_Vk
     VkSemaphore vkSemaphoreCopyBack[VKDX12_BUFFER_COUNT] {};
     ID3D12Fence* dx12FenceTextureCopy[VKDX12_BUFFER_COUNT] {};
     HANDLE vkSHForTextureCopy[VKDX12_BUFFER_COUNT] {};
-    ULONG _fenceValue = 0;
+    uint64_t _fenceValue = 0;
     uint64_t pendingResourceCopyValue = 0;
+    VkCommandBuffer registeredVirtualCommandBuffer = VK_NULL_HANDLE;
+    bool commandListOpen = false;
+    uint32_t _abortedWaits = 0;
     std::mutex EvaluateMutex;
+
+    std::vector<DetailedGpuTime> detailedGpuTimes;
 
     // Copy shaders
     std::unique_ptr<ResourceCopy_Vk> ColorCopy = nullptr;
@@ -102,6 +107,7 @@ class IFeature_VkwDx12 : public virtual IFeature_Vk
     PFN_vkImportSemaphoreWin32HandleKHR vkImportSemaphoreWin32HandleKHR = nullptr;
 
     // Helper methods
+    std::optional<LUID> VulkanDeviceLuid();
     HRESULT CreateDx12Device();
 
     bool CreateSharedTexture(const VkImageCreateInfo& ImageInfo, VkImage& VulkanResource, VkDeviceMemory& VulkanMemory,
@@ -110,7 +116,8 @@ class IFeature_VkwDx12 : public virtual IFeature_Vk
                                  VK_TEXTURE2D_RESOURCE_C* OutResource, ResourceCopy_Vk* InCopyShader, bool InCopy,
                                  bool InDepth);
     bool ProcessVulkanTextures(VkCommandBuffer InCmdList, const NVSDK_NGX_Parameter* InParameters);
-    bool CopyBackOutput(VkCommandBuffer InCmdBuffer);
+    // InView: only this rectangle is copied back, at the same place, nullptr copies the whole image
+    bool CopyBackOutput(VkCommandBuffer InCmdBuffer, const Subrect* InView);
     void AbortPendingInterop(VkCommandBuffer InCmdBuffer, uint32_t InFrame);
 
     void ResourceBarrier(ID3D12GraphicsCommandList* InCommandList, ID3D12Resource* InResource,
@@ -123,7 +130,10 @@ class IFeature_VkwDx12 : public virtual IFeature_Vk
     bool CreateSharedFenceSemaphore();
 
     void ReleaseSharedResources();
+    // Lets the last upscale finish on D3D12
+    void FinishPendingWork();
     void ReleaseSyncResources();
+    void ReleaseSharedResource(VK_TEXTURE2D_RESOURCE_C& resource);
 
     template <typename F, typename Default> auto CallFeature(F&& f, Default&& def)
     {
@@ -147,6 +157,54 @@ class IFeature_VkwDx12 : public virtual IFeature_Vk
 
     API Api() const override { return API::DX12; }
     bool IsWithDx12() override { return true; }
+    VkDevice GetDevice() const override { return VulkanDevice; }
+
+    std::optional<double> ReadUpscalerTime(void* unused) override
+    {
+        if (auto feature = dx12Feature.get(); feature && Dx12CommandQueue && UpscalerTime)
+        {
+            auto dx12UpscalerTime = feature->ReadUpscalerTime(Dx12CommandQueue);
+
+            feature->ReadDetailedGpuTimes(Dx12CommandQueue, detailedGpuTimes);
+
+            // Count up shader times that are included in upscalerWithInterop but not in dx12UpscalerTime
+            double deductedUpscalerTime = 0.0;
+            for (const auto& time : detailedGpuTimes)
+            {
+                if (!time.includedInUpscalerTime)
+                    deductedUpscalerTime += time.time;
+            }
+
+            auto upscalerWithInterop = UpscalerTime->ReadInteropGpuTime();
+
+            if (dx12UpscalerTime)
+            {
+                if (upscalerWithInterop)
+                {
+                    const double interopTime = *upscalerWithInterop - *dx12UpscalerTime - deductedUpscalerTime;
+
+                    if (std::isfinite(interopTime) && interopTime > 0.0)
+                    {
+                        detailedGpuTimes.push_back({ "Interop", interopTime, true });
+                        return *dx12UpscalerTime + interopTime;
+                    }
+                }
+
+                // Vulkan timing has issue use Dx12 timing.
+                return dx12UpscalerTime;
+            }
+
+            return upscalerWithInterop;
+        }
+
+        return std::nullopt;
+    };
+
+    void ReadDetailedGpuTimes(void* unused, std::vector<DetailedGpuTime>& detailedGpuTimes) override
+    {
+        // We already queried and prepared detailedGpuTimes in ReadUpscalerTime
+        detailedGpuTimes = this->detailedGpuTimes;
+    };
 
     feature_version Version() final
     {

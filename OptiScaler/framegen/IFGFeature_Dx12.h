@@ -7,6 +7,7 @@
 #include <shaders/resource_flip/RF_Dx12.h>
 #include <shaders/hudless_compare/HC_Dx12.h>
 #include <shaders/render_ui/RUI_Dx12.h>
+#include <shaders/reproject/Reproject_Dx12.h>
 
 #include <dxgi1_6.h>
 #include <d3d12.h>
@@ -22,6 +23,7 @@ struct Dx12Resource
     ID3D12GraphicsCommandList* cmdList = nullptr;
     D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
     FG_ResourceValidity validity = FG_ResourceValidity::ValidNow;
+    bool flip = false; // The game asks for a flipped hudless
 
     // TODO: make private?
     ID3D12Resource* copy = nullptr;
@@ -67,8 +69,12 @@ class IFGFeature_Dx12 : public virtual IFGFeature
     ID3D12CommandAllocator* _scCommandAllocator[BUFFER_COUNT] {};
     bool _scCommandListResetted[BUFFER_COUNT] { false, false, false, false };
     UINT64 _scAllocatorFenceValues[BUFFER_COUNT] {};
+
+    // Signaled after our submits on the game queue, an allocator waits for its last submit before reset
     ID3D12Fence* _scFence = nullptr;
     HANDLE _scFenceEvent = nullptr;
+    UINT64 _scFenceValue = 0;
+    std::mutex _scFenceMutex; // FG dispatch and present signal it from different threads
 
     ID3D12GraphicsCommandList* _uiCommandList[BUFFER_COUNT] {};
     ID3D12CommandAllocator* _uiCommandAllocator[BUFFER_COUNT] {};
@@ -84,11 +90,14 @@ class IFGFeature_Dx12 : public virtual IFGFeature
 
     std::unique_ptr<RF_Dx12> _mvFlip;
     std::unique_ptr<RF_Dx12> _depthFlip;
+    std::unique_ptr<RF_Dx12> _hudlessFlip;
     std::unique_ptr<HC_Dx12> _hudlessCompare;
     std::unique_ptr<RUI_Dx12> _renderUI;
+    std::unique_ptr<Reproject_Dx12> _reproject;
 
     bool CreateBufferResource(ID3D12Device* InDevice, ID3D12Resource* InSource, D3D12_RESOURCE_STATES InState,
-                              ID3D12Resource** OutResource, bool UAV = false, bool depth = false);
+                              ID3D12Resource** OutResource, bool UAV = false, bool depth = false,
+                              DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN);
     bool CreateBufferResourceWithSize(ID3D12Device* device, ID3D12Resource* source, D3D12_RESOURCE_STATES state,
                                       ID3D12Resource** target, UINT width, UINT height, bool UAV, bool depth);
     void ResourceBarrier(ID3D12GraphicsCommandList* InCommandList, ID3D12Resource* InResource,
@@ -97,10 +106,24 @@ class IFGFeature_Dx12 : public virtual IFGFeature
                       D3D12_RESOURCE_STATES sourceState);
 
     void NewFrame() override final;
-    void FlipResource(Dx12Resource* resource);
+    bool WillFlip(const Dx12Resource* resource) const;
+    void FlipResource(Dx12Resource* resource, int fIndex);
+
+    // Frees per frame copies and helper buffers, they get recreated on demand
+    virtual void ReleaseResourceCopies();
+
+    virtual bool CreateSwapchainInternal(IDXGIFactory* factory, ID3D12CommandQueue* cmdQueue,
+                                         DXGI_SWAP_CHAIN_DESC* desc, IDXGISwapChain** swapChain) = 0;
+    virtual bool CreateSwapchain1Internal(IDXGIFactory* factory, ID3D12CommandQueue* cmdQueue, HWND hwnd,
+                                          DXGI_SWAP_CHAIN_DESC1* desc, DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pFullscreenDesc,
+                                          IDXGISwapChain1** swapChain) = 0;
 
   protected:
     virtual void ReleaseObjects() = 0;
+    void ReleaseFences();
+    bool WaitForFenceValue(ID3D12Fence* fence, HANDLE event, UINT64 value);
+    UINT64 SignalSCFence();
+    void SubmitSCCommandList(UINT index);
     virtual bool CreateObjects(ID3D12Device* device) = 0;
 
     // CheckForRealObject returns a borrowed pointer. Transfer the owned creation reference to the native object.
@@ -120,11 +143,11 @@ class IFGFeature_Dx12 : public virtual IFGFeature
     virtual void* SwapchainContext() = 0;
     virtual HWND Hwnd() = 0;
 
-    virtual bool CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQueue, DXGI_SWAP_CHAIN_DESC* desc,
-                                 IDXGISwapChain** swapChain, bool readyToRelease) = 0;
-    virtual bool CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* cmdQueue, HWND hwnd,
-                                  DXGI_SWAP_CHAIN_DESC1* desc, DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pFullscreenDesc,
-                                  IDXGISwapChain1** swapChain, bool readyToRelease) = 0;
+    bool CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQueue, DXGI_SWAP_CHAIN_DESC* desc,
+                         IDXGISwapChain** swapChain, bool readyToRelease);
+    bool CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* cmdQueue, HWND hwnd, DXGI_SWAP_CHAIN_DESC1* desc,
+                          DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pFullscreenDesc, IDXGISwapChain1** swapChain,
+                          bool readyToRelease);
 
     virtual void CreateContext(ID3D12Device* device, FG_Constants& fgConstants) = 0;
     virtual void EvaluateState(ID3D12Device* device, FG_Constants& fgConstants) = 0;
@@ -140,6 +163,8 @@ class IFGFeature_Dx12 : public virtual IFGFeature
     ID3D12CommandQueue* GetCommandQueue();
 
     bool HasResource(FG_ResourceType type, int index = -1) override final;
+
+    const Reproject* GetReproject() const override { return _reproject.get(); };
 
     IFGFeature_Dx12() = default;
     virtual ~IFGFeature_Dx12();

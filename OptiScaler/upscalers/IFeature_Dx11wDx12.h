@@ -40,18 +40,12 @@ class IFeature_Dx11wDx12 : public virtual IFeature_Dx11
     UINT64 Dx12FenceValue = 0;
     UINT64 Dx12CommandAllocatorFenceValue[DX11WDX12_COMMAND_BUFFER_COUNT] = {};
 
-    Dx11WithDx12::D3D11_TEXTURE2D_RESOURCE_C dx11Color = {};
-    Dx11WithDx12::D3D11_TEXTURE2D_RESOURCE_C dx11Mv = {};
-    Dx11WithDx12::D3D11_TEXTURE2D_RESOURCE_C dx11Depth = {};
-    Dx11WithDx12::D3D11_TEXTURE2D_RESOURCE_C dx11Reactive = {};
-    Dx11WithDx12::D3D11_TEXTURE2D_RESOURCE_C dx11Exp = {};
-    Dx11WithDx12::D3D11_TEXTURE2D_RESOURCE_C dx11Out = {};
-
-    ID3D11Resource* paramOutput[DX11_WITH_DX12_CACHED_FRAMES] = {};
+    // Per feature, sharing it between features makes them recreate each other's in-flight resources
+    Dx11WithDx12::D3D11_UPSCALER_RESOURCE_CACHE_C ResourceCache = {};
 
     bool CreateD3D12Objects();
     bool ProcessDx11Textures(const NVSDK_NGX_Parameter* InParameters);
-    bool CopyBackOutput();
+    bool CopyBackOutput(const D3D11_BOX* InView, UINT InDstX, UINT InDstY);
 
     void ResourceBarrier(ID3D12GraphicsCommandList* InCommandList, ID3D12Resource* InResource,
                          D3D12_RESOURCE_STATES InBeforeState, D3D12_RESOURCE_STATES InAfterState);
@@ -73,6 +67,9 @@ class IFeature_Dx11wDx12 : public virtual IFeature_Dx11
     bool IsWithDx12() final { return true; }
     API Api() const override { return API::DX12; }
 
+    // Used by DX11 FG to reuse resources this feature already shared with D3D12
+    const Dx11WithDx12::D3D11_UPSCALER_RESOURCE_CACHE_C& GetResourceCache() const { return ResourceCache; }
+
     std::optional<double> ReadUpscalerTime(void* deviceContextVoid) override
     {
         if (auto feature = dx12Feature.get(); feature && Dx12CommandQueue)
@@ -88,24 +85,29 @@ class IFeature_Dx11wDx12 : public virtual IFeature_Dx11
                 if (!time.includedInUpscalerTime)
                 {
                     deductedUpscalerTime += time.time;
-                    break;
                 }
             }
 
             auto upscalerWithInterop = UpscalerTime->ReadGpuTime((ID3D11DeviceContext*) deviceContextVoid);
 
-            if (dx12UpscalerTime && upscalerWithInterop)
+            if (dx12UpscalerTime)
             {
-                auto interopTime = upscalerWithInterop.value() - dx12UpscalerTime.value() - deductedUpscalerTime;
-
-                if (interopTime > 0.0)
+                if (upscalerWithInterop)
                 {
-                    detailedGpuTimes.push_back({ "Interop", interopTime, true });
-                    return interopTime + dx12UpscalerTime.value();
+                    const double interopTime = *upscalerWithInterop - *dx12UpscalerTime - deductedUpscalerTime;
+
+                    if (std::isfinite(interopTime) && interopTime > 0.0)
+                    {
+                        detailedGpuTimes.push_back({ "Interop", interopTime, true });
+                        return *dx12UpscalerTime + interopTime;
+                    }
                 }
+
+                // Dx11 timing has issue use Dx12 timing.
+                return dx12UpscalerTime;
             }
 
-            return std::nullopt;
+            return upscalerWithInterop;
         }
 
         return std::nullopt;

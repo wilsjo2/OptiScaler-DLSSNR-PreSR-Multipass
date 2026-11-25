@@ -214,7 +214,11 @@ void Hudfix_Dx11::ValidateCapturedIdentity(ID3D11Texture2D* texture, UINT64 iden
         LOG_DEBUG("DX11 Hudfix resource address reused: {:X}, identity {} -> {}", (size_t) texture, previousIdentity,
                   identity);
 
-        State::Instance().capturedHudlesses.erase(key);
+        {
+            std::scoped_lock hudlessLock(State::Instance().capturedHudlessesMutex);
+            State::Instance().capturedHudlesses.erase(key);
+        }
+
         _hudlessList.erase(previousIdentity);
 
         {
@@ -297,6 +301,8 @@ void Hudfix_Dx11::UpscaleStart()
         std::lock_guard<std::mutex> lock(_checkMutex);
 
         state.clearCapturedHudlesses = false;
+
+        std::scoped_lock hudlessLock(State::Instance().capturedHudlessesMutex);
         state.capturedHudlesses.clear();
         _capturedIdentity.clear();
     }
@@ -343,13 +349,7 @@ bool Hudfix_Dx11::IsResourceCheckActive()
     if (_skipTracking || state.isShuttingDown)
         return false;
 
-    {
-        std::lock_guard<std::mutex> lock(_counterMutex);
-        if (_upscaleCounter <= _fgCounter)
-            return false;
-    }
-
-    if (!Config::Instance()->FGEnabled.value_or_default() || !Config::Instance()->FGHUDFix.value_or_default())
+    if (!Config::Instance()->IsFGEnabled() || !Config::Instance()->FGHUDFix.value_or_default())
         return false;
 
     if (state.activeFgInput != FGInput::Upscaler || state.swapchainInteropApi != SwapchainInteropApi::Dx11wDx12)
@@ -361,7 +361,8 @@ bool Hudfix_Dx11::IsResourceCheckActive()
     if (!state.currentFG->IsActive())
         return false;
 
-    return true;
+    std::lock_guard<std::mutex> lock(_counterMutex);
+    return _upscaleCounter > _fgCounter;
 }
 
 bool Hudfix_Dx11::SkipHudlessChecks() { return _skipHudlessChecks; }
@@ -511,7 +512,7 @@ bool Hudfix_Dx11::CopyCaptureResource(ID3D11DeviceContext* context, Dx11Resource
     return true;
 }
 
-bool Hudfix_Dx11::PublishCaptureToFg(ID3D11DeviceContext* context, Dx11ResourceInfo* source, int index)
+bool Hudfix_Dx11::PublishCaptureToFg(ID3D11DeviceContext* context, Dx11ResourceInfo* source, int index, bool flip)
 {
     if (context == nullptr || source == nullptr || _captureBuffer[index] == nullptr)
         return false;
@@ -553,6 +554,7 @@ bool Hudfix_Dx11::PublishCaptureToFg(ID3D11DeviceContext* context, Dx11ResourceI
     setResource.width = state.currentSwapchainDesc.BufferDesc.Width;
     setResource.height = state.currentSwapchainDesc.BufferDesc.Height;
     setResource.frameIndex = fg->GetIndexWillBeDispatched();
+    setResource.flip = flip;
 
     if (!CompareResourceFormats(source->format, state.currentSwapchainDesc.BufferDesc.Format))
     {
@@ -627,13 +629,17 @@ bool Hudfix_Dx11::CheckForHudless(ID3D11DeviceContext* context, Dx11ResourceInfo
     const auto upscaleFrame = ActiveUpscaleFrame();
 
     CapturedHudlessInfo* capturedHudlessInfo = nullptr;
-    if (auto it = state.capturedHudlesses.find(resource->texture); it != state.capturedHudlesses.end())
     {
-        capturedHudlessInfo = &it->second;
-        _capturedIdentity[resource->texture] = identity;
+        std::scoped_lock hudlessLock(State::Instance().capturedHudlessesMutex);
 
-        if (!capturedHudlessInfo->enabled)
-            return false;
+        if (auto it = state.capturedHudlesses.find(resource->texture); it != state.capturedHudlesses.end())
+        {
+            capturedHudlessInfo = &it->second;
+            _capturedIdentity[resource->texture] = identity;
+
+            if (!capturedHudlessInfo->enabled)
+                return false;
+        }
     }
 
     if (!ignoreBlocked && Config::Instance()->FGResourceBlocking.value_or_default())
@@ -730,15 +736,19 @@ bool Hudfix_Dx11::CheckForHudless(ID3D11DeviceContext* context, Dx11ResourceInfo
 
     HudlessFound();
 
-    if (capturedHudlessInfo != nullptr)
     {
-        ++capturedHudlessInfo->usageCount;
-        capturedHudlessInfo->captureInfo = resource->captureInfo;
-    }
-    else
-    {
-        state.capturedHudlesses.insert_or_assign(resource->texture,
-                                                 CapturedHudlessInfo { 1, resource->captureInfo, true });
+        std::scoped_lock hudlessLock(State::Instance().capturedHudlessesMutex);
+
+        if (capturedHudlessInfo != nullptr)
+        {
+            ++capturedHudlessInfo->usageCount;
+            capturedHudlessInfo->captureInfo = resource->captureInfo;
+        }
+        else
+        {
+            state.capturedHudlesses.insert_or_assign(resource->texture,
+                                                     CapturedHudlessInfo { 1, resource->captureInfo, true });
+        }
     }
 
     _capturedIdentity[resource->texture] = identity;
@@ -746,8 +756,77 @@ bool Hudfix_Dx11::CheckForHudless(ID3D11DeviceContext* context, Dx11ResourceInfo
     return true;
 }
 
+void Hudfix_Dx11::SetGameHudless(ID3D11Texture2D* texture, bool flip)
+{
+    _gameHudlessFlip.store(flip, std::memory_order_release);
+
+    if (auto previous = _gameHudless.exchange(texture, std::memory_order_acq_rel); previous != nullptr)
+        previous->Release();
+}
+
+// The texture can be from a device recreated since the evaluate
+static bool IsOnContextDevice(ID3D11Texture2D* texture, ID3D11DeviceContext* context)
+{
+    ID3D11Device* textureDevice = nullptr;
+    ID3D11Device* contextDevice = nullptr;
+
+    texture->GetDevice(&textureDevice);
+    context->GetDevice(&contextDevice);
+
+    const bool result = textureDevice != nullptr && textureDevice == contextDevice;
+
+    SAFE_RELEASE(textureDevice);
+    SAFE_RELEASE(contextDevice);
+
+    return result;
+}
+
+void Hudfix_Dx11::PublishGameHudless(ID3D11DeviceContext* context)
+{
+    auto texture = _gameHudless.exchange(nullptr, std::memory_order_acq_rel);
+    if (texture == nullptr)
+        return;
+
+    auto fg = State::Instance().currentFG;
+    const auto& scDesc = State::Instance().currentSwapchainDesc.BufferDesc;
+    Dx11ResourceInfo info {};
+
+    if (context != nullptr && fg != nullptr && IsOnContextDevice(texture, context) &&
+        FillResourceInfo(texture, Dx11ResourceType::SRV, Dx11CaptureInfo::Upscaler, &info))
+    {
+        if (info.sampleCount != 1 || info.width != scDesc.Width || info.height != scDesc.Height)
+        {
+            static bool warned = false;
+            if (!warned)
+            {
+                warned = true;
+                LOG_WARN("Opti.Hudless is ignored, {}x{} with {} samples doesn't match the swapchain's {}x{}",
+                         info.width, info.height, info.sampleCount, scDesc.Width, scDesc.Height);
+            }
+        }
+        else
+        {
+            std::lock_guard<std::mutex> lock(_checkMutex);
+
+            // FG's slot of the frame, the hudless copies of earlier frames can still be read
+            const auto index = fg->GetIndexWillBeDispatched();
+
+            if (!CopyCaptureResource(context, &info, index) ||
+                !PublishCaptureToFg(context, &info, index, _gameHudlessFlip.load(std::memory_order_acquire)))
+            {
+                LOG_WARN("Opti.Hudless couldn't be passed to FG");
+            }
+        }
+    }
+
+    texture->Release();
+}
+
 void Hudfix_Dx11::ResetCounters()
 {
+    // Can be from a previous device
+    SetGameHudless(nullptr);
+
     std::lock_guard<std::mutex> checkLock(_checkMutex);
     std::lock_guard<std::mutex> counterLock(_counterMutex);
 
@@ -780,11 +859,15 @@ void Hudfix_Dx11::ReleaseResources()
         _captureList.clear();
     }
 
-    auto& capturedHudlesses = State::Instance().capturedHudlesses;
-    for (const auto& [resource, identity] : _capturedIdentity)
     {
-        UNREFERENCED_PARAMETER(identity);
-        capturedHudlesses.erase(resource);
+        auto& capturedHudlesses = State::Instance().capturedHudlesses;
+        std::scoped_lock hudlessLock(State::Instance().capturedHudlessesMutex);
+
+        for (const auto& [resource, identity] : _capturedIdentity)
+        {
+            UNREFERENCED_PARAMETER(identity);
+            capturedHudlesses.erase(resource);
+        }
     }
     _capturedIdentity.clear();
 

@@ -1,0 +1,106 @@
+#pragma once
+
+#include <shared_mutex>
+#include <vector>
+#include <DirectXMath.h>
+
+struct InputDelta
+{
+    int32_t x;
+    int32_t y;
+    uint64_t startTimestampNs;
+
+    // Compound assignment operators (modify the current object)
+    constexpr InputDelta& operator+=(const InputDelta& other)
+    {
+        x += other.x;
+        y += other.y;
+        return *this;
+    }
+
+    constexpr InputDelta& operator-=(const InputDelta& other)
+    {
+        x -= other.x;
+        y -= other.y;
+        return *this;
+    }
+
+    constexpr InputDelta& operator*=(double mul)
+    {
+        x = static_cast<int32_t>(x * mul);
+        y = static_cast<int32_t>(y * mul);
+        return *this;
+    }
+
+    constexpr InputDelta& operator/=(double div)
+    {
+        x = static_cast<int32_t>(x / div);
+        y = static_cast<int32_t>(y / div);
+        return *this;
+    }
+
+    constexpr InputDelta operator+(const InputDelta& other) const { return InputDelta { x + other.x, y + other.y }; }
+
+    constexpr InputDelta operator-(const InputDelta& other) const { return InputDelta { x - other.x, y - other.y }; }
+
+    constexpr InputDelta operator*(double mul) const
+    {
+        return InputDelta { static_cast<int32_t>(x * mul), static_cast<int32_t>(y * mul) };
+    }
+
+    constexpr InputDelta operator/(double div) const
+    {
+        return InputDelta { static_cast<int32_t>(x / div), static_cast<int32_t>(y / div) };
+    }
+
+    // Cast operator
+    operator DirectX::XMINT2() const { return { x, y }; }
+};
+
+class InputCollection
+{
+    std::shared_mutex mutex;
+    std::shared_mutex simDeltasMutex;
+
+    InputDelta simToPresentDeltas[8] {};
+    InputDelta inProgressSimToSimDelta {}; // assumes only one in-flight sim
+    InputDelta simToSimDeltas[8] {};       // just for reading
+
+    // Running total of all mouse movement, wraps around, only differences between two values are meaningful
+    uint32_t cumulativeX = 0;
+    uint32_t cumulativeY = 0;
+    DirectX::XMINT2 simStartCumulative[8] {};
+
+    // The same sim start can be reported by Streamline and by the Reflex marker it sends
+    uint64_t lastSimFrameId = UINT64_MAX;
+
+    // GPU visible memory that gets the running total written on every mouse event (late latching)
+    std::vector<volatile uint64_t*> liveSinks;
+
+    void writeLiveSinks();
+
+  public:
+    static InputCollection& getInstance()
+    {
+        static InputCollection instance;
+        return instance;
+    }
+
+    void addNewDelta(InputDelta delta);
+
+    // Called on the simulation start marker, repeated calls for the same frame are ignored
+    void startCollectingForFrame(uint64_t frameId);
+
+    // Returns the mouse delta between sim starts of frameId-1 and frameId
+    InputDelta readSimsDelta(uint64_t frameId);
+
+    // Returns the mouse delta since sim start of the provided frame id
+    InputDelta readDeltaSinceSim(uint64_t frameId);
+
+    // Returns the running mouse total at sim start of the provided frame id
+    DirectX::XMINT2 readCumulativeAtSim(uint64_t frameId);
+
+    // sink has to point to 8 bytes of persistently mapped memory, gets the running total as int2
+    void registerLiveSink(void* sink);
+    void unregisterLiveSink(void* sink);
+};

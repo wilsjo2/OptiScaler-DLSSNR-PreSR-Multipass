@@ -85,6 +85,7 @@ void FeedImGui(bool) {}
 void ImGui_ImplWin32_NewFrame() {}
 void ImGui_ImplUwp_NewFrame(ImVec2) {}
 void MenuHdrCheck(ImGuiIO&) {}
+void UpdateOverlayFont() {}
 struct RenderMenuContext
 {
     State& state = State::Instance();

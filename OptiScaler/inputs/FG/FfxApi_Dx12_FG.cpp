@@ -4,6 +4,7 @@
 
 #include <Util.h>
 #include <Config.h>
+#include <misc/DeferredRelease.h>
 
 #include <magic_enum.hpp>
 
@@ -189,8 +190,8 @@ static bool CreateBufferResource(ID3D12Device* InDevice, ID3D12Resource* InResou
 
         if (bufDesc.Width != inDesc.Width || bufDesc.Height != inDesc.Height || bufDesc.Format != inDesc.Format)
         {
-            (*OutResource)->Release();
-            (*OutResource) = nullptr;
+            // FG can still be using it
+            DeferredRelease::Release(*OutResource);
             LOG_WARN("Release {}x{}, new one: {}x{}", bufDesc.Width, bufDesc.Height, inDesc.Width, inDesc.Height);
         }
         else
@@ -214,6 +215,16 @@ static bool CreateBufferResource(ID3D12Device* InDevice, ID3D12Resource* InResou
 
     LOG_DEBUG("Created new one: {}x{}", inDesc.Width, inDesc.Height);
     return true;
+}
+
+// Game's FG context is gone, nothing uses these until it's recreated
+static void ReleaseBuffers()
+{
+    for (size_t i = 0; i < BUFFER_COUNT; i++)
+    {
+        DeferredRelease::Release(_hudless[i]);
+        DeferredRelease::Release(_interpolation[i]);
+    }
 }
 
 static void ResourceBarrier(ID3D12GraphicsCommandList* InCommandList, ID3D12Resource* InResource,
@@ -267,6 +278,14 @@ ffxReturnCode_t ffxCreateContext_Dx12FG(ffxContext* context, ffxCreateContextDes
                          (size_t) s.currentFG->FrameGenerationContext());
 
                 s.currentFG->DestroyFGContext();
+            }
+
+            // A new context can start its frame ids from a lower value
+            {
+                std::scoped_lock lock(_frameBoundaryMutex);
+                _currentFrameId = 0;
+                _currentIndex = -1;
+                std::fill(std::begin(_frameIdIndex), std::end(_frameIdIndex), UINT64_MAX);
             }
 
             auto ccDesc = (ffxCreateContextDescFrameGeneration*) desc;
@@ -344,7 +363,7 @@ ffxReturnCode_t ffxCreateContext_Dx12FG(ffxContext* context, ffxCreateContextDes
         auto result =
             cDesc->dxgiFactory->CreateSwapChain(cDesc->gameQueue, cDesc->desc, (IDXGISwapChain**) cDesc->swapchain);
 
-        if (result == S_OK)
+        if (SUCCEEDED(result))
         {
             LOG_INFO("Swapchain created");
 
@@ -394,7 +413,7 @@ ffxReturnCode_t ffxCreateContext_Dx12FG(ffxContext* context, ffxCreateContextDes
         auto result = factory->CreateSwapChainForHwnd(cDesc->gameQueue, cDesc->hwnd, cDesc->desc, cDesc->fullscreenDesc,
                                                       nullptr, (IDXGISwapChain1**) cDesc->swapchain);
 
-        if (result == S_OK)
+        if (SUCCEEDED(result))
         {
             LOG_INFO("Swapchain created");
 
@@ -452,6 +471,7 @@ ffxReturnCode_t ffxDestroyContext_Dx12FG(ffxContext* context, const ffxAllocatio
     {
         LOG_INFO("Destroying FG Context: {:X}", (size_t) State::Instance().currentFG);
         State::Instance().currentFG->DestroyFGContext();
+        ReleaseBuffers();
         return FFX_API_RETURN_OK;
     }
 
@@ -518,7 +538,7 @@ ffxReturnCode_t ffxConfigure_Dx12FG(ffxContext* context, ffxConfigureDescHeader*
 
         s.fsrfgInputActive = cDesc->frameGenerationEnabled;
 
-        if (cDesc->frameGenerationEnabled && !fg->IsActive() && Config::Instance()->FGEnabled.value_or_default())
+        if (cDesc->frameGenerationEnabled && !fg->IsActive() && Config::Instance()->IsFGEnabled())
         {
             if (!fg->IsPaused())
             {
@@ -528,7 +548,7 @@ ffxReturnCode_t ffxConfigure_Dx12FG(ffxContext* context, ffxConfigureDescHeader*
         }
         else if (!cDesc->frameGenerationEnabled && fg->IsActive())
         {
-            fg->Deactivate();
+            fg->Disable();
             fg->ResetCounters();
         }
 
@@ -899,7 +919,9 @@ ffxReturnCode_t ffxQuery_Dx12FG(ffxContext* context, ffxQueryDescHeader* desc)
     else if (desc->type == FFX_API_QUERY_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_INTERPOLATIONTEXTURE_DX12)
     {
         auto fg = State::Instance().currentFG;
-        if (fg != nullptr)
+
+        // The game's FG context can outlive the FG swapchain
+        if (fg != nullptr && State::Instance().currentFGSwapchain != nullptr)
         {
             auto cDesc = (ffxQueryDescFrameGenerationSwapChainInterpolationTextureDX12*) desc;
             auto fIndex = fg->GetIndexWillBeDispatched();

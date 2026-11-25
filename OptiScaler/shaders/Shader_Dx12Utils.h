@@ -2,6 +2,7 @@
 #include <d3dx/d3dx12.h>
 #include <vector>
 #include <stdexcept>
+#include <misc/DeferredRelease.h>
 
 class FrameDescriptorHeap
 {
@@ -16,6 +17,9 @@ class FrameDescriptorHeap
     UINT srvOffset = 0;
     UINT uavOffset = 0;
     UINT cbvOffset = 0;
+
+    // Own constants per heap, the GPU can still read the previous ones
+    ID3D12Resource* constantBuffer = nullptr;
 
     static inline CD3DX12_CPU_DESCRIPTOR_HANDLE getEmpty()
     {
@@ -111,6 +115,26 @@ class FrameDescriptorHeap
         return CD3DX12_GPU_DESCRIPTOR_HANDLE(heapCSU->GetGPUDescriptorHandleForHeapStart());
     }
 
+    ID3D12Resource* GetConstantBuffer(ID3D12Device* device, UINT64 size)
+    {
+        if (constantBuffer != nullptr && constantBuffer->GetDesc().Width >= size)
+            return constantBuffer;
+
+        DeferredRelease::Release(constantBuffer);
+
+        auto desc = CD3DX12_RESOURCE_DESC::Buffer(size);
+        auto heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+
+        if (FAILED(device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
+                                                   D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                   IID_PPV_ARGS(&constantBuffer))))
+        {
+            constantBuffer = nullptr;
+        }
+
+        return constantBuffer;
+    }
+
     ID3D12DescriptorHeap* GetHeapCSU() { return heapCSU; }
     ID3D12DescriptorHeap* GetHeapRtv() { return heapRtv; }
 
@@ -119,14 +143,10 @@ class FrameDescriptorHeap
 
     void ReleaseHeaps()
     {
-        // Randomly crashing on release
-        // For now rely on OS to clean up on exit
-        // Need to check if it's about they are being use
-        // Also need to create shaders when they are used to prevent creating heaps when not used
-        // return;
-
-        SAFE_RELEASE(heapCSU);
-        SAFE_RELEASE(heapRtv);
+        // Command lists in flight can still reference these
+        DeferredRelease::Release(heapCSU);
+        DeferredRelease::Release(heapRtv);
+        DeferredRelease::Release(constantBuffer);
     }
 
     ~FrameDescriptorHeap() { ReleaseHeaps(); }
@@ -152,12 +172,28 @@ bool CreateConstantsBuffer(ID3D12Device* device, ID3D12Resource* constantBuffer,
     memcpy(pCBDataBegin, &constants, sizeof(constants));
     constantBuffer->Unmap(0, nullptr);
 
+    constexpr UINT alignTo = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT - 1;
+    UINT alignedSize = (sizeof(constants) + alignTo) & ~alignTo;
+
     // Create CBV for Constants
     D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
     cbvDesc.BufferLocation = constantBuffer->GetGPUVirtualAddress();
-    cbvDesc.SizeInBytes = sizeof(constants);
+    cbvDesc.SizeInBytes = alignedSize;
 
     device->CreateConstantBufferView(&cbvDesc, destDescriptor);
 
     return true;
+}
+
+template <typename T>
+bool CreateConstantsBuffer(ID3D12Device* device, FrameDescriptorHeap& heap, const T& constants,
+                           D3D12_CPU_DESCRIPTOR_HANDLE destDescriptor)
+{
+    constexpr UINT alignTo = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT - 1;
+    auto constantBuffer = heap.GetConstantBuffer(device, (sizeof(constants) + alignTo) & ~alignTo);
+
+    if (constantBuffer == nullptr)
+        return false;
+
+    return CreateConstantsBuffer(device, constantBuffer, constants, destDescriptor);
 }

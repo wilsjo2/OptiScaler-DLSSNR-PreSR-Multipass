@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "XeSS_Vulkan.h"
+#include "NVNGX_DLSS.h"
 
 #include "NVNGX_Parameter.h"
 
@@ -12,6 +13,9 @@ static UINT64 _handleCounter = 23370000;
 static UINT64 _frameCounter = 0;
 static xess_context_handle_t _currentContext = nullptr;
 static VkDevice _device = nullptr;
+// Device this input initialised NGX with
+static std::atomic<VkDevice> _nvngxDevice { nullptr };
+static bool _nvngxInited = false;
 static VkInstance _instance = nullptr;
 static VkPhysicalDevice _physicalDevice = nullptr;
 static NVSDK_NGX_Resource_VK expNVRes[3] {};
@@ -26,11 +30,11 @@ static bool CreateDLSSContext(xess_context_handle_t handle, VkCommandBuffer comm
 {
     LOG_DEBUG("");
 
-    if (!_nvParams.contains(handle))
+    if (!_nvParams.contains(handle) || !_vkInitParams.contains(handle))
         return false;
 
     NVSDK_NGX_Handle* nvHandle = nullptr;
-    auto params = _nvParams[handle].value;
+    auto params = _nvParams[handle];
     auto initParams = &_vkInitParams[handle];
 
     UINT initFlags = 0;
@@ -70,7 +74,7 @@ static bool CreateDLSSContext(xess_context_handle_t handle, VkCommandBuffer comm
         break;
 
     case XESS_QUALITY_SETTING_PERFORMANCE:
-        params->Set(NVSDK_NGX_Parameter_PerfQualityValue, NVSDK_NGX_PerfQuality_Value_MaxQuality);
+        params->Set(NVSDK_NGX_Parameter_PerfQualityValue, NVSDK_NGX_PerfQuality_Value_MaxPerf);
         break;
 
     case XESS_QUALITY_SETTING_BALANCED:
@@ -129,17 +133,21 @@ xess_result_t hk_xessVKCreateContext(VkInstance instance, VkPhysicalDevice physi
     _physicalDevice = physicalDevice;
     _device = device;
 
-    if (!State::Instance().nvngxVkInited)
+    // Re-initialise NGX when the device this input initialised it with was replaced
+    if (!State::Instance().nvngxVkInited || (_nvngxInited && _nvngxDevice.load() != _device))
     {
         NVSDK_NGX_FeatureCommonInfo fcInfo {};
         auto exePath = Util::ExePath().remove_filename();
 
-        auto nvResult = NVSDK_NGX_VULKAN_Init_ProjectID_Ext(
-            OPTI_GUID, NVSDK_NGX_ENGINE_TYPE_CUSTOM, OPTI_VERSION, exePath.c_str(), _instance, _physicalDevice, _device,
-            vkGetInstanceProcAddr, vkGetDeviceProcAddr, State::Instance().NVNGX_Version, &fcInfo);
+        auto nvResult = NVNGXVkInputInit(OPTI_GUID, NVSDK_NGX_ENGINE_TYPE_CUSTOM, OPTI_VERSION, exePath.c_str(),
+                                         _instance, _physicalDevice, _device, vkGetInstanceProcAddr,
+                                         vkGetDeviceProcAddr, State::Instance().NVNGX_Version, &fcInfo);
 
         if (nvResult != NVSDK_NGX_Result_Success)
             return XESS_RESULT_ERROR_UNINITIALIZED;
+
+        _nvngxDevice = _device;
+        _nvngxInited = true;
     }
 
     *phContext = (xess_context_handle_t) ++_handleCounter;
@@ -149,7 +157,8 @@ xess_result_t hk_xessVKCreateContext(VkInstance instance, VkPhysicalDevice physi
     if (NVSDK_NGX_VULKAN_GetCapabilityParameters(&params) != NVSDK_NGX_Result_Success)
         return XESS_RESULT_ERROR_INVALID_ARGUMENT;
 
-    _nvParams[*phContext] = { params, NVSDK_NGX_VULKAN_DestroyParameters };
+    _nvParams[*phContext] = params;
+    _vkContexts.insert(*phContext);
     _motionScales[*phContext] = { 1.0f, 1.0f };
 
     LOG_DEBUG("Created context: {}", (size_t) *phContext);
@@ -202,7 +211,7 @@ xess_result_t hk_xessVKExecute(xess_context_handle_t hContext, VkCommandBuffer c
     if (!_contexts.contains(hContext) && !CreateDLSSContext(hContext, commandBuffer, pExecParams))
         return XESS_RESULT_ERROR_UNKNOWN;
 
-    NVSDK_NGX_Parameter* params = _nvParams[hContext].value;
+    NVSDK_NGX_Parameter* params = _nvParams[hContext];
     NVSDK_NGX_Handle* handle = _contexts[hContext];
     xess_vk_init_params_t* initParams = &_vkInitParams[hContext];
 
@@ -269,6 +278,10 @@ xess_result_t hk_xessVKExecute(xess_context_handle_t hContext, VkCommandBuffer c
         CreateNVRes(&pExecParams->exposureScaleTexture, &expNVRes[index]);
         params->Set(NVSDK_NGX_Parameter_ExposureTexture, &expNVRes[index]);
     }
+    else
+    {
+        params->Set(NVSDK_NGX_Parameter_ExposureTexture, (void*) nullptr);
+    }
 
     if (pExecParams->responsivePixelMaskTexture.image != nullptr)
     {
@@ -279,6 +292,11 @@ xess_result_t hk_xessVKExecute(xess_context_handle_t hContext, VkCommandBuffer c
             params->Set(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, &biasNVRes[index]);
         else
             params->Set("FSR.reactive", &biasNVRes[index]);
+    }
+    else
+    {
+        params->Set(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, (void*) nullptr);
+        params->Set("FSR.reactive", (void*) nullptr);
     }
 
     if (pExecParams->colorTexture.image == nullptr)
@@ -362,6 +380,10 @@ xess_result_t hk_xessVKGetResourcesToDump(xess_context_handle_t hContext,
                                           xess_vk_resources_to_dump_t** pResourcesToDump)
 {
     LOG_DEBUG("");
+
+    if (pResourcesToDump != nullptr)
+        *pResourcesToDump = nullptr;
+
     return XESS_RESULT_SUCCESS;
 }
 
@@ -399,4 +421,10 @@ xess_result_t hk_xessVKGetRequiredDeviceFeatures(VkInstance instance, VkPhysical
     auto result = XeSSProxy::VKGetRequiredDeviceFeatures()(instance, physicalDevice, features);
 
     return result;
+}
+
+void XeSSVkDeviceDestroyed(VkDevice device)
+{
+    VkDevice expected = device;
+    _nvngxDevice.compare_exchange_strong(expected, nullptr);
 }

@@ -18,9 +18,10 @@ bool RUI_Dx12::CreateBufferResource(UINT index, ID3D12Device* InDevice, ID3D12Re
 
     auto resourceFlags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
 
+    auto oldBuffer = _buffer[index];
     auto result = Shader_Dx12::CreateBufferResource(InDevice, InSource, InState, &_buffer[index], resourceFlags);
 
-    if (result)
+    if (result && _buffer[index] != oldBuffer)
     {
         _buffer[index]->SetName(L"RUI_Buffer");
         _bufferState[index] = InState;
@@ -83,9 +84,10 @@ RUI_Dx12::RUI_Dx12(std::string InName, ID3D12Device* InDevice, bool preMultiplie
     D3D12_GRAPHICS_PIPELINE_STATE_DESC graphicsPsoDesc {};
     graphicsPsoDesc.pRootSignature = _rootSignature;
 
+    // render_ui_pm shaders blend straight alpha, render_ui ones premultiplied
     if (Config::Instance()->UsePrecompiledShaders.value_or_default())
     {
-        if (!preMultipliedAlpha)
+        if (preMultipliedAlpha)
         {
             graphicsPsoDesc.VS =
                 CD3DX12_SHADER_BYTECODE(reinterpret_cast<const void*>(render_ui_VS_cso), sizeof(render_ui_VS_cso));
@@ -102,7 +104,7 @@ RUI_Dx12::RUI_Dx12(std::string InName, ID3D12Device* InDevice, bool preMultiplie
     }
     else
     {
-        if (!preMultipliedAlpha)
+        if (preMultipliedAlpha)
         {
             vs = CompileShader(ruiCode.c_str(), "VSMain", "vs_5_1");
             if (vs != nullptr)
@@ -263,14 +265,15 @@ bool RUI_Dx12::Dispatch(IDXGISwapChain3* sc, ID3D12GraphicsCommandList* cmdList,
 
 RUI_Dx12::~RUI_Dx12()
 {
-    if (!_init || State::Instance().isShuttingDown)
+    if (State::Instance().isShuttingDown)
         return;
 
-    SAFE_RELEASE(_rootSignature);
-    SAFE_RELEASE(_constantBuffer);
+    DeferredRelease::Release(_rootSignature);
+    DeferredRelease::Release(_constantBuffer);
 
     for (int i = 0; i < HC_NUM_OF_HEAPS; i++)
     {
         _frameHeaps[i].ReleaseHeaps();
+        DeferredRelease::Release(_buffer[i]);
     }
 }

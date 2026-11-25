@@ -2,6 +2,8 @@
 #include <Config.h>
 #include "IFeature.h"
 
+#include <magic_enum.hpp>
+
 void IFeature::SetHandle(unsigned int InHandleId)
 {
     _handle = new NVSDK_NGX_Handle { InHandleId };
@@ -18,50 +20,53 @@ bool IFeature::SetInitParameters(NVSDK_NGX_Parameter* InParameters)
 
     if (InParameters->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, &_featureFlags) == NVSDK_NGX_Result_Success)
     {
-        if (Config::Instance()->HDR.has_value())
+        if (std::optional<bool> hdr = Config::Instance()->HDR; hdr.has_value())
         {
-            LOG_INFO("HDR flag overrided by user: {}", Config::Instance()->HDR.value());
-            _initFlags.IsHdr = Config::Instance()->HDR.value();
+            LOG_INFO("HDR flag overrided by user: {}", hdr.value());
+            _initFlags.IsHdr = hdr.value();
         }
         else
         {
             _initFlags.IsHdr = _featureFlags & NVSDK_NGX_DLSS_Feature_Flags_IsHDR;
         }
 
-        if (Config::Instance()->OverrideSharpness.has_value())
+        if (std::optional<bool> overrideSharpness = Config::Instance()->OverrideSharpness;
+            overrideSharpness.has_value())
         {
-            LOG_INFO("SharpenEnabled flag overrided by user: {}", Config::Instance()->OverrideSharpness.value());
-            _initFlags.SharpenEnabled = Config::Instance()->OverrideSharpness.value();
+            LOG_INFO("SharpenEnabled flag overrided by user: {}", overrideSharpness.value());
+            _initFlags.SharpenEnabled = overrideSharpness.value();
         }
         else
         {
             _initFlags.SharpenEnabled = _featureFlags & NVSDK_NGX_DLSS_Feature_Flags_DoSharpening;
         }
 
-        if (Config::Instance()->DepthInverted.has_value())
+        if (std::optional<bool> depthInverted = Config::Instance()->DepthInverted; depthInverted.has_value())
         {
-            LOG_INFO("DepthInverted flag overrided by user: {}", Config::Instance()->DepthInverted.value());
-            _initFlags.DepthInverted = Config::Instance()->DepthInverted.value();
+            LOG_INFO("DepthInverted flag overrided by user: {}", depthInverted.value());
+            _initFlags.DepthInverted = depthInverted.value();
         }
         else
         {
             _initFlags.DepthInverted = _featureFlags & NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
         }
 
-        if (Config::Instance()->JitterCancellation.has_value())
+        if (std::optional<bool> jitterCancellation = Config::Instance()->JitterCancellation;
+            jitterCancellation.has_value())
         {
-            LOG_INFO("JitteredMV flag overrided by user: {}", Config::Instance()->JitterCancellation.value());
-            _initFlags.JitteredMV = Config::Instance()->JitterCancellation.value();
+            LOG_INFO("JitteredMV flag overrided by user: {}", jitterCancellation.value());
+            _initFlags.JitteredMV = jitterCancellation.value();
         }
         else
         {
             _initFlags.JitteredMV = _featureFlags & NVSDK_NGX_DLSS_Feature_Flags_MVJittered;
         }
 
-        if (Config::Instance()->DisplayResolution.has_value())
+        if (std::optional<bool> displayResolution = Config::Instance()->DisplayResolution;
+            displayResolution.has_value())
         {
-            LOG_INFO("LowResMV flag overrided by user: {}", !Config::Instance()->DisplayResolution.value());
-            _initFlags.LowResMV = !Config::Instance()->DisplayResolution.value();
+            LOG_INFO("LowResMV flag overrided by user: {}", !displayResolution.value());
+            _initFlags.LowResMV = !displayResolution.value();
         }
         else
         {
@@ -69,19 +74,30 @@ bool IFeature::SetInitParameters(NVSDK_NGX_Parameter* InParameters)
         }
 
         // First check state to prevent upscaler re-init loops
-        if (State::Instance().autoExposure.has_value())
+        if (std::optional<bool> stateAutoExposure = State::Instance().autoExposure; stateAutoExposure.has_value())
         {
-            LOG_INFO("AutoExposure flag overrided by OptiScaler: {}", State::Instance().autoExposure.value());
-            _initFlags.AutoExposure = State::Instance().autoExposure.value();
+            LOG_INFO("AutoExposure flag overrided by OptiScaler: {}", stateAutoExposure.value());
+            _initFlags.AutoExposure = stateAutoExposure.value();
         }
-        else if (Config::Instance()->AutoExposure.has_value())
+        else if (std::optional<bool> autoExposure = Config::Instance()->AutoExposure; autoExposure.has_value())
         {
-            LOG_INFO("AutoExposure flag overrided by user: {}", Config::Instance()->AutoExposure.value());
-            _initFlags.AutoExposure = Config::Instance()->AutoExposure.value();
+            LOG_INFO("AutoExposure flag overrided by user: {}", autoExposure.value());
+            _initFlags.AutoExposure = autoExposure.value();
         }
         else
         {
             _initFlags.AutoExposure = _featureFlags & NVSDK_NGX_DLSS_Feature_Flags_AutoExposure;
+        }
+
+        if (std::optional<bool> dynamicResolution = Config::Instance()->DynamicResolution;
+            dynamicResolution.has_value())
+        {
+            LOG_INFO("DynamicResolution flag overrided by user: {}", dynamicResolution.value());
+            _initFlags.DynamicResolution = dynamicResolution.value();
+        }
+        else
+        {
+            _initFlags.DynamicResolution = State::Instance().dynamicResolution;
         }
 
         LOG_INFO("Init Flag AutoExposure: {}", _initFlags.AutoExposure);
@@ -90,6 +106,7 @@ bool IFeature::SetInitParameters(NVSDK_NGX_Parameter* InParameters)
         LOG_INFO("Init Flag JitteredMV: {}", _initFlags.JitteredMV);
         LOG_INFO("Init Flag LowResMV: {}", _initFlags.LowResMV);
         LOG_INFO("Init Flag SharpenEnabled: {}", _initFlags.SharpenEnabled);
+        LOG_INFO("Init Flag DynamicResolution: {}", _initFlags.DynamicResolution);
 
         if (State::Instance().activeFgInput == FGInput::Upscaler)
         {
@@ -103,6 +120,11 @@ bool IFeature::SetInitParameters(NVSDK_NGX_Parameter* InParameters)
         }
     }
 
+    // Like DLSS, the output base is only used when enabled at creation
+    int outputSubrects = 0;
+    InParameters->Get(NVSDK_NGX_Parameter_DLSS_Enable_Output_Subrects, &outputSubrects);
+    _outputSubrects = outputSubrects != 0;
+
     if (InParameters->Get(NVSDK_NGX_Parameter_OutWidth, &outWidth) == NVSDK_NGX_Result_Success &&
         InParameters->Get(NVSDK_NGX_Parameter_OutHeight, &outHeight) == NVSDK_NGX_Result_Success)
     {
@@ -111,6 +133,44 @@ bool IFeature::SetInitParameters(NVSDK_NGX_Parameter* InParameters)
         InParameters->Get(NVSDK_NGX_Parameter_PerfQualityValue, &pqValue);
 
         GetDynamicOutputResolution(InParameters, &outWidth, &outHeight);
+
+        // Created for the max sizes, or for an upscale size that stayed the same long enough. Games round each
+        // upscale size's render up, padded it can be a few pixels over the one scaled from the max.
+        if (_padToMaxUpscaleSize)
+        {
+            unsigned int maxWidth = 0;
+            unsigned int maxHeight = 0;
+            unsigned int maxRenderWidth = 0;
+            unsigned int maxRenderHeight = 0;
+            InParameters->Get("FSR.maxUpscaleSize.width", &maxWidth);
+            InParameters->Get("FSR.maxUpscaleSize.height", &maxHeight);
+            InParameters->Get("FSR.maxRenderSize.width", &maxRenderWidth);
+            InParameters->Get("FSR.maxRenderSize.height", &maxRenderHeight);
+
+            if (maxWidth > 0 && maxHeight > 0 && maxRenderWidth > 0 && maxRenderHeight > 0)
+            {
+                outWidth = maxWidth;
+                outHeight = maxHeight;
+
+                // The size that stayed the same, recorded when the recreation was requested
+                int exact = 0;
+                unsigned int exactWidth = 0;
+                unsigned int exactHeight = 0;
+                InParameters->Get("OptiScaler.PadExactUpscaleSize", &exact);
+                InParameters->Get("OptiScaler.PadExactWidth", &exactWidth);
+                InParameters->Get("OptiScaler.PadExactHeight", &exactHeight);
+
+                if (exact && exactWidth > 0 && exactHeight > 0 && exactWidth <= maxWidth && exactHeight <= maxHeight)
+                {
+                    outWidth = exactWidth;
+                    outHeight = exactHeight;
+                }
+
+                // Never above the output, the display size would grow past the upscale size
+                width = std::min((unsigned int) ((uint64_t) maxRenderWidth * outWidth / maxWidth) + 16, outWidth);
+                height = std::min((unsigned int) ((uint64_t) maxRenderHeight * outHeight / maxHeight) + 16, outHeight);
+            }
+        }
 
         // Thanks to Crytek added these checks
         if (width > 16384 || width < 20)
@@ -150,6 +210,14 @@ bool IFeature::SetInitParameters(NVSDK_NGX_Parameter* InParameters)
         }
 
         _perfQualityValue = (NVSDK_NGX_PerfQuality_Value) pqValue;
+
+        if (_padToMaxUpscaleSize)
+        {
+            _maxRenderWidth = _renderWidth;
+            _maxRenderHeight = _renderHeight;
+            LOG_INFO("Padding smaller upscale sizes to {}x{} -> {}x{}", _maxRenderWidth, _maxRenderHeight,
+                     _displayWidth, _displayHeight);
+        }
 
         LOG_INFO("Render Resolution: {0}x{1}, Display Resolution {2}x{3}, Quality: {4}", _renderWidth, _renderHeight,
                  _displayWidth, _displayHeight, pqValue);
@@ -227,6 +295,8 @@ void IFeature::GetRenderResolution(const NVSDK_NGX_Parameter* InParameters, unsi
     _renderWidth = *OutWidth;
     _renderHeight = *OutHeight;
 
+    ReadSubrects(InParameters);
+
     // Should not be needed but who knows
     // if (_renderHeight == _displayHeight && _renderWidth == _displayWidth && _perfQualityValue !=
     // NVSDK_NGX_PerfQuality_Value_DLAA)
@@ -243,6 +313,83 @@ void IFeature::GetRenderResolution(const NVSDK_NGX_Parameter* InParameters, unsi
     {
         _jitterInfo.insert(std::make_pair(ji.x, ji.y));
     }
+}
+
+void IFeature::ReadSubrects(const NVSDK_NGX_Parameter* InParameters)
+{
+    for (size_t i = 0; i < SubrectBaseKeys.size(); i++)
+    {
+        auto& rect = _subrects[i];
+        rect = { 0, 0, _renderWidth, _renderHeight };
+        InParameters->Get(SubrectBaseKeys[i].first, &rect.X);
+        InParameters->Get(SubrectBaseKeys[i].second, &rect.Y);
+    }
+
+    // Display resolution motion vectors and the output keep the creation size, even with dynamic resolution
+    if (!LowResMV())
+    {
+        _subrects[(size_t) SubrectSlot::MV].Width = DisplayWidth();
+        _subrects[(size_t) SubrectSlot::MV].Height = DisplayHeight();
+    }
+
+    auto& output = _subrects[(size_t) SubrectSlot::Output];
+    output.Width = DisplayWidth();
+    output.Height = DisplayHeight();
+
+    if (!_outputSubrects)
+        output.X = output.Y = 0;
+}
+
+bool IFeature::PlacesOutput(const Subrect& InRect, bool InHasPasses) const
+{
+    const auto upscaler = GetUpscalerType();
+    const bool nativeSubrects = upscaler == Upscaler::XeSS || upscaler == Upscaler::DLSS || upscaler == Upscaler::DLSSD;
+    return InRect.HasOffset() && (!nativeSubrects || InHasPasses);
+}
+
+void IFeature::SetSubrectBase(NVSDK_NGX_Parameter* InParameters, SubrectSlot InSlot, uint32_t InX, uint32_t InY)
+{
+    InParameters->Set(SubrectBaseKeys[(size_t) InSlot].first, InX);
+    InParameters->Set(SubrectBaseKeys[(size_t) InSlot].second, InY);
+}
+
+bool IFeature::SubrectFits(SubrectSlot InSlot, const Subrect& InRect, uint64_t InWidth, uint32_t InHeight)
+{
+    const uint32_t slotBit = 1u << (uint32_t) InSlot;
+
+    // An unknown render size, copy buffers would take the source size
+    if (InRect.Width == 0 || InRect.Height == 0)
+        return false;
+
+    if ((uint64_t) InRect.X + InRect.Width > InWidth || (uint64_t) InRect.Y + InRect.Height > InHeight)
+    {
+        if (!(_subrectWarned & slotBit))
+        {
+            LOG_WARN("{} subrect {}x{} at ({}, {}) is outside the {}x{} texture, using it as is",
+                     magic_enum::enum_name(InSlot), InRect.Width, InRect.Height, InRect.X, InRect.Y, InWidth, InHeight);
+            _subrectWarned |= slotBit;
+        }
+
+        return false;
+    }
+
+    if (!(_subrectLogged & slotBit))
+    {
+        LOG_INFO("{} subrect {}x{} at ({}, {}) of the {}x{} texture, copying it for {}", magic_enum::enum_name(InSlot),
+                 InRect.Width, InRect.Height, InRect.X, InRect.Y, InWidth, InHeight, Name());
+        _subrectLogged |= slotBit;
+    }
+
+    return true;
+}
+
+void IFeature::WarnIntegerMask(uint32_t InFormat)
+{
+    if (_integerMaskWarned)
+        return;
+
+    LOG_WARN("Ignoring the reactive mask, its integer format {} can't be read as float", InFormat);
+    _integerMaskWarned = true;
 }
 
 float IFeature::GetSharpness(const NVSDK_NGX_Parameter* InParameters)
@@ -265,7 +412,7 @@ float IFeature::GetSharpness(const NVSDK_NGX_Parameter* InParameters)
 
 void IFeature::TickFrozenCheck(uint32_t presentPerEval)
 {
-    static long updatesWithoutFramecountChange = 0;
+    static uint32_t updatesWithoutFramecountChange = 0;
 
     if (_isInited)
     {
@@ -293,7 +440,7 @@ bool IFeature::UpdateOutputResolution(const NVSDK_NGX_Parameter* InParameters)
 
     if (Config::Instance()->OutputScalingEnabled.value_or_default())
     {
-        if (_targetWidth == fsrDynamicOutputWidth || _targetHeight == fsrDynamicOutputHeight)
+        if (_targetWidth == fsrDynamicOutputWidth && _targetHeight == fsrDynamicOutputHeight)
             return false;
 
         if (fsrDynamicOutputWidth > 0 && fsrDynamicOutputHeight > 0 &&
@@ -340,6 +487,15 @@ void IFeature::GetDynamicOutputResolution(NVSDK_NGX_Parameter* InParameters, uns
     if (supportsUpscaleSize)
     {
         InParameters->Set("OptiScaler.SupportsUpscaleSize", 0);
+        return;
+    }
+
+    // Set by the FFX inputs, IFeature_Dx12 pads the inputs of smaller upscale sizes
+    int padToMax = 0;
+    InParameters->Get("OptiScaler.PadToMaxUpscaleSize", &padToMax);
+    if (padToMax)
+    {
+        _padToMaxUpscaleSize = true;
         return;
     }
 

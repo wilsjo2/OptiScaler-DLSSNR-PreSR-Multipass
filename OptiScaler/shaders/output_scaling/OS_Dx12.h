@@ -5,7 +5,7 @@
 #include <d3d12.h>
 #include <d3dx/d3dx12.h>
 
-#define OS_NUM_OF_HEAPS 2
+#define OS_NUM_OF_HEAPS 3
 
 // Forward declaration so this header need not pull in Config.h. Scaler is a scoped enum with a fixed
 // underlying type, so an opaque declaration is a complete type -- enough for a member and a parameter.

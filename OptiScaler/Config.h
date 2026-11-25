@@ -4,6 +4,7 @@
 #include "State.h"
 
 #include <optional>
+#include <mutex>
 #include <filesystem>
 
 enum HasDefaultValue
@@ -45,6 +46,20 @@ template <class T, HasDefaultValue defaultState = WithDefault> class CustomOptio
         }
         _volatile = true;
         std::optional<T>::operator=(value);
+    }
+
+    // Prevents the reset from being saved to ini
+    constexpr void reset_volatile()
+    {
+        if (!_volatile)
+        {
+            if (this->has_value())
+                _configIni = this->value();
+            else
+                _configIni = std::nullopt;
+        }
+        _volatile = true;
+        std::optional<T>::reset();
     }
 
     // Use this when first setting a CustomOptional
@@ -101,12 +116,13 @@ template <class T, HasDefaultValue defaultState = WithDefault> class CustomOptio
     }
 
     constexpr T value_or_default() &&
-        requires(defaultState != NoDefault) {
-            return this->has_value() ? std::move(this->value()) : std::move(_defaultValue);
-        }
+        requires(defaultState != NoDefault)
+    {
+        return this->has_value() ? std::move(this->value()) : std::move(_defaultValue);
+    }
 
-        constexpr std::optional<T> value_for_config()
-            requires(defaultState == WithDefault)
+    constexpr std::optional<T> value_for_config()
+        requires(defaultState == WithDefault)
     {
         if (_volatile)
         {
@@ -154,7 +170,18 @@ enum FpsOverlayPos : uint32_t
     FpsOverlayPos_TopRight,
     FpsOverlayPos_BottomLeft,
     FpsOverlayPos_BottomRight,
+    FpsOverlayPos_TopCenter,
+    FpsOverlayPos_BottomCenter,
+    FpsOverlayPos_Custom, // FpsOverlayPosX/Y
     FpsOverlayPos_COUNT,
+};
+
+enum FpsOverlayShadow : uint32_t
+{
+    FpsOverlayShadow_Off,
+    FpsOverlayShadow_Shadow,
+    FpsOverlayShadow_Outline,
+    FpsOverlayShadow_COUNT,
 };
 
 enum FpsOverlay : uint32_t
@@ -165,8 +192,18 @@ enum FpsOverlay : uint32_t
     FpsOverlay_DetailedGraph,
     FpsOverlay_Full,
     FpsOverlay_FullGraph,
-    FpsOverlay_ReflexTimings,
+    FpsOverlay_LowLatencyTimings,
+    FpsOverlay_Custom, // FpsOverlayRows and FpsOverlayFpsRow
     FpsOverlay_COUNT,
+};
+
+// What the FPS row shows with the FPS
+enum FpsOverlayFpsRow : uint32_t
+{
+    FpsOverlayFpsRow_JustFps,   // Only the number
+    FpsOverlayFpsRow_FrameTime, // The API, frame time, frame generation and upscaler
+    FpsOverlayFpsRow_Average,   // The API, average FPS, frame generation and upscaler
+    FpsOverlayFpsRow_COUNT,
 };
 
 // Output scaling downscaler
@@ -207,6 +244,7 @@ enum class LowLatencyInput : uint32_t
     Reflex,
     XeLL,
     UeLowLatency,
+    OptiScaler, // OptiScaler's own Streamline (DLSSG output) when the game has no low latency of its own
     _
 };
 
@@ -218,7 +256,31 @@ enum class LowLatencyMode : uint32_t
     AntiLag2,
     XeLL,
     AntiLagVk,
-    Reflex
+    Reflex,
+    FpsLimiter,
+    _
+};
+
+enum class ReprojectionFill : uint32_t
+{
+    StrechEdge,
+    Dithering,
+    Noise,
+    Debug,
+    SoftEdge,
+};
+
+template <> struct EnumConfig<ReprojectionFill>
+{
+    static constexpr auto default_value = ReprojectionFill::Dithering;
+
+    static constexpr std::pair<ReprojectionFill, std::string_view> mapping[] = {
+        { ReprojectionFill::StrechEdge, "strech" },
+        { ReprojectionFill::Dithering, "dithering" },
+        { ReprojectionFill::Noise, "noise" },
+        { ReprojectionFill::Debug, "debug" },
+        { ReprojectionFill::SoftEdge, "soft" }
+    };
 };
 
 class Config
@@ -232,6 +294,7 @@ class Config
     CustomOptional<bool, NoDefault> HDR;
     CustomOptional<bool, NoDefault> JitterCancellation;
     CustomOptional<bool, NoDefault> DisplayResolution;
+    CustomOptional<bool, NoDefault> DynamicResolution;
     CustomOptional<bool, NoDefault> DisableReactiveMask;
     CustomOptional<float> DlssReactiveMaskBias { 0.45f };
 
@@ -247,6 +310,7 @@ class Config
     CustomOptional<bool> LogSingleFile { true };
     CustomOptional<bool> LogAsync { false };
     CustomOptional<int> LogAsyncThreads { 4 };
+    CustomOptional<bool> CreateDumps { false };
 
     // XeSS
     CustomOptional<bool> BuildPipelines { true };
@@ -450,6 +514,8 @@ class Config
     CustomOptional<std::wstring, NoDefault> FfxDx12RRPath;
     CustomOptional<std::wstring, NoDefault> FfxDx12RCPath;
     CustomOptional<std::wstring, NoDefault> FfxVkPath;
+    CustomOptional<std::wstring, NoDefault> FfxVkSRPath;
+    CustomOptional<std::wstring, NoDefault> FfxVkFGPath;
     CustomOptional<std::wstring, NoDefault> XeSSLibrary;
     CustomOptional<std::wstring, NoDefault> XeFGLibrary;
     CustomOptional<std::wstring, NoDefault> XeLLLibrary;
@@ -467,12 +533,22 @@ class Config
     // RCAS
     CustomOptional<bool> RcasEnabled { false };
     CustomOptional<bool> ContrastEnabled { false };
-    CustomOptional<float> Contrast { -0.3f };
+    CustomOptional<float> Contrast { 0.0f };
 
     // DA Sharpening
     CustomOptional<float, NoDefault> DADepthScale;
     CustomOptional<float, NoDefault> DADepthBias;
     CustomOptional<bool, NoDefault> DAClampOutput;
+
+    // BaBa Neural Sharpening
+    CustomOptional<int> BabaNeuralModel { 0 };             // 0 = Model A (standard), 1 = Model B (edge-enhanced)
+    CustomOptional<float> BabaNeuralEdgeResponse { 0.0f }; // -1 smooth edges, +1 enhance edges
+    CustomOptional<int> BabaNeuralDebugView { 0 };         // 0 = normal, 1 = sharpening map, 2 = residual map
+
+    // OptiSharpen
+    // 0 / 1 = Natural / Crisp D10, 2 / 3 the same in fp16 packed (own pipeline)
+    CustomOptional<int> OptiSharpenModel { 3 };
+    CustomOptional<int> OptiSharpenDebugView { 0 }; // 0 = normal, 1 = sharpening map, 2 = change magnitude
 
     // MAS
     CustomOptional<bool> MotionSharpnessEnabled { false };
@@ -493,7 +569,8 @@ class Config
 
     // Menu
     CustomOptional<float, NoDefault> MenuScale;
-    CustomOptional<bool> OverlayMenu { true };
+    CustomOptional<float, NoDefault> MenuHeight; // Unscaled, no value means default height
+    CustomOptional<bool, SoftDefault> OverlayMenu { true };
     CustomOptional<bool> ShortcutKeyRequireCtrl { false };
     CustomOptional<bool> ShortcutKeyRequireAlt { false };
     CustomOptional<int> ShortcutKey { VK_INSERT };
@@ -503,13 +580,44 @@ class Config
     CustomOptional<FpsOverlayPos> FpsOverlayPosition { FpsOverlayPos_TopLeft };
     /// 0 Only FPS, 1 +Avg FPS & Upscaler info 2 +Frame Time,
     /// 3 +Upscaler Time, 4 +Frame Time Graph, 5 +Upscaler Time Graph
-    /// 6 +Reflex timings
-    CustomOptional<FpsOverlay> FpsOverlayType { FpsOverlay_JustFPS };
+    /// 6 +Low latency timings, 7 Custom rows
+    CustomOptional<FpsOverlay> FpsOverlayType { FpsOverlay_FullGraph };
     CustomOptional<int> FpsShortcutKey { VK_PRIOR };
     CustomOptional<int> FpsCycleShortcutKey { VK_NEXT };
     CustomOptional<bool> FpsOverlayHorizontal { false };
-    CustomOptional<float> FpsOverlayAlpha { 0.4f };
+    CustomOptional<bool> FpsOverlayShowRatio { false };
+    CustomOptional<bool> FpsOverlayCompactLabels { false };
+    CustomOptional<bool> FpsOverlayHideAverages { false };
+    // Rows of the Custom overlay type in their order, comma separated keys, hidden ones start with -.
+    // No value means the default overlay type's rows
+    CustomOptional<std::string, NoDefault> FpsOverlayRows;
+    CustomOptional<FpsOverlayFpsRow> FpsOverlayFpsRowType { FpsOverlayFpsRow_Average }; // Of the Custom type
+    CustomOptional<float, NoDefault> FpsOverlayRowSpacing; // No value means the default spacing
+    // Milliseconds the values that change every frame are kept, 0 updates them every frame
+    CustomOptional<float> FpsOverlayUpdateInterval { 0.0f };
+    CustomOptional<float> FpsOverlayAlpha { 0.45f };
     CustomOptional<float, NoDefault> FpsScale; // No value means same as MenuScale
+    CustomOptional<float> FpsOverlayGraphHeight { 1.0f };
+    // Position for FpsOverlayPos_Custom, 0.0 left/top to 1.0 right/bottom
+    CustomOptional<float> FpsOverlayPosX { 0.0f };
+    CustomOptional<float> FpsOverlayPosY { 0.0f };
+    // Font file in the Windows fonts folder or a full path, no value means the menu font
+    CustomOptional<std::string, NoDefault> FpsOverlayFont;
+    CustomOptional<float, NoDefault> FpsOverlayFontSize; // No value means the menu font size
+    CustomOptional<float> FpsOverlayLetterSpacing { 0.0f };
+    // Labels are the names like FPS:, values their numbers
+    CustomOptional<float> FpsOverlayLabelScale { 1.0f };
+    CustomOptional<float> FpsOverlayValueScale { 1.0f };
+    // 0xRRGGBB, used when the overlays don't use the theme colors
+    CustomOptional<uint32_t> FpsOverlayLabelColor { 0xEAEAEA };
+    CustomOptional<uint32_t> FpsOverlayValueColor { 0xFFFFFF };
+    CustomOptional<uint32_t> FpsOverlayGraphColor { 0x00FF00 };
+    CustomOptional<uint32_t> FpsOverlayBGColor { 0x000000 };
+    CustomOptional<FpsOverlayShadow> FpsOverlayShadowType { FpsOverlayShadow_Shadow };
+    CustomOptional<float> FpsOverlayShadowStrength { 0.4f };
+    CustomOptional<uint32_t> FpsOverlayShadowColor { 0x000000 };
+    CustomOptional<float> FpsOverlayRounding { 2.0f };
+    CustomOptional<float> MenuRounding { 2.0f };
     CustomOptional<bool> UseHQFont { true };
     CustomOptional<bool> DisableSplash { false };
     CustomOptional<float> FontSize { 14.0f };
@@ -523,12 +631,19 @@ class Config
     CustomOptional<float> MenuBGColorR { 0.0f };
     CustomOptional<float> MenuBGColorG { 0.0f };
     CustomOptional<float> MenuBGColorB { 0.0f };
-    CustomOptional<float> MenuBGColorA { 0.99f };
+    CustomOptional<float> MenuBGColorA { 0.93f };
+    CustomOptional<bool> MenuBlur { true };
+    CustomOptional<float> MenuBlurStrength { 1.0f };
+    CustomOptional<bool> CustomTabEnabled { true };
+    CustomOptional<std::string> CustomTabCards {
+        "upscaler,sharpness,fg_selection,fg_fsrfg,fg_xefg,fg_dlssg,fg_flipmeter,"
+        "fg_reprojection,fg_optifg,fg_nvngx,fg_fsrfg_inputs,fg_sl_inputs,framerate"
+    }; // Comma separated ids of the boxes
 
     // Hooks
     CustomOptional<bool> HookOriginalNvngxOnly { false };
     CustomOptional<bool> EarlyHooking { false };
-    CustomOptional<bool> UseNtdllHooks { true };
+    CustomOptional<bool, SoftDefault> UseNtdllHooks { true };
 
     // Upscale Ratio Override
     CustomOptional<bool> UpscaleRatioOverrideEnabled { false };
@@ -555,7 +670,7 @@ class Config
         L"qtwebengineprocess.exe|platformprocess.exe|bugsplathd64.exe|bssndrpt64.exe|pspcsdkappmgr.exe|pspcsdkcore.exe|"
         L"pspcsdkstttts.exe|pspcsdktelemetry.exe|pspcsdkui.exe|pspcsdkupdatechecker.exe|pspcsdkvoicechat.exe|"
         L"pspcsdkwebview.exe|windhawk.exe|vscodium.exe|crash_reporter.exe|steamerrorreporter64.exe|crashreportclient."
-        L"exe|edcefcrashpadprocess.exe|edcefrenderprocess.exe"
+        L"exe|edcefcrashpadprocess.exe|edcefrenderprocess.exe|unicrashreporter.exe"
     };
 
     // Hotfixes
@@ -578,9 +693,9 @@ class Config
     CustomOptional<int, NoDefault> RoundInternalResolution; // disabled by default
 
     CustomOptional<int, NoDefault> SkipFirstFrames; // disabled by default
-    CustomOptional<bool> RestoreComputeSignature { false };
-    CustomOptional<bool> RestoreGraphicSignature { false };
-    CustomOptional<bool> ExtendedStateRestore { false };
+    CustomOptional<bool, SoftDefault> RestoreComputeSignature { false };
+    CustomOptional<bool, SoftDefault> RestoreGraphicSignature { false };
+    CustomOptional<bool, SoftDefault> ExtendedStateRestore { false };
 
     CustomOptional<bool> UsePrecompiledShaders { true };
 
@@ -595,7 +710,7 @@ class Config
     CustomOptional<int32_t, NoDefault> MaskResourceBarrier;     // disabled by default
     CustomOptional<int32_t, NoDefault> OutputResourceBarrier;   // disabled by default
 
-    CustomOptional<bool> CreateD3D12DeviceForLuma { false };
+    CustomOptional<bool, SoftDefault> CreateD3D12DeviceForLuma { false };
 
     // Upscalers
     CustomOptional<Upscaler, SoftDefault> Dx11Upscaler { Upscaler::FSR22 };
@@ -610,6 +725,28 @@ class Config
     // FSR
     CustomOptional<bool> FsrDebugView { false };
     CustomOptional<int> FfxUpscalerIndex { 0 };
+    // Custom upscaler name (misc/CustomProviders.h) of each API, stored in the API's upscaler setting in place of
+    // the upscaler it runs as, empty for the regular upscalers
+    CustomOptional<std::string, NoDefault> CustomUpscalerDx11;
+    CustomOptional<std::string, NoDefault> CustomUpscaler;
+    CustomOptional<std::string, NoDefault> CustomUpscalerVk;
+    // Folder in custom with a dlssd for the game's ray reconstruction, RRUpscaler in the ini, empty for auto
+    CustomOptional<std::string, NoDefault> CustomRRUpscaler;
+    // Regular upscaler running the game's ray reconstruction without denoising, RRUpscaler in the ini, empty for DLSSD
+    CustomOptional<Upscaler, NoDefault> RRRegularUpscaler;
+    // Regular upscalers can be picked for ray reconstruction, which is then offered to the game without a DLSSD
+    CustomOptional<bool> RRAllowRegularUpscalers { false };
+
+    // UpscalerIndex of [FSR] for the regular FFX upscaler, of [<name>] for a custom one
+    CustomOptional<int>& FfxUpscalerIndexFor(const std::string& custom)
+    {
+        if (custom.empty())
+            return FfxUpscalerIndex;
+
+        // Entries never move, the reference stays valid outside the lock
+        std::scoped_lock lock(_customIndexMutex);
+        return _ffxCustomUpscalerIndex.try_emplace(custom, 0).first->second;
+    }
     CustomOptional<int> FfxFGIndex { 0 };
     CustomOptional<bool> FsrUseMaskForTransparency { true };
     CustomOptional<bool> FsrNonLinearColorSpace { false };
@@ -617,29 +754,31 @@ class Config
     CustomOptional<bool> FsrNonLinearPQ { false };
     CustomOptional<bool> FsrAgilitySDKUpgrade { false };
 
-    // These default values will be overwritten at upscaler init time with optimized values
-    CustomOptional<float> FsrVelocity { 1.0f };
-    CustomOptional<float> FsrReactiveScale { 1.0f };
-    CustomOptional<float> FsrShadingScale { 1.0f };
+    // Stability preset values
+    CustomOptional<float> FsrVelocity { 0.5f };
+    CustomOptional<float> FsrReactiveScale { 0.333f };
+    CustomOptional<float> FsrShadingScale { 0.5f };
     CustomOptional<float> FsrAccAddPerFrame { 0.333f };
-    CustomOptional<float> FsrMinDisOccAcc { -0.333f };
+    CustomOptional<float> FsrMinDisOccAcc { 0.0f };
 
     // FSR4
-    CustomOptional<FSR4Support> Fsr4ForceModel { FSR4Support::None };
+    // Overrides the FSR 4 support detected for the GPU
+    CustomOptional<FSR4Support> Fsr4GpuSupport { FSR4Support::None };
     CustomOptional<uint32_t, NoDefault> Fsr4Preset;
+    CustomOptional<FSR4Model, NoDefault> Fsr4Model;
     CustomOptional<bool> Fsr4EnableWatermark { false };
-    CustomOptional<bool> Fsr4DoNotLoadAmdxc64 { false };
+    CustomOptional<bool, SoftDefault> Fsr4DoNotLoadAmdxc64 { false };
 
     // FSR Common
     CustomOptional<float> FsrVerticalFov { 60.0f };
     CustomOptional<float> FsrHorizontalFov { 0.0f }; // off by default
     CustomOptional<float> FsrCameraNear { 0.1f };
     CustomOptional<float> FsrCameraFar { 100000.0f };
-    CustomOptional<bool> FsrUseFsrInputValues { true };
+    CustomOptional<bool, SoftDefault> FsrUseFsrInputValues { true };
 
     // dx11wdx12
     CustomOptional<bool> Dx11DelayedInit { false };
-    CustomOptional<bool> DontUseNTShared { true };
+    CustomOptional<bool, SoftDefault> DontUseNTShared { true };
 
     // vulkanwdx12
     CustomOptional<bool> VulkanUseCopyForInputs { false };
@@ -647,15 +786,16 @@ class Config
 
     // NVAPI Override
     CustomOptional<bool> DisableFlipMetering { false };
+    CustomOptional<bool> DisableOTA { false };
 
     // Spoofing
     CustomOptional<bool, SoftDefault> DxgiSpoofing { true };
     CustomOptional<bool> DxgiFactoryWrapping { false };
-    CustomOptional<bool> StreamlineSpoofing { true };
+    CustomOptional<bool, SoftDefault> StreamlineSpoofing { true };
     CustomOptional<std::string, NoDefault> DxgiBlacklist; // disabled by default
     CustomOptional<int, NoDefault> DxgiVRAM;              // disabled by default
-    CustomOptional<bool> VulkanSpoofing { false };
-    CustomOptional<bool> VulkanExtensionSpoofing { false };
+    CustomOptional<bool, SoftDefault> VulkanSpoofing { false };
+    CustomOptional<bool, SoftDefault> VulkanExtensionSpoofing { false };
     CustomOptional<int, NoDefault> VulkanVRAM; // disabled by default
     CustomOptional<bool> SpoofHAGS { false };
     CustomOptional<bool> SpoofFeatureLevel { false };
@@ -683,7 +823,7 @@ class Config
     CustomOptional<FGNvngxReplacement> FGNvngxReplacement { FGNvngxReplacement::Nukems };
     CustomOptional<bool> FGDrawUIOverFG { false };
     CustomOptional<bool> FGUIPremultipliedAlpha { true };
-    CustomOptional<bool> FGDisableHudless { false };
+    CustomOptional<bool, SoftDefault> FGDisableHudless { false };
     CustomOptional<bool> FGDisableUI { false };
     CustomOptional<bool> FGSkipReset { false };
     CustomOptional<int> FGAllowedFrameAhead { 1 };
@@ -691,21 +831,24 @@ class Config
     CustomOptional<bool> FGVelocityValidNow { false };
     CustomOptional<bool> FGHudlessValidNow { false };
     CustomOptional<bool> FGOnlyAcceptFirstHudless { false };
-    CustomOptional<bool> FGPreserveSwapChain { true };
-    CustomOptional<bool> FGSkipResizeBuffers { false };
+    CustomOptional<bool, SoftDefault> FGPreserveSwapChain { true };
+    CustomOptional<bool, SoftDefault> FGSkipResizeBuffers { false };
     CustomOptional<bool> FGModifyBufferState { false };
     CustomOptional<bool> FGModifySCIndex { false };
     CustomOptional<float> FGHudCutoff { 0.0f };
     CustomOptional<FrameTimeSource> FTInput { FrameTimeSource::Input };
+    CustomOptional<bool> FGReprojectionEnabled { false }; // WIP Not saved or loaded
 
     // OptiFG
-    CustomOptional<bool> FGEnabled { false };
+    // Unset (auto) follows the game's DLSSG state when FG Input is DLSSG, use IsFGEnabled() to read
+    CustomOptional<bool, SoftDefault> FGEnabled { false };
     CustomOptional<bool> FGUseMutexForSwapchain { true };
     CustomOptional<bool> FGMakeMVCopy { true };
     CustomOptional<bool> FGMakeDepthCopy { true };
     CustomOptional<bool> FGResourceFlip { false };
     CustomOptional<bool> FGResourceFlipOffset { false };
-    CustomOptional<bool> FGAlwaysCaptureFSRFGSwapchain { false };
+    CustomOptional<bool> FGHudlessFlip { false };
+    CustomOptional<bool, SoftDefault> FGAlwaysCaptureFSRFGSwapchain { false };
 
     CustomOptional<int, NoDefault> FGRectLeft;
     CustomOptional<int, NoDefault> FGRectTop;
@@ -713,10 +856,12 @@ class Config
     CustomOptional<int, NoDefault> FGRectHeight;
 
     // OptiFG - Hudfix
-    CustomOptional<bool> FGDisableHUDFix { false };
+    CustomOptional<bool, SoftDefault> FGDisableHUDFix { false };
     CustomOptional<bool> FGHUDFix { false };
     CustomOptional<int> FGHUDLimit { 1 };
     CustomOptional<bool> FGHUDFixExtended { false };
+    CustomOptional<bool> FGHUDFixUITexture { true };
+    CustomOptional<bool, NoDefault> FGHUDFixUIUnblend;
     CustomOptional<bool> FGImmediateCapture { false };
     CustomOptional<bool> FGHudfixPersistentBindings { true };
     CustomOptional<bool> FGDontUseSwapchainBuffers { false };
@@ -752,20 +897,29 @@ class Config
     CustomOptional<bool> FGFPTAllowHybridSpin { false };
     CustomOptional<int> FGFPTHybridSpinTime { 2 };
     CustomOptional<bool> FGFPTAllowWaitForSingleObjectOnFence { false };
+    CustomOptional<bool> FSRFGDisableFlipMetering { false };
 
     CustomOptional<bool> FSRFGSkipConfigForHudless { false };
     CustomOptional<bool> FSRFGSkipDispatchForHudless { false };
     CustomOptional<bool> FSRFGEnableWatermark { false };
+    // Custom FFX FG name (misc/CustomProviders.h) used by FSR FG, empty for the regular one
+    CustomOptional<std::string, NoDefault> FSRFGProvider;
 
     // XeFG
     CustomOptional<bool> FGXeFGIgnoreInitChecks { false };
     CustomOptional<int> FGXeFGInterpolationCount { 1 };
+    CustomOptional<bool> FGXeFGDynamicMFG { false };          // Count picked up to FGXeFGInterpolationCount
+    CustomOptional<float> FGXeFGFramerateTargetDMFG { 0.0f }; // 0 = the FPS limit, else just under the refresh rate
+    CustomOptional<int> FGXeFGRoundingDMFG { 1 };             // 0 at most, 1 around, 2 at least the target
+    CustomOptional<bool> FGXeFGDynamicAllow1X { true };       // Dynamic MFG may turn frame generation off (1X)
+    CustomOptional<bool> FGXeFGTargetAsCapDMFG { false };     // The Dynamic MFG target is also the FPS limit
+    CustomOptional<int, NoDefault> FGXeFGOverrideInterpolationCount; // Game's own XeFG (XeFG input), 0 = off
     CustomOptional<bool> FGXeFGUIComposition { false };
     CustomOptional<bool> FGXeFGDepthInverted { true };
     CustomOptional<bool> FGXeFGJitteredMV { false };
     CustomOptional<bool> FGXeFGHighResMV { false };
     CustomOptional<bool> FGXeFGDebugView { false };
-    CustomOptional<bool> FGXeFGForceBorderless { false };
+    CustomOptional<bool, SoftDefault> FGXeFGForceBorderless { false };
 
     // DLSSG
 #if defined(OPTISCALER_RTX40_MFG)
@@ -782,35 +936,46 @@ class Config
     CustomOptional<bool> FGDLSSGForceDMFG { false };           // Overrides Opti's DLSSG mode to Dynamic
     CustomOptional<float> FGDLSSGFramerateTargetDMFG { 0.0f }; // 0.0 means auto-detects the display refresh rate
 
+    // Flip Meter
+    CustomOptional<int> FGFlipMeterInterpolationCount { 1 };
+    // Reprojection
+    CustomOptional<ReprojectionFill> ReprojectionFillMode { ReprojectionFill::Dithering };
+    CustomOptional<float> ReprojectionDepthCutoff { 0.1f };
+    CustomOptional<uint32_t> ReprojectionCutoffExpand { 1 };
+    CustomOptional<bool> ReprojectionLateLatch { true };
+    CustomOptional<bool> ReprojectionDirectionCache { true };
+    CustomOptional<bool> ReprojectionParallaxAuto { true };   // estimated from the motion vectors
+    CustomOptional<float> ReprojectionParallaxScale { 0.0f }; // when not auto, 0 = rotation only
+    CustomOptional<bool> ReprojectionThirdPersonDetection { true };
+
     // As per
     // https://github.com/artur-graniszewski/dlss-enabler-main/blob/a92464d468eb0d91ae17befa66c6bf6229f20b9f/Utils/DlssgProxy.cpp#L1033
     CustomOptional<uint32_t> NvngxFGDispatchFlags { 0x10000000 }; // IGNORE_UI_TEXTURE
     CustomOptional<bool> NvngxFGShowDebug { false };
-    CustomOptional<bool> NvngxFGDisableHudless { false };
 
     // fakenvapi
-    CustomOptional<bool> UseFakenvapi { true };
+    CustomOptional<bool, SoftDefault> UseFakenvapi { true };
     CustomOptional<bool> ForceXeLL { false };
     CustomOptional<bool> FN_ForceLatencyFlex { false };
     CustomOptional<LFXMode> FN_LatencyFlexMode { LFXMode::Conservative };
     CustomOptional<ForceReflex> FN_ForceReflex { ForceReflex::InGame };
-    CustomOptional<LowLatencyInput> LowLatencyInput { LowLatencyInput::Auto }; // TODO: no reading/saving to config
+    CustomOptional<LowLatencyInput> LowLatencyInput { LowLatencyInput::Auto };
     CustomOptional<LowLatencyMode> LowLatencyOutput { LowLatencyMode::Auto };
 
     // Inputs
     CustomOptional<bool> EnableDlssInputs { true };
     CustomOptional<bool> EnableXeSSInputs { true };
-    CustomOptional<bool> UseFsr2Inputs { true };
-    CustomOptional<bool> UseFsr2Dx11Inputs { false };
-    CustomOptional<bool> UseFsr2VulkanInputs { false };
-    CustomOptional<bool> Fsr2Pattern { false };
-    CustomOptional<bool> UseFsr3Inputs { true };
-    CustomOptional<bool> Fsr3Pattern { false };
-    CustomOptional<bool> UseFfxInputs { true };
+    CustomOptional<bool, SoftDefault> UseFsr2Inputs { true };
+    CustomOptional<bool, SoftDefault> UseFsr2Dx11Inputs { false };
+    CustomOptional<bool, SoftDefault> UseFsr2VulkanInputs { false };
+    CustomOptional<bool, SoftDefault> Fsr2Pattern { false };
+    CustomOptional<bool, SoftDefault> UseFsr3Inputs { true };
+    CustomOptional<bool, SoftDefault> Fsr3Pattern { false };
+    CustomOptional<bool, SoftDefault> UseFfxInputs { true };
     CustomOptional<bool> EnableHotSwapping { false };
-    CustomOptional<bool> EnableFsr2Inputs { true };
-    CustomOptional<bool> EnableFsr3Inputs { true };
-    CustomOptional<bool> EnableFfxInputs { true };
+    CustomOptional<bool, SoftDefault> EnableFsr2Inputs { true };
+    CustomOptional<bool, SoftDefault> EnableFsr3Inputs { true };
+    CustomOptional<bool, SoftDefault> EnableFfxInputs { true };
 
     // Framerate
     CustomOptional<float> FramerateLimit { 0.0f };
@@ -821,9 +986,10 @@ class Config
     CustomOptional<bool> SkipColorSpace { false };
 
     // V-Sync
-    CustomOptional<bool> OverrideVsync { false };
+    CustomOptional<bool, SoftDefault> OverrideVsync { false };
     CustomOptional<bool, NoDefault> ForceVsync;
     CustomOptional<UINT> VsyncInterval { 0 };
+    CustomOptional<int, NoDefault> VulkanPresentMode; // VkPresentModeKHR
 
     // Old configs for compat reasons
     CustomOptional<bool, NoDefault> _DONTUSE_Fsr4ForceEnableInt8;
@@ -835,9 +1001,30 @@ class Config
     std::vector<std::string> ListProfiles();
     bool SaveXeFG();
 
+    // Keys that aren't OptiScaler options (plugin settings), kept in the ini as they are
+    std::optional<std::string> GetRawValue(const char* section, const char* key);
+    void SetRawValue(const char* section, const char* key, const char* value);
+    void DeleteRawValue(const char* section, const char* key);
+    bool SaveRawValues();
+
     void CheckUpscalerFiles();
 
+    // FG on/off and interpolation count, following the game's DLSSG state when FGEnabled is unset
+    static bool FGCanFollowGame();
+    bool FGFollowsGame() const;
+    bool IsFGEnabled() const;
+    int FGInterpolationCount(int outputCount) const;
+
     std::vector<std::string> GetConfigLog();
+
+    // The FPS overlay's settings that differ from the defaults as a code, to keep them outside the ini and share
+    // them without a file
+    std::string ExportOverlaySettings();
+    bool ImportOverlaySettings(std::string_view code);
+
+    // A code's settings as text, also a preset: Key=Value separated by ';', keys without the FpsOverlay prefix.
+    // What it doesn't list goes back to the default.
+    bool ApplyOverlaySettings(std::string_view text);
 
     static Config* Instance();
 
@@ -848,7 +1035,26 @@ class Config
     std::filesystem::path absoluteFileName;
     std::wstring fileName = L"OptiScaler.ini";
 
+    // Ini sections aren't case sensitive, the folder names neither
+    struct NoCaseLess
+    {
+        bool operator()(const std::string& a, const std::string& b) const { return _stricmp(a.c_str(), b.c_str()) < 0; }
+    };
+
+    std::map<std::string, CustomOptional<int>, NoCaseLess> _ffxCustomUpscalerIndex;
+    struct CopyableMutex : std::mutex
+    {
+        CopyableMutex() = default;
+        CopyableMutex(const CopyableMutex&) : std::mutex() {}
+        CopyableMutex& operator=(const CopyableMutex&) { return *this; }
+    };
+    CopyableMutex _customIndexMutex;
+
     bool Reload(std::filesystem::path iniPath);
+
+    // The FPS overlay's keys of the Menu section: read when loading the ini, or assigned for a pasted code
+    void ReadOverlaySettings(bool assign);
+    void WriteOverlaySettings();
 
     std::optional<std::string> readString(std::string section, std::string key, bool lowercase = false);
     std::optional<std::wstring> readWString(std::string section, std::string key, bool lowercase = false);

@@ -14,18 +14,19 @@ static PFN_WinVerifyTrust o_WinVerifyTrust = nullptr;
 VALIDATE_HOOK(hkWinVerifyTrust, PFN_WinVerifyTrust)
 static LONG hkWinVerifyTrust(HWND hwnd, GUID* pgActionID, LPVOID pWVTData)
 {
-    if (!pWVTData || !IsEqualGUID(*pgActionID, WINTRUST_ACTION_GENERIC_VERIFY_V2))
+    if (!pWVTData || !pgActionID || !IsEqualGUID(*pgActionID, WINTRUST_ACTION_GENERIC_VERIFY_V2))
         return o_WinVerifyTrust(hwnd, pgActionID, pWVTData);
 
     const auto data = reinterpret_cast<WINTRUST_DATA*>(pWVTData);
 
-    if (!data->pFile || !data->pFile->pcwszFilePath)
+    if (data->dwUnionChoice != WTD_CHOICE_FILE || !data->pFile || !data->pFile->pcwszFilePath)
         return o_WinVerifyTrust(hwnd, pgActionID, pWVTData);
 
     auto path = wstring_to_string(std::wstring(data->pFile->pcwszFilePath));
     to_lower_in_place(path);
 
-    if (path.contains("amd_fidelityfx_dx12.dll") || path.contains("amd_fidelityfx_vk.dll"))
+    if (path.contains("amd_fidelityfx_dx12.dll") || path.contains("amd_fidelityfx_upscaler_vk.dll") ||
+        path.contains("amd_fidelityfx_vk.dll"))
     {
         return ERROR_SUCCESS;
     }

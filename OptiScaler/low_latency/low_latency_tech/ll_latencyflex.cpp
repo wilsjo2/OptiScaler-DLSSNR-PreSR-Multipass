@@ -29,7 +29,7 @@ void LatencyFlex::lfx_sleep(uint64_t reflex_frame_id)
             ctx->Reset();
     }
 
-    uint64_t current_timestamp = get_timestamp();
+    uint64_t current_timestamp = Util::GetTimestamp();
     uint64_t timestamp;
 
     // Set FPS Limiter
@@ -85,7 +85,7 @@ void LatencyFlex::lfx_sleep(uint64_t reflex_frame_id)
 
 void LatencyFlex::lfx_end_frame(uint64_t reflex_frame_id)
 {
-    auto current_timestamp = get_timestamp();
+    auto current_timestamp = Util::GetTimestamp();
     mutex.lock();
     auto frame_id = (LFXMode) Config::Instance()->FN_LatencyFlexMode.value_or_default() == LFXMode::ReflexIDs
                         ? reflex_frame_id
@@ -149,6 +149,10 @@ void LatencyFlex::sleep(std::optional<uint32_t> frame_id)
     if ((LFXMode) Config::Instance()->FN_LatencyFlexMode.value_or_default() != LFXMode::ReflexIDs)
     {
         last_sleep_framecount = simulation_framecount;
+
+        // Inputs that only sleep (OptiScaler's present markers) never send a simulation start to switch with
+        if (simulation_framecount == 0)
+            current_call_spot = CallSpot::SleepCall;
 
         if (current_call_spot == CallSpot::SleepCall)
         {

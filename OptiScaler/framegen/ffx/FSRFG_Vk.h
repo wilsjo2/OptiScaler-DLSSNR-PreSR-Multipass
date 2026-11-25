@@ -1,0 +1,117 @@
+#pragma once
+#include "SysUtils.h"
+#include <framegen/IFGFeature_Vk.h>
+#include <proxies/FfxApi_Proxy.h>
+#include <shaders/hud_copy/HudCopy_Vk.h>
+#include <shaders/hudless_compare_compute/HCC_Vk.h>
+
+// FSR 3.1 FG from the FFX SDK 1.1.4, the last one with Vulkan support,
+// or ML FG (FSR 4) with its swapchain from the AMD Vulkan driver
+class FSRFG_Vk : public virtual IFGFeature_Vk
+{
+  private:
+    enum ExtraQueueIndex
+    {
+        PresentQueue,
+        ImageAcquireQueue,
+        AsyncComputeQueue,
+    };
+
+    ffxContext _swapChainContext = nullptr;
+    ffxContext _fgContext = nullptr;
+
+    // SDK or driver, picked at swapchain creation as FG needs the swapchain from the same place
+    FfxModule* _ffxSwapchain = nullptr;
+    FfxModule* _ffx = nullptr;
+
+    // Custom FG and swapchain provider, nullptr for the SDK and driver ones
+    CustomFfxModule* _custom = FfxApiProxy::ActiveCustomFgVk();
+
+    // Selected FG version needs the swapchain from the other provider, the game recreates it on out of date
+    bool _swapchainOutdated = false;
+
+    // Driver FG selected but not supported on this device, the SDK swapchain is used
+    bool _driverFgRejected = false;
+    ffxQueryDescSwapchainReplacementFunctionsVK _functions {};
+    feature_version _version { 0, 0, 0 };
+
+    // Surface of the FG swapchain, swapchains of the game's other windows are left alone
+    VkSurfaceKHR _surface = VK_NULL_HANDLE;
+
+    // Game destroys its old swapchain after creating the new one, the context took it with it already
+    VkSwapchainKHR _retiredSwapchain = VK_NULL_HANDLE;
+
+    // FFX SDK 2.x swapchains outlive their context, they get destroyed with it here
+    const VkAllocationCallbacks* _swapchainAllocator = nullptr;
+
+    // FFX takes these at context creation
+    flag_set<FG_Flags> _contextFlags;
+
+    // FFX wants hudless in the swapchain's format, the HUD shaders need it in our copy too
+    ImageCopy _hudlessCopies[BUFFER_COUNT] {};
+    bool _hudlessInCopy[BUFFER_COUNT] {};
+
+    // Not owned, the copy the HUD shaders work on: _hudlessCopies or the one SetResource made
+    ImageCopy _hudlessTarget[BUFFER_COUNT] {};
+
+    std::unique_ptr<HudCopy_Vk> _hudCopy;
+    std::unique_ptr<HCC_Vk> _hudlessCompare;
+
+    // Views of FFX's replacement images the game renders to
+    std::unordered_map<VkImage, VkImageView> _presentViews;
+
+    uint64_t _lastDispatchedFrameId = 0;
+
+    // Signaled by the prepare after the game's present semaphores, the present waits for it
+    VkSemaphore _preparedSemaphore[BUFFER_COUNT] {};
+
+    void CreateContext();
+    void QueryVersions();
+    bool IsDriverVersionSelected();
+    bool UsesDriver() const;
+    void ReleaseSwapchainContext();
+    ffxReturnCode_t ConfigureEnabled(bool enabled);
+    void ConfigureFramePaceTuning();
+
+    VkSemaphore Dispatch(const VkPresentInfoKHR* pPresentInfo);
+    ffxReturnCode_t DispatchCallback(ffxDispatchDescFrameGeneration* params);
+    void DispatchHudShaders(ffxDispatchDescFrameGeneration* params);
+    VkImageView PresentView(VkImage image);
+
+  public:
+    // Reverse of GetFfxState, as FFX's getVKImageLayoutFromResourceState does it
+    static VkImageLayout GetLayout(uint32_t state);
+
+    // IFGFeature
+    const char* Name() override final { return "FSR-FG"; }
+    feature_version Version() override final { return _version; }
+
+    bool Present() override final;
+    void Activate() override final;
+    void Deactivate() override final;
+    void DestroyFGContext() override final;
+    bool ReleaseSwapchain(HWND hwnd) override final;
+    bool Shutdown() override final;
+    bool SetInterpolatedFrameCount(UINT interpolatedFrameCount) override final { return true; }
+
+    // IFGFeature_Vk
+    bool CreateSwapchain(VkDevice device, const VkSwapchainCreateInfoKHR* pCreateInfo,
+                         const VkAllocationCallbacks* pAllocator, VkSwapchainKHR* pSwapchain) override final;
+    bool DestroySwapchain(VkDevice device, VkSwapchainKHR swapchain,
+                          const VkAllocationCallbacks* pAllocator) override final;
+    bool IsRetiredSwapchain(VkSwapchainKHR swapchain) const override final
+    {
+        return swapchain != VK_NULL_HANDLE && swapchain == _retiredSwapchain;
+    }
+    VkResult GetSwapchainImages(VkDevice device, VkSwapchainKHR swapchain, uint32_t* pSwapchainImageCount,
+                                VkImage* pSwapchainImages) override final;
+    VkResult AcquireNextImage(VkDevice device, VkSwapchainKHR swapchain, uint64_t timeout, VkSemaphore semaphore,
+                              VkFence fence, uint32_t* pImageIndex) override final;
+    VkResult QueuePresent(VkQueue queue, const VkPresentInfoKHR* pPresentInfo) override final;
+    void SetHdrMetadata(VkDevice device, VkSwapchainKHR swapchain, const VkHdrMetadataEXT* pMetadata) override final;
+
+    void EvaluateState(FG_Constants& fgConstants) override final;
+
+    FSRFG_Vk();
+    ~FSRFG_Vk();
+};

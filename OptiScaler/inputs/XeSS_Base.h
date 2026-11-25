@@ -1,6 +1,7 @@
 #pragma once
 #include "SysUtils.h"
 #include <map>
+#include <unordered_set>
 
 #include <xess_d3d12.h>
 #include <xess_d3d11.h>
@@ -12,15 +13,13 @@ typedef struct Scale
     float y;
 } scale;
 
-struct XeSSParameters
-{
-    NVSDK_NGX_Parameter* value;
-    NVSDK_NGX_Result(NVSDK_CONV* destroy)(NVSDK_NGX_Parameter*);
-};
-extern std::unordered_map<xess_context_handle_t, XeSSParameters> _nvParams;
+extern std::unordered_map<xess_context_handle_t, NVSDK_NGX_Parameter*> _nvParams;
 extern std::unordered_map<xess_context_handle_t, NVSDK_NGX_Handle*> _contexts;
 extern std::unordered_map<xess_context_handle_t, Scale> _motionScales;
 extern std::unordered_map<xess_context_handle_t, Scale> _jitterScales;
 extern std::unordered_map<xess_context_handle_t, xess_d3d12_init_params_t> _d3d12InitParams;
 extern std::unordered_map<xess_context_handle_t, xess_vk_init_params_t> _vkInitParams;
 extern std::unordered_map<xess_context_handle_t, xess_d3d11_init_params_t> _d3d11InitParams;
+extern std::unordered_set<xess_context_handle_t> _vkContexts;
+// D3D11 contexts get D3D11 params (the D3D11 NGX table), destroyed with the D3D11 function
+extern std::unordered_set<xess_context_handle_t> _d3d11Contexts;

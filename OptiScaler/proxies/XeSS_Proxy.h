@@ -48,12 +48,15 @@ typedef decltype(&xessGetJitterScale) PFN_xessGetJitterScale;
 typedef decltype(&xessGetOptimalInputResolution) PFN_xessGetOptimalInputResolution;
 typedef decltype(&xessSetExposureMultiplier) PFN_xessSetExposureMultiplier;
 typedef decltype(&xessSetJitterScale) PFN_xessSetJitterScale;
+typedef decltype(&xessSetMaxResponsiveMaskValue) PFN_xessSetMaxResponsiveMaskValue;
+typedef decltype(&xessGetMaxResponsiveMaskValue) PFN_xessGetMaxResponsiveMaskValue;
 
 typedef decltype(&xessD3D12GetResourcesToDump) PFN_xessD3D12GetResourcesToDump;
 typedef decltype(&xessD3D12GetProfilingData) PFN_xessD3D12GetProfilingData;
 
 typedef xess_result_t (*PFN_xessSetContextParameterF)(); // XeSS' headers don't export this
 typedef decltype(&xessGetPipelineBuildStatus) PFN_xessGetPipelineBuildStatus;
+typedef decltype(&xessGetProfilingData) PFN_xessGetProfilingData;
 
 // Vulkan
 typedef decltype(&xessVKGetRequiredInstanceExtensions) PFN_xessVKGetRequiredInstanceExtensions;
@@ -101,11 +104,14 @@ struct XeSSModule
     PFN_xessGetOptimalInputResolution xessGetOptimalInputResolution = nullptr;
     PFN_xessSetExposureMultiplier xessSetExposureMultiplier = nullptr;
     PFN_xessSetJitterScale xessSetJitterScale = nullptr;
+    PFN_xessSetMaxResponsiveMaskValue xessSetMaxResponsiveMaskValue = nullptr;
+    PFN_xessGetMaxResponsiveMaskValue xessGetMaxResponsiveMaskValue = nullptr;
 
     PFN_xessD3D12GetResourcesToDump xessD3D12GetResourcesToDump = nullptr;
     PFN_xessD3D12GetProfilingData xessD3D12GetProfilingData = nullptr;
     PFN_xessSetContextParameterF xessSetContextParameterF = nullptr;
     PFN_xessGetPipelineBuildStatus xessGetPipelineBuildStatus = nullptr;
+    PFN_xessGetProfilingData xessGetProfilingData = nullptr;
 
     PFN_xessVKGetRequiredInstanceExtensions xessVKGetRequiredInstanceExtensions = nullptr;
     PFN_xessVKGetRequiredDeviceExtensions xessVKGetRequiredDeviceExtensions = nullptr;
@@ -146,8 +152,11 @@ struct XeSSDx11Module
     PFN_xessGetOptimalInputResolution xessGetOptimalInputResolutionDx11 = nullptr;
     PFN_xessSetExposureMultiplier xessSetExposureMultiplierDx11 = nullptr;
     PFN_xessSetJitterScale xessSetJitterScaleDx11 = nullptr;
+    PFN_xessSetMaxResponsiveMaskValue xessSetMaxResponsiveMaskValueDx11 = nullptr;
+    PFN_xessGetMaxResponsiveMaskValue xessGetMaxResponsiveMaskValueDx11 = nullptr;
     PFN_xessSetContextParameterF xessSetContextParameterFDx11 = nullptr;
     PFN_xessGetPipelineBuildStatus xessGetPipelineBuildStatusDx11 = nullptr;
+    PFN_xessGetProfilingData xessGetProfilingDataDx11 = nullptr;
 };
 
 class XeSSProxy
@@ -305,6 +314,12 @@ class XeSSProxy
                 _module.dll, "xessSetExposureMultiplier");
             _module.xessSetJitterScale =
                 (PFN_xessSetJitterScale) KernelBaseProxy::GetProcAddress_()(_module.dll, "xessSetJitterScale");
+            _module.xessSetMaxResponsiveMaskValue =
+                (PFN_xessSetMaxResponsiveMaskValue) KernelBaseProxy::GetProcAddress_()(_module.dll,
+                                                                                       "xessSetMaxResponsiveMaskValue");
+            _module.xessGetMaxResponsiveMaskValue =
+                (PFN_xessGetMaxResponsiveMaskValue) KernelBaseProxy::GetProcAddress_()(_module.dll,
+                                                                                       "xessGetMaxResponsiveMaskValue");
 
             _module.xessD3D12GetResourcesToDump = (PFN_xessD3D12GetResourcesToDump) KernelBaseProxy::GetProcAddress_()(
                 _module.dll, "xessD3D12GetResourcesToDump");
@@ -314,6 +329,8 @@ class XeSSProxy
                 _module.dll, "xessSetContextParameterF");
             _module.xessGetPipelineBuildStatus = (PFN_xessGetPipelineBuildStatus) KernelBaseProxy::GetProcAddress_()(
                 _module.dll, "xessGetPipelineBuildStatus");
+            _module.xessGetProfilingData =
+                (PFN_xessGetProfilingData) KernelBaseProxy::GetProcAddress_()(_module.dll, "xessGetProfilingData");
 
             _module.xessVKGetRequiredInstanceExtensions =
                 (PFN_xessVKGetRequiredInstanceExtensions) KernelBaseProxy::GetProcAddress_()(
@@ -333,6 +350,8 @@ class XeSSProxy
                 (PFN_xessVKGetInitParams) KernelBaseProxy::GetProcAddress_()(_module.dll, "xessVKGetInitParams");
             _module.xessVKExecute =
                 (PFN_xessVKExecute) KernelBaseProxy::GetProcAddress_()(_module.dll, "xessVKExecute");
+            _module.xessVKGetResourcesToDump = (PFN_xessVKGetResourcesToDump) KernelBaseProxy::GetProcAddress_()(
+                _module.dll, "xessVKGetResourcesToDump");
         }
 
         if (_module_hooked.dll != nullptr && _module_hooked.xessD3D12CreateContext == nullptr)
@@ -388,6 +407,12 @@ class XeSSProxy
                                                                                    "xessSetExposureMultiplier");
             _module_hooked.xessSetJitterScale =
                 (PFN_xessSetJitterScale) KernelBaseProxy::GetProcAddress_()(_module_hooked.dll, "xessSetJitterScale");
+            _module_hooked.xessSetMaxResponsiveMaskValue =
+                (PFN_xessSetMaxResponsiveMaskValue) KernelBaseProxy::GetProcAddress_()(_module_hooked.dll,
+                                                                                       "xessSetMaxResponsiveMaskValue");
+            _module_hooked.xessGetMaxResponsiveMaskValue =
+                (PFN_xessGetMaxResponsiveMaskValue) KernelBaseProxy::GetProcAddress_()(_module_hooked.dll,
+                                                                                       "xessGetMaxResponsiveMaskValue");
 
             _module_hooked.xessD3D12GetResourcesToDump =
                 (PFN_xessD3D12GetResourcesToDump) KernelBaseProxy::GetProcAddress_()(_module_hooked.dll,
@@ -400,6 +425,8 @@ class XeSSProxy
             _module_hooked.xessGetPipelineBuildStatus =
                 (PFN_xessGetPipelineBuildStatus) KernelBaseProxy::GetProcAddress_()(_module_hooked.dll,
                                                                                     "xessGetPipelineBuildStatus");
+            _module_hooked.xessGetProfilingData = (PFN_xessGetProfilingData) KernelBaseProxy::GetProcAddress_()(
+                _module_hooked.dll, "xessGetProfilingData");
 
             _module_hooked.xessVKGetRequiredInstanceExtensions =
                 (PFN_xessVKGetRequiredInstanceExtensions) KernelBaseProxy::GetProcAddress_()(
@@ -420,6 +447,8 @@ class XeSSProxy
                 (PFN_xessVKGetInitParams) KernelBaseProxy::GetProcAddress_()(_module_hooked.dll, "xessVKGetInitParams");
             _module_hooked.xessVKExecute =
                 (PFN_xessVKExecute) KernelBaseProxy::GetProcAddress_()(_module_hooked.dll, "xessVKExecute");
+            _module_hooked.xessVKGetResourcesToDump = (PFN_xessVKGetResourcesToDump) KernelBaseProxy::GetProcAddress_()(
+                _module_hooked.dll, "xessVKGetResourcesToDump");
         }
         else if (_module_hooked.xessD3D12CreateContext == nullptr)
         {
@@ -498,6 +527,12 @@ class XeSSProxy
             if (_module_hooked.xessSetJitterScale != nullptr)
                 DetourAttach(&(PVOID&) _module_hooked.xessSetJitterScale, hk_xessSetJitterScale);
 
+            if (_module_hooked.xessSetMaxResponsiveMaskValue != nullptr)
+                DetourAttach(&(PVOID&) _module_hooked.xessSetMaxResponsiveMaskValue, hk_xessSetMaxResponsiveMaskValue);
+
+            if (_module_hooked.xessGetMaxResponsiveMaskValue != nullptr)
+                DetourAttach(&(PVOID&) _module_hooked.xessGetMaxResponsiveMaskValue, hk_xessGetMaxResponsiveMaskValue);
+
             if (_module_hooked.xessD3D12GetResourcesToDump != nullptr)
                 DetourAttach(&(PVOID&) _module_hooked.xessD3D12GetResourcesToDump, hk_xessD3D12GetResourcesToDump);
 
@@ -540,6 +575,9 @@ class XeSSProxy
             if (_module_hooked.xessGetPipelineBuildStatus != nullptr)
                 DetourAttach(&(PVOID&) _module_hooked.xessGetPipelineBuildStatus, hk_xessGetPipelineBuildStatus);
 
+            if (_module_hooked.xessGetProfilingData != nullptr)
+                DetourAttach(&(PVOID&) _module_hooked.xessGetProfilingData, hk_xessGetProfilingData);
+
             auto detourResult = DetourTransactionCommit();
             if (detourResult != NO_ERROR)
             {
@@ -565,6 +603,8 @@ class XeSSProxy
                 _module_hooked.xessGetOptimalInputResolution = nullptr;
                 _module_hooked.xessSetExposureMultiplier = nullptr;
                 _module_hooked.xessSetJitterScale = nullptr;
+                _module_hooked.xessSetMaxResponsiveMaskValue = nullptr;
+                _module_hooked.xessGetMaxResponsiveMaskValue = nullptr;
                 _module_hooked.xessD3D12GetResourcesToDump = nullptr;
                 _module_hooked.xessD3D12GetProfilingData = nullptr;
                 _module_hooked.xessSetContextParameterF = nullptr;
@@ -578,6 +618,7 @@ class XeSSProxy
                 _module_hooked.xessVKGetRequiredDeviceFeatures = nullptr;
                 _module_hooked.xessVKGetRequiredInstanceExtensions = nullptr;
                 _module_hooked.xessGetPipelineBuildStatus = nullptr;
+                _module_hooked.xessGetProfilingData = nullptr;
             }
             else
             {
@@ -702,12 +743,20 @@ class XeSSProxy
                                                                                    "xessSetExposureMultiplier");
             _module11.xessSetJitterScaleDx11 =
                 (PFN_xessSetJitterScale) KernelBaseProxy::GetProcAddress_()(_module11.dll, "xessSetJitterScale");
+            _module11.xessSetMaxResponsiveMaskValueDx11 =
+                (PFN_xessSetMaxResponsiveMaskValue) KernelBaseProxy::GetProcAddress_()(_module11.dll,
+                                                                                       "xessSetMaxResponsiveMaskValue");
+            _module11.xessGetMaxResponsiveMaskValueDx11 =
+                (PFN_xessGetMaxResponsiveMaskValue) KernelBaseProxy::GetProcAddress_()(_module11.dll,
+                                                                                       "xessGetMaxResponsiveMaskValue");
             _module11.xessSetLoggingCallbackDx11 = (PFN_xessSetLoggingCallback) KernelBaseProxy::GetProcAddress_()(
                 _module11.dll, "xessSetLoggingCallback");
             _module11.xessSetVelocityScaleDx11 =
                 (PFN_xessSetVelocityScale) KernelBaseProxy::GetProcAddress_()(_module11.dll, "xessSetVelocityScale");
             _module11.xessStartDumpDx11 =
                 (PFN_xessStartDump) KernelBaseProxy::GetProcAddress_()(_module11.dll, "xessStartDump");
+            _module11.xessGetProfilingDataDx11 =
+                (PFN_xessGetProfilingData) KernelBaseProxy::GetProcAddress_()(_module11.dll, "xessGetProfilingData");
         }
 
         if (_module11_hooked.dll != nullptr && _module11_hooked.xessD3D11CreateContext == nullptr)
@@ -763,6 +812,12 @@ class XeSSProxy
                                                                                    "xessSetExposureMultiplier");
             _module11_hooked.xessSetJitterScaleDx11 =
                 (PFN_xessSetJitterScale) KernelBaseProxy::GetProcAddress_()(_module11_hooked.dll, "xessSetJitterScale");
+            _module11_hooked.xessSetMaxResponsiveMaskValueDx11 =
+                (PFN_xessSetMaxResponsiveMaskValue) KernelBaseProxy::GetProcAddress_()(_module11_hooked.dll,
+                                                                                       "xessSetMaxResponsiveMaskValue");
+            _module11_hooked.xessGetMaxResponsiveMaskValueDx11 =
+                (PFN_xessGetMaxResponsiveMaskValue) KernelBaseProxy::GetProcAddress_()(_module11_hooked.dll,
+                                                                                       "xessGetMaxResponsiveMaskValue");
             _module11_hooked.xessSetLoggingCallbackDx11 =
                 (PFN_xessSetLoggingCallback) KernelBaseProxy::GetProcAddress_()(_module11_hooked.dll,
                                                                                 "xessSetLoggingCallback");
@@ -770,6 +825,8 @@ class XeSSProxy
                 _module11_hooked.dll, "xessSetVelocityScale");
             _module11_hooked.xessStartDumpDx11 =
                 (PFN_xessStartDump) KernelBaseProxy::GetProcAddress_()(_module11_hooked.dll, "xessStartDump");
+            _module11_hooked.xessGetProfilingDataDx11 = (PFN_xessGetProfilingData) KernelBaseProxy::GetProcAddress_()(
+                _module11_hooked.dll, "xessGetProfilingData");
         }
         else if (_module11_hooked.xessD3D11CreateContext == nullptr)
         {
@@ -844,6 +901,14 @@ class XeSSProxy
             if (_module11_hooked.xessSetJitterScaleDx11 != nullptr)
                 DetourAttach(&(PVOID&) _module11_hooked.xessSetJitterScaleDx11, hk_xessSetJitterScale);
 
+            if (_module11_hooked.xessSetMaxResponsiveMaskValueDx11 != nullptr)
+                DetourAttach(&(PVOID&) _module11_hooked.xessSetMaxResponsiveMaskValueDx11,
+                             hk_xessSetMaxResponsiveMaskValue);
+
+            if (_module11_hooked.xessGetMaxResponsiveMaskValueDx11 != nullptr)
+                DetourAttach(&(PVOID&) _module11_hooked.xessGetMaxResponsiveMaskValueDx11,
+                             hk_xessGetMaxResponsiveMaskValue);
+
             if (_module11_hooked.xessSetLoggingCallbackDx11 != nullptr)
                 DetourAttach(&(PVOID&) _module11_hooked.xessSetLoggingCallbackDx11, hk_xessSetLoggingCallback);
 
@@ -852,6 +917,9 @@ class XeSSProxy
 
             if (_module11_hooked.xessStartDumpDx11 != nullptr)
                 DetourAttach(&(PVOID&) _module11_hooked.xessStartDumpDx11, hk_xessStartDump);
+
+            if (_module11_hooked.xessGetProfilingDataDx11 != nullptr)
+                DetourAttach(&(PVOID&) _module11_hooked.xessGetProfilingDataDx11, hk_xessGetProfilingData);
 
             auto detourResult = DetourTransactionCommit();
             if (detourResult != NO_ERROR)
@@ -877,9 +945,12 @@ class XeSSProxy
                 _module11_hooked.xessSetContextParameterFDx11 = nullptr;
                 _module11_hooked.xessSetExposureMultiplierDx11 = nullptr;
                 _module11_hooked.xessSetJitterScaleDx11 = nullptr;
+                _module11_hooked.xessSetMaxResponsiveMaskValueDx11 = nullptr;
+                _module11_hooked.xessGetMaxResponsiveMaskValueDx11 = nullptr;
                 _module11_hooked.xessSetLoggingCallbackDx11 = nullptr;
                 _module11_hooked.xessSetVelocityScaleDx11 = nullptr;
                 _module11_hooked.xessStartDumpDx11 = nullptr;
+                _module11_hooked.xessGetProfilingDataDx11 = nullptr;
             }
             else
             {
@@ -962,6 +1033,10 @@ class XeSSProxy
     }
     static PFN_xessSetExposureMultiplier SetExposureMultiplier() { return _module.xessSetExposureMultiplier; }
     static PFN_xessSetJitterScale SetJitterScale() { return _module.xessSetJitterScale; }
+    static PFN_xessSetMaxResponsiveMaskValue SetMaxResponsiveMaskValue()
+    {
+        return _module.xessSetMaxResponsiveMaskValue;
+    }
     static PFN_xessD3D12GetResourcesToDump D3D12GetResourcesToDump() { return _module.xessD3D12GetResourcesToDump; }
     static PFN_xessD3D12GetProfilingData D3D12GetProfilingData() { return _module.xessD3D12GetProfilingData; }
     static PFN_xessSetContextParameterF SetContextParameterF() { return _module.xessSetContextParameterF; }
@@ -1017,4 +1092,8 @@ class XeSSProxy
         return _module11.xessSetExposureMultiplierDx11;
     }
     static PFN_xessSetJitterScale D3D11SetJitterScale() { return _module11.xessSetJitterScaleDx11; }
+    static PFN_xessSetMaxResponsiveMaskValue D3D11SetMaxResponsiveMaskValue()
+    {
+        return _module11.xessSetMaxResponsiveMaskValueDx11;
+    }
 };

@@ -11,7 +11,7 @@ namespace DlssNr
 std::shared_ptr<CompatibilityRuntime> CompatibilityRuntime::TryOpen(ID3D12Device* device)
 {
     std::vector<std::filesystem::path> paths;
-    for (const auto& path : State::Instance().NVNGX_FeatureInfo_Paths)
+    for (const auto& path : NVNGXProxy::FeaturePaths())
         paths.emplace_back(path);
     paths.push_back(Util::ExePath().parent_path());
     paths.push_back(Util::DllPath().parent_path());
