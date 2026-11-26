@@ -43,11 +43,12 @@ enum Id { Sources = 100, Refresh, RuntimePath, Browse, Enabled, Strength, Intens
 // 5..14 were removed models: a saved one shows no selection here and is refused when the passes are made.
 // Sorted by the precision of the weights: FP8 (NVIDIA's own models and the FP8 pass-in-one models), INT8, NVFP4 (4-bit).
 // One version of each pass-in-one model (Settings::CurrentModel): 23, 24, 21, 22.
-inline constexpr unsigned ModelChoices[]{0, 1, 2, 3, 23, 24, 25, 26, 4, 21, 22};
+inline constexpr unsigned ModelChoices[]{0, 1, 2, 3, 23, 24, 25, 27, 26, 28, 4, 21, 22};
 inline constexpr const wchar_t* ModelNames[]{L"Automatic",
     L"FP8: Model A (Original)", L"FP8: Model B (Optimized, NR 310.9.16 or newer)", L"FP8: Preset 3 (legacy)",
     L"FP8 2xPass-in-one (RTX 40 and 50 series)", L"FP8 3xPass-in-one (RTX 40 and 50 series)",
-    L"INT8: Model A (RTX 30, 40 and 50 series)", L"INT8 2xPass-in-one (RTX 30, 40 and 50 series)",
+    L"INT8: Model A (RTX 30, 40 and 50 series)", L"INT8: Model A - Alternate training (RTX 30, 40 and 50 series)",
+    L"INT8 2xPass-in-one (RTX 30, 40 and 50 series)", L"INT8 2xPass-in-one - Alternate training (RTX 30, 40 and 50 series)",
     L"NVFP4: Model A (4-bit kernels, RTX 50 series)",
     L"NVFP4 2xPass-in-one", L"NVFP4 3xPass-in-one"};
 static_assert(std::size(ModelNames) == std::size(ModelChoices));

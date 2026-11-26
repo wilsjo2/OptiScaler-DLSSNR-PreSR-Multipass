@@ -35,6 +35,7 @@
 #include <unordered_set>
 
 #include <dlssnr/DlssNr_VkExtensions.h>
+#include <dlssnr/NrFp8_Vk.h>
 #include <dlssnr/DlssNrFinished_Vk.h>
 
 #include <detours/detours.h>
@@ -685,6 +686,7 @@ static void hkvkDestroyDevice(VkDevice device, const VkAllocationCallbacks* pAll
         InputCommon::vk_device_destroyed(device);
         NVNGXVkDeviceDestroyed(device);
         DlssNr::VkExt::RecordHostDevice(device, false);
+        DlssNr::Fp8Vk::ReleaseDevice(device);
         FfxApiVkDeviceDestroyed(device);
         FSR2VkDeviceDestroyed(device);
         XeSSVkDeviceDestroyed(device);
@@ -922,7 +924,13 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
     }
 
     if (result == VK_SUCCESS)
+    {
         DlssNr::VkExt::RecordHostDevice(*pDevice, hostReady);
+
+        // Before the NR runtime can create its kernels on the device.
+        if (hostReady)
+            DlssNr::Fp8Vk::HookDevice(physicalDevice, *pDevice, o_vkGetDeviceProcAddr);
+    }
 
     if (result == VK_SUCCESS)
     {
@@ -1888,6 +1896,8 @@ void VulkanHooks::Hook(HMODULE vulkan1)
 
 void VulkanHooks::Unhook()
 {
+    DlssNr::Fp8Vk::Unhook();
+
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
 

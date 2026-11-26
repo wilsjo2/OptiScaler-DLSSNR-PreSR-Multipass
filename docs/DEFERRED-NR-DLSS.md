@@ -1,6 +1,6 @@
 # Generate early, apply later
 
-Enable **Generate before upscale, apply after upscale**, then choose **Private NR upscaler**. NR edits an owned input copy; the game reconstructs its clean input. A private context enlarges only NR's contribution and applies it after SR/RR+SR. **Apply NR to the finished picture** moves composition after effects/HUD.
+Set **Where NR runs** to **Before the upscaler, edit added after it**, then choose **Upscaler for the edit**. NR edits an owned input copy; the game reconstructs its clean input. A private context enlarges only NR's contribution and applies it after SR/RR+SR. **Apply NR to the finished picture** moves composition after effects/HUD.
 
 ```ini
 [DlssNr]

@@ -362,6 +362,270 @@ void SolverChecks()
               "goal, flat response, small budget, fixed sliders, skin settings, masked search");
 }
 
+// ---- Skin mask, separate comparison, settling ------------------------------------------------------------------
+void RegionChecks()
+{
+    // Four pixels: the first two are skin, the third half skin, the fourth none.
+    Picture a, b;
+    a.width = b.width = 4;
+    a.height = b.height = 1;
+    a.values.assign(12, 0.5f);
+    b.values = a.values;
+    for (unsigned c = 0; c < 3; ++c)
+    {
+        b.values[c] += 0.2f;     // pixel 0 (skin)
+        b.values[9 + c] += 0.1f; // pixel 3 (environment)
+    }
+    SkinMask mask;
+    mask.width = 4;
+    mask.height = 1;
+    mask.skin = { 1, 1, 0.5f, 0 };
+    mask.share = 2.5 / 4;
+    const auto regions = Difference(a, b, mask);
+    expect(regions.Valid() && about(regions.skin, 0.04 / 2.5, 1e-7) && about(regions.environment, 0.01 / 1.5, 1e-7),
+           "skin and environment differences");
+    expect(about(regions.Balanced(), 0.5 * (0.04 / 2.5 + 0.01 / 1.5), 1e-7), "balanced difference");
+    SkinMask other = mask;
+    other.width = 2;
+    other.height = 2;
+    expect(!Difference(a, b, other).Valid() && !other.Fits(a), "a mask of another size was used");
+    SkinMask none = mask;
+    none.skin = { 0, 0, 0, 0 };
+    none.share = 0;
+    expect(!Difference(a, b, none).Valid() && !none.Usable() && mask.Usable(), "a mask without skin was used");
+
+    // The mask picture is drawn at the picture's white level (3 here): the brightest pixel becomes 1.
+    const float white = 3.0f, levels[4] { 1.0f, 0.25f, 0.0f, 0.5f };
+    std::vector<uint16_t> halves(4 * 4);
+    for (unsigned x = 0; x < 4; ++x)
+        for (unsigned c = 0; c < 4; ++c)
+            halves[x * 4 + c] = Half(c == 3 ? 1.0f : levels[x] * white);
+    SkinMask read;
+    expect(Reader::ReadMask(read, DXGI_FORMAT_R16G16B16A16_FLOAT, halves.data(), 4, 1, 32), "mask picture");
+    expect(read.width == 4 && read.height == 1 && read.skin.size() == 4, "mask size");
+    for (unsigned x = 0; x < 4; ++x)
+        expect(about(read.skin[x], levels[x], 1e-3), "mask value " + std::to_string(x));
+    expect(about(read.share, 1.75 / 4, 1e-3) && read.Usable(), "mask share");
+    std::vector<uint16_t> black(4 * 4, Half(0.0f));
+    expect(Reader::ReadMask(read, DXGI_FORMAT_R16G16B16A16_FLOAT, black.data(), 4, 1, 32) && read.share == 0 && !read.Usable(),
+           "a mask picture without skin");
+    // Thinned as a picture is, so the two fit.
+    {
+        const unsigned w = 1601, h = 901, pitch = w * 4;
+        std::vector<uint8_t> big(size_t(pitch) * h, 200);
+        Picture thin;
+        Reader reader;
+        expect(reader.Read(thin, DXGI_FORMAT_R8G8B8A8_UNORM, big.data(), w, h, pitch) &&
+                   Reader::ReadMask(read, DXGI_FORMAT_R8G8B8A8_UNORM, big.data(), w, h, pitch) && read.Fits(thin),
+               "a thinned mask does not fit its picture");
+    }
+
+    // Settling: a picture that approaches its final state is taken once what is left no longer matters.
+    const auto level = [](float value)
+    {
+        Picture p;
+        p.width = p.height = 8;
+        p.values.assign(8 * 8 * 3, value);
+        return p;
+    };
+    {
+        Settling settling;
+        settling.Begin(12);
+        unsigned taken = 0;
+        float left = 0.02f; // distance from the final state, halved every picture
+        const double scale = 1e-4; // judged by a difference of 40 dB
+        for (unsigned n = 1; n <= 12 && !taken; ++n, left *= 0.5f)
+            if (settling.Add(level(0.5f + left), scale))
+                taken = n;
+        // Steps between pictures: 0.01, 0.005, 0.0025, ... ; a step of 1/2000 of the scale is 0.00022: the eighth.
+        expect(taken == 8 && settling.Change() <= scale / 2000.0, "a settling picture was taken at the wrong time");
+    }
+    {
+        // Noise that does not shrink: taken at the third picture, not held until the last.
+        Settling settling;
+        settling.Begin(8);
+        expect(!settling.Add(level(0.50f), 1e-4) && !settling.Add(level(0.51f), 1e-4) && settling.Add(level(0.50f), 1e-4),
+               "a picture that only flickers was not taken");
+    }
+    {
+        // Never more than the pictures allowed, and a still picture is taken at once.
+        Settling settling;
+        settling.Begin(3);
+        expect(!settling.Add(level(0.1f), 1e-9) && !settling.Add(level(0.5f), 1e-9) && settling.Add(level(0.6f), 1e-9) &&
+                   settling.Pictures() == 3,
+               "the limit of pictures was not kept");
+        settling.Begin(8);
+        expect(!settling.Add(level(0.3f), 1e-4) && settling.Add(level(0.3f), 1e-4), "a still picture was not taken");
+    }
+    std::puts("PASS skin mask and settling: separate differences, mask picture, sizes, settling, flicker, limits");
+}
+
+// The calibrator's loop as the game host runs it, on a made-up game with the two properties that defeated the skin
+// sliders: skin is a small part of the picture, and after a model slider change the picture approaches its settled
+// state over many frames (the model's history filling again).
+struct Game
+{
+    unsigned width = 96, height = 64;
+    std::vector<float> base, drift, other, p[5];
+    SkinMask mask;
+    Point shown {};
+    unsigned age = 1000;
+    Game()
+    {
+        std::mt19937 random(11);
+        std::uniform_real_distribution<float> level(0.2f, 0.8f), pattern(-1.0f, 1.0f);
+        const size_t pixels = size_t(width) * height;
+        base.resize(pixels * 3);
+        drift.resize(pixels * 3);
+        other.resize(pixels * 3);
+        for (auto& value : base)
+            value = level(random);
+        for (auto& value : drift)
+            value = pattern(random);
+        for (auto& value : other)
+            value = pattern(random);
+        for (auto& values : p)
+        {
+            values.resize(pixels * 3);
+            for (auto& value : values)
+                value = pattern(random);
+        }
+        // A face: 6 % of the frame, with a soft edge.
+        mask.width = width;
+        mask.height = height;
+        mask.skin.resize(pixels);
+        double sum = 0;
+        for (unsigned y = 0; y < height; ++y)
+            for (unsigned x = 0; x < width; ++x)
+            {
+                const float dx = (float(x) - 30.0f) / 11.0f, dy = (float(y) - 30.0f) / 11.0f;
+                const float inside = std::clamp(2.0f - 2.0f * std::sqrt(dx * dx + dy * dy), 0.0f, 1.0f);
+                mask.skin[size_t(y) * width + x] = inside;
+                sum += inside;
+            }
+        mask.share = sum / double(pixels);
+    }
+    // `look`: the picture to match, made by other models than the one being calibrated. Part of it no slider can
+    // reproduce (a likeness of about 41 dB is the most that can be reached), and the calibrated model changes skin
+    // 1.25 times as strongly as the look's, so its skin sliders belong lower than the look's own.
+    Picture Settled(const Point& v, bool look = false) const
+    {
+        const float i = std::min(v[Intensity], 1.0f), s = v[Structure], t = v[Tone];
+        Picture out;
+        out.width = width;
+        out.height = height;
+        out.values.resize(base.size());
+        for (size_t n = 0; n < base.size(); ++n)
+        {
+            const float skin = mask.skin[n / 3];
+            const float stronger = look ? 1.0f : 1.0f + 0.25f * skin;
+            const float detail = stronger * (v[EnvironmentDetail] + (v[SkinDetail] - v[EnvironmentDetail]) * skin);
+            const float colour = stronger * (v[EnvironmentColour] + (v[SkinColour] - v[EnvironmentColour]) * skin);
+            const float edited =
+                base[n] + (look ? 0.0156f * other[n] : 0.0f) +
+                detail * v[Detail] * 0.1f * (i * (s * p[0][n] + 0.3f * s * s * p[1][n]) + t * p[2][n] + 0.2f * t * t * p[3][n]) +
+                colour * v[Colour] * 0.05f * i * p[4][n];
+            out.values[n] = std::min(edited, base[n] * v[Guard]);
+        }
+        return out;
+    }
+    // One NR frame with these values.
+    Picture Frame(const Point& v, bool look = false)
+    {
+        if (v[Intensity] != shown[Intensity] || v[Structure] != shown[Structure] || v[Tone] != shown[Tone])
+            age = 0;
+        shown = v;
+        ++age;
+        Picture out = Settled(v, look);
+        const float left = 0.05f * std::pow(0.75f, float(age)); // 51 dB of it at ten frames
+        for (size_t n = 0; n < out.values.size(); ++n)
+            out.values[n] += left * drift[n];
+        return out;
+    }
+    // What the host does for one measurement: wait, then read pictures (one in three frames) until one settles.
+    Picture Measure(const Point& v, bool modelChanged, const Picture* goal, bool settle)
+    {
+        const bool look = goal == nullptr;
+        for (unsigned n = 0; n < (modelChanged ? 8u : 2u); ++n)
+            Frame(v, look);
+        Picture picture = Frame(v, look);
+        if (!modelChanged || !settle)
+            return picture;
+        Settling settling;
+        settling.Begin(goal ? 8 : 12);
+        while (!settling.Add(picture, goal ? Difference(*goal, picture) : 2e-5))
+        {
+            Frame(v, look);
+            Frame(v, look);
+            picture = Frame(v, look);
+        }
+        return picture;
+    }
+};
+
+void HostChecks()
+{
+    // As in a game: the search starts from the look's own slider values (skin 0.8 / 0.8), with another model.
+    const Point target { 0.8f, 1.2f, 0.6f, 0.9f, 1.0f, 0.8f, 0.8f, 1.0f, 1.0f, 8.0f };
+    const Point start = target;
+    struct Result
+    {
+        Point best {};
+        Regions before, after;
+        unsigned trials = 0;
+    };
+    // `separate`: skin and environment judged apart, pictures read once settled (the calibrator as it is now).
+    // Without: one difference over the whole picture, read a fixed number of frames after a change.
+    const auto calibrate = [&](bool separate)
+    {
+        Game game;
+        const Picture goal = game.Measure(target, true, nullptr, separate);
+        Solver::Options options;
+        options.skin = true;
+        Solver solver;
+        solver.Start(start, options);
+        Point applied = start;
+        bool first = true;
+        while (!solver.Done())
+        {
+            const Point trial = solver.Trial();
+            const bool modelChanged = first || trial[Intensity] != applied[Intensity] || trial[Structure] != applied[Structure] ||
+                                      trial[Tone] != applied[Tone];
+            first = false;
+            applied = trial;
+            const Picture picture = game.Measure(trial, modelChanged, &goal, separate);
+            solver.Report(separate ? Difference(goal, picture, game.mask).Balanced() : Difference(goal, picture));
+        }
+        const Picture settledGoal = game.Settled(target, true);
+        return Result { solver.Best(), Difference(settledGoal, game.Settled(start), game.mask),
+                        Difference(settledGoal, game.Settled(solver.Best()), game.mask), solver.Trials() };
+    };
+    const auto print = [](const char* name, const Result& r)
+    {
+        std::printf("  %-30s skin %5.1f -> %5.1f dB, environment %5.1f -> %5.1f dB (%u measurements): detail %.2f colour %.2f "
+                    "skin %.2f/%.2f environment %.2f/%.2f\n",
+                    name, Decibels(r.before.skin), Decibels(r.after.skin), Decibels(r.before.environment),
+                    Decibels(r.after.environment), r.trials, r.best[Detail], r.best[Colour], r.best[SkinDetail],
+                    r.best[SkinColour], r.best[EnvironmentDetail], r.best[EnvironmentColour]);
+    };
+    const auto whole = calibrate(false);
+    const auto apart = calibrate(true);
+    print("whole picture, fixed wait:", whole);
+    print("skin apart, settled pictures:", apart);
+    // The skin starts 1.25 times too strong: a difference too small to show in the whole picture's likeness, which
+    // left the skin sliders exactly where they were (the first line printed). Its likeness must come up to about the
+    // 41 dB that can be reached, and the environment must not pay for it.
+    expect(Decibels(apart.after.skin) >= Decibels(apart.before.skin) + 3.0 && Decibels(apart.after.skin) >= 40.0,
+           "the skin was not brought to the goal's");
+    expect(Decibels(apart.after.environment) >= Decibels(apart.before.environment) - 0.2, "the environment got worse");
+    // What reaches the skin is the product of the whole-picture strength and the skin slider: 0.8 / 1.25 of the
+    // environment's.
+    const auto ratio = [&](Value skin, Value environment) { return apart.best[skin] / apart.best[environment]; };
+    expect(about(ratio(SkinDetail, EnvironmentDetail), 0.64, 0.05), "the skin's detail was not set against the environment's");
+    expect(about(ratio(SkinColour, EnvironmentColour), 0.64, 0.08), "the skin's colour was not set against the environment's");
+    std::puts("PASS host loop: a small face, a look no slider reaches exactly, a picture that settles slowly: skin sliders found");
+}
+
 // ---- Frame capture to a reader --------------------------------------------------------------------------------
 void CaptureChecks()
 {
@@ -669,6 +933,8 @@ try
     PictureChecks();
     ReaderChecks();
     SolverChecks();
+    RegionChecks();
+    HostChecks();
     CaptureChecks();
     std::puts("NR calibrator checks passed.");
     return 0;

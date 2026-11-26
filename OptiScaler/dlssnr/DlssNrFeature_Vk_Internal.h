@@ -23,6 +23,7 @@ struct NgxPassVk
     NVSDK_NGX_Handle* feature = nullptr;
     bool Ready() const { return host || feature; }
     NVSDK_NGX_Parameter* parameters = nullptr;
+    unsigned fp8Set = 0; // an FP8 pass-in-one model: the feature's Model A runs with this weight set
 };
 
 struct VkState

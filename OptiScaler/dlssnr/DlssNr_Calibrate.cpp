@@ -12,6 +12,7 @@
 #include <format>
 #include <mutex>
 #include <optional>
+#include <vector>
 
 namespace DlssNr::Calibrate
 {
@@ -35,8 +36,14 @@ void Publish(bool active, std::string text)
     published = { active, std::move(text) };
 }
 
-// A model slider restarts temporal history. Let it settle before measuring the new settings.
-constexpr unsigned kSettleModel = 10, kSettleBlend = 2;
+// NR frames to wait after a change before the picture is read. A model slider restarts temporal history: after it
+// the pictures are read one after another until they stop changing (NrCalibrate::Settling).
+constexpr unsigned kSettleModel = 8, kSettleBlend = 2;
+// Pictures read at most while one settles.
+constexpr unsigned kSettlePictures = 8, kSettleGoalPictures = 12;
+// The goal has nothing to be judged against yet: it counts as settled when two pictures in a row differ by less
+// than 80 dB (this figure / 2000).
+constexpr double kGoalScale = 2e-5;
 // NR frames without a picture before the run gives up.
 constexpr unsigned kPatience = 900;
 
@@ -47,23 +54,32 @@ struct Run
     {
         Idle,
         Goal,
+        Mask,
         Working
     };
     Phase phase = Phase::Idle;
     std::string goalName;
     unsigned pass = 0;
-    bool skin = false, separate = false; // separate: "Separate skin / environment controls" was on at the start
+    // skin: the request's option. regions: the skin mask could be read, so skin and environment are judged
+    // separately and their sliders are searched. separate: "Separate skin / environment controls" was on at the start.
+    bool skin = false, regions = false, separate = false;
+    std::string skinNote;    // why the skin sliders were left alone, when they were
     Presets::Values working; // the settings in use when the run began
     // Session choices forced while calibrating, and what they were.
     bool hold = false, apply = true, skinMask = false;
     uint32_t compare = 0, debugView = 0;
     NrCalibrate::Reader reader;
-    NrCalibrate::Picture goalPicture, sum, arrived;
+    NrCalibrate::Picture goalPicture, arrived;
+    NrCalibrate::SkinMask mask;
+    NrCalibrate::Settling settling;
+    bool settlingActive = false;
     bool hasArrived = false, unreadable = false;
     NrCalibrate::Solver solver;
     NrCalibrate::Point start {}, applied {};
-    double floor = -1; // difference of two frames of the preset to match
-    unsigned settle = 0, measure = 0, measured = 0, quiet = 0;
+    // The skin and environment differences of every set of values measured, to report those of the best one.
+    std::vector<std::pair<NrCalibrate::Point, NrCalibrate::Regions>> measured;
+    double floor = -1; // difference of the last two pictures of the preset to match
+    unsigned settle = 0, quiet = 0;
     bool waiting = false;
 };
 Run run;
@@ -86,13 +102,14 @@ void SetValues(Config& config, unsigned pass, const NrCalibrate::Point& values)
     config.DlssNrTransferStrength = values[NrCalibrate::Detail];
     config.DlssNrColourStrength = values[NrCalibrate::Colour];
     if (run.skin)
+        config.DlssNrMaxRatio = values[NrCalibrate::Guard];
+    if (run.regions)
     {
         config.DlssNrSkinProtection = true;
         config.DlssNrSkinDetail = values[NrCalibrate::SkinDetail];
         config.DlssNrSkinColour = values[NrCalibrate::SkinColour];
         config.DlssNrEnvironmentDetail = values[NrCalibrate::EnvironmentDetail];
         config.DlssNrEnvironmentColour = values[NrCalibrate::EnvironmentColour];
-        config.DlssNrMaxRatio = values[NrCalibrate::Guard];
     }
 }
 
@@ -115,13 +132,14 @@ void RestoreSession(Config& config)
     config.DlssNrShowSkinMask = run.skinMask;
 }
 
-void Measure(unsigned frames, bool modelChanged)
+// The next picture is read `frames` NR frames from now; after a model change, pictures are read until they settle.
+void Await(unsigned frames, bool settles, unsigned pictures = kSettlePictures)
 {
-    run.settle = modelChanged ? kSettleModel : kSettleBlend;
-    run.measure = frames;
-    run.measured = 0;
+    run.settle = frames;
+    run.settlingActive = settles;
+    if (settles)
+        run.settling.Begin(pictures);
     run.quiet = 0;
-    run.sum = {};
     run.waiting = false;
     run.hasArrived = false;
 }
@@ -136,21 +154,21 @@ void ApplyTrial(Config& config)
                               next[NrCalibrate::Detail] == 0 || run.applied[NrCalibrate::Detail] == 0;
     SetValues(config, run.pass, next);
     run.applied = next;
-    Measure(1, modelChanged);
+    Await(modelChanged ? kSettleModel : kSettleBlend, modelChanged);
 }
 
 // Ends the run. `best`: the slider values found; without them the settings go back to what they were at the start.
 void End(Config& config, capture::FrameCapture& frames, const std::string& text, const NrCalibrate::Point* best)
 {
+    Presets::Apply(config, run.working);
     if (best)
         SetValues(config, run.pass, *best);
-    else
-        Presets::Apply(config, run.working);
     RestoreSession(config);
     run.phase = Run::Phase::Idle;
     run.goalPicture = {};
-    run.sum = {};
     run.arrived = {};
+    run.mask = {};
+    run.measured = {};
     if (!frames.isActive())
         frames.release(); // the readback buffers it kept between pictures
     LOG_INFO("NR calibration: {}", text);
@@ -164,7 +182,7 @@ void Begin(Config& config, const Request& request)
         return refuse("Neural Rendering is switched off.");
     const unsigned passes = std::max(config.DlssNrPasses.value_or_default(), 1u);
     if (request.pass >= passes || request.pass > std::size(config.DlssNrPassOverrides))
-        return refuse(std::format("pass {} is not active. Choose an active pass under \"Edit pass\".", request.pass + 1));
+        return refuse(std::format("pass {} is not active. Choose an active pass in the pass tabs.", request.pass + 1));
     if (Profiles::PassReapplies(config, request.pass))
         return refuse(std::format("pass {} re-applies the previous change and runs no model.", request.pass + 1));
     Presets::Values goal;
@@ -202,59 +220,149 @@ void Begin(Config& config, const Request& request)
     ForceSession(config);
     Presets::Apply(config, goal);
     run.phase = Run::Phase::Goal;
-    Measure(2, true);
+    Await(kSettleModel, true, kSettleGoalPictures);
     Publish(true, std::format("Calibrating: rendering the preset to match \"{}\" on the held frame...", run.goalName));
 }
 
 std::string Likeness(double difference) { return std::format("{:.2f} dB", NrCalibrate::Decibels(difference)); }
 
-// A picture arrived and enough frames were measured: the goal is done, or a set of values was judged.
-void Measured(Config& config, capture::FrameCapture& frames)
+// The search begins: the settings in use again, and the first values to measure.
+void BeginWorking(Config& config)
 {
-    run.sum.Scale(1.0f / float(run.measured));
+    Presets::Apply(config, run.working);
+    NrCalibrate::Solver::Options options; // the sliders' own ranges
+    options.skin = run.skin;
+    if (run.skin && !run.regions)
+        // Without a usable skin mask the four skin / environment sliders stay where they are; Highlight guard is
+        // still searched.
+        for (unsigned i = NrCalibrate::SkinDetail; i <= NrCalibrate::EnvironmentColour; ++i)
+            options.low[i] = options.high[i] = run.start[i];
+    run.solver.Start(run.start, options);
+    run.phase = Run::Phase::Working;
+    SetValues(config, run.pass, run.solver.Trial());
+    run.applied = run.solver.Trial();
+    // The working settings' history starts again after the goal's.
+    Await(kSettleModel, true);
+    Publish(true, "Calibrating: measuring the current slider values...");
+}
+
+// The goal is read. With the skin option the composition's own skin mask is read next, on the settings in use.
+void BeginMask(Config& config)
+{
+    Presets::Apply(config, run.working);
+    config.DlssNrSkinProtection = true;
+    config.DlssNrShowSkinMask = true;
+    run.phase = Run::Phase::Mask;
+    Await(kSettleBlend + 1, false);
+    Publish(true, "Calibrating: reading the skin mask of the held frame...");
+}
+
+const NrCalibrate::Regions* RegionsOf(const NrCalibrate::Point& values)
+{
+    for (auto it = run.measured.rbegin(); it != run.measured.rend(); ++it)
+        if (it->first == values)
+            return &it->second;
+    return nullptr;
+}
+
+// A picture arrived.
+void Arrived(Config& config, capture::FrameCapture& frames)
+{
+    const auto stop = [&](const std::string& why)
+    { End(config, frames, "Calibration stopped: " + why + " The settings are as they were.", nullptr); };
+
     if (run.phase == Run::Phase::Goal)
     {
-        run.goalPicture = std::move(run.sum);
-        Presets::Apply(config, run.working);
-        NrCalibrate::Solver::Options options; // the sliders' own ranges
-        options.skin = run.skin;
-        run.solver.Start(run.start, options);
-        run.phase = Run::Phase::Working;
-        // Allow the working preset's history to settle again after measuring the goal.
-        SetValues(config, run.pass, run.solver.Trial());
-        run.applied = run.solver.Trial();
-        Measure(1, true);
-        Publish(true, "Calibrating: measuring the current slider values...");
-        return;
+        if (!run.settling.Add(run.arrived, kGoalScale))
+            return;
+        run.floor = run.settling.Change();
+        run.goalPicture = std::move(run.arrived);
+        run.arrived = {};
+        return run.skin ? BeginMask(config) : BeginWorking(config);
     }
-    const double loss = NrCalibrate::Difference(run.goalPicture, run.sum);
+    if (run.phase == Run::Phase::Mask)
+    {
+        config.DlssNrShowSkinMask = false;
+        run.regions = run.mask.Fits(run.goalPicture) && run.mask.Usable();
+        if (!run.mask.Fits(run.goalPicture))
+            run.skinNote = "The skin mask could not be read at this NR placement, so the skin and environment sliders "
+                           "were left as they were.";
+        else if (!run.regions)
+            run.skinNote = std::format("Skin is {:.1f} % of the held frame, too little (or too much) to set the skin "
+                                       "and environment sliders: they were left as they were. Hold a frame with a "
+                                       "face in view.",
+                                       run.mask.share * 100.0);
+        return BeginWorking(config);
+    }
+
+    // Working: a set of values is judged once its picture has settled.
+    if (run.settlingActive)
+    {
+        const double scale = NrCalibrate::Difference(run.goalPicture, run.arrived);
+        if (scale < 0)
+            return stop("NR's picture has another size with the preset to match than with the current settings (do "
+                        "both run NR at the same place and size?).");
+        if (!run.settling.Add(run.arrived, scale))
+            return;
+        run.settlingActive = false;
+    }
+    double loss;
+    NrCalibrate::Regions regions;
+    if (run.regions)
+    {
+        regions = NrCalibrate::Difference(run.goalPicture, run.arrived, run.mask);
+        loss = regions.Valid() ? regions.Balanced() : -1.0;
+    }
+    else
+        loss = NrCalibrate::Difference(run.goalPicture, run.arrived);
     if (loss < 0)
-        return End(config, frames,
-                   "Calibration stopped: NR's picture has another size with the preset to match than with the current "
-                   "settings (do both run NR at the same place and size?). The settings are as they were.",
-                   nullptr);
+        return stop("NR's picture has another size with the preset to match than with the current settings (do both "
+                    "run NR at the same place and size?).");
+    if (run.regions)
+        run.measured.emplace_back(run.solver.Trial(), regions);
     run.solver.Report(loss);
     if (!run.solver.Done())
     {
         ApplyTrial(config);
-        Publish(true, std::format("Calibrating pass {}: {} model settings tried, likeness {} (started at {}).", run.pass + 1,
-                                  run.solver.ModelTrials(), Likeness(run.solver.BestLoss()),
+        Publish(true, std::format("Calibrating pass {}: {} measurements, likeness {} (started at {}).", run.pass + 1,
+                                  run.solver.Trials(), Likeness(run.solver.BestLoss()),
                                   Likeness(run.solver.FirstLoss())));
         return;
     }
+
     const auto& best = run.solver.Best();
-    auto text = std::format("Calibrated pass {} to \"{}\" with {} measurements: likeness {} before, {} after", run.pass + 1,
-                            run.goalName, run.solver.Trials(), Likeness(run.solver.FirstLoss()),
+    auto text = std::format("Calibrated pass {} to \"{}\" with {} measurements.", run.pass + 1, run.goalName,
+                            run.solver.Trials());
+    const auto* after = run.regions ? RegionsOf(best) : nullptr;
+    if (after && !run.measured.empty())
+    {
+        const auto& before = run.measured.front().second;
+        text += std::format(" Likeness of the environment: {} before, {} after. Of the skin ({:.1f} % of the frame): {} "
+                            "before, {} after.",
+                            Likeness(before.environment), Likeness(after->environment), run.mask.share * 100.0,
+                            Likeness(before.skin), Likeness(after->skin));
+    }
+    else
+        text += std::format(" Likeness: {} before, {} after.", Likeness(run.solver.FirstLoss()),
                             Likeness(run.solver.BestLoss()));
     if (run.floor >= 0)
-        text += std::format(" (two frames of the preset to match: {})", Likeness(run.floor));
+        text += std::format(" (Two pictures of the preset to match: {}.)", Likeness(run.floor));
+    // The sliders that were searched: the five, Highlight guard with the skin option, and the four skin /
+    // environment sliders when the mask allowed it.
+    bool any = false;
+    for (unsigned i = 0; i < NrCalibrate::Count; ++i)
+    {
+        const bool four = i >= NrCalibrate::SkinDetail && i <= NrCalibrate::EnvironmentColour;
+        if (i >= NrCalibrate::BasicCount && (!run.skin || (four && !run.regions)))
+            continue;
+        text += std::format("{} {} {:.2f} -> {:.2f}", any ? "," : "", NrCalibrate::Names[i], run.start[i], best[i]);
+        any = true;
+    }
     text += ".";
-    const unsigned count = run.solver.Sliders();
-    for (unsigned i = 0; i < count; ++i)
-        text += std::format(" {} {:.2f} -> {:.2f}{}", NrCalibrate::Names[i], run.start[i], best[i],
-                            i + 1 < count ? "," : ".");
-    if (run.skin && !run.separate)
+    if (run.regions && !run.separate)
         text += " \"Separate skin / environment controls\" was switched on.";
+    if (!run.skinNote.empty())
+        text += " " + run.skinNote;
     End(config, frames, text, &best);
 }
 } // namespace
@@ -324,13 +432,9 @@ void Tick(Config& config, capture::FrameCapture& frames)
         run.quiet = 0;
         if (run.unreadable)
             return stop("NR's picture has a format the calibrator cannot read.");
-        if (run.phase == Run::Phase::Goal && run.measured == 1)
-            run.floor = NrCalibrate::Difference(run.sum, run.arrived);
-        if (!run.sum.Add(run.arrived))
-            return stop("NR's picture changed size.");
-        ++run.measured;
-        if (--run.measure == 0)
-            return Measured(config, frames);
+        Arrived(config, frames);
+        if (run.phase == Run::Phase::Idle)
+            return;
     }
     if (run.settle)
         return;
@@ -341,9 +445,13 @@ void Tick(Config& config, capture::FrameCapture& frames)
                                           const bool mapped = image.Read(
                                               [&](const void* data, const D3D12_SUBRESOURCE_FOOTPRINT& footprint)
                                               {
-                                                  read = run.reader.Read(run.arrived, footprint.Format, data,
-                                                                         footprint.Width, footprint.Height,
-                                                                         footprint.RowPitch);
+                                                  read = run.phase == Run::Phase::Mask
+                                                             ? NrCalibrate::Reader::ReadMask(
+                                                                   run.mask, footprint.Format, data, footprint.Width,
+                                                                   footprint.Height, footprint.RowPitch)
+                                                             : run.reader.Read(run.arrived, footprint.Format, data,
+                                                                               footprint.Width, footprint.Height,
+                                                                               footprint.RowPitch);
                                               });
                                           run.unreadable = !mapped || !read;
                                           run.hasArrived = true;

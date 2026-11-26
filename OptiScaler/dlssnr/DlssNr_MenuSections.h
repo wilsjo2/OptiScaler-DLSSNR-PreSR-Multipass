@@ -22,16 +22,20 @@ inline void HelpMarker(const char* tip)
     }
 }
 
-// The pass chosen under "Edit pass" (0 = pass 1): the Model section edits it, the calibrator adjusts it.
+// The pass chosen in the pass tabs (0 = pass 1): the per-pass controls edit it, the calibrator adjusts it.
 inline unsigned& EditPass()
 {
     static unsigned pass = 0;
     return pass;
 }
 
-void RenderInput(Config* config);
-void RenderModel(Config* config);
-void RenderBlend(Config* config);
+// Always shown: passes, each pass's model and tuning, the strengths of the final edit, skin, resolution.
+void RenderLook(Config* config);
+// Collapsed sections.
+void RenderHdr(Config* config);
+void RenderFixes(Config* config);
 void RenderInspect(Config* config);
 void RenderPresets(Config* config);
+// One row at the top: choose a saved preset and load it.
+void RenderPresetBar(Config* config);
 } // namespace DlssNr::MenuSections

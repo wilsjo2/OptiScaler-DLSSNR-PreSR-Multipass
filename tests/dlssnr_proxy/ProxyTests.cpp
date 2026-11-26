@@ -364,14 +364,15 @@ int main()
             evaluate();
             assert(!lastPass.reset);
         }
-        // Moving an active region within the motion atlas preserves history and the game's vector units.
+        // Moving an active region within the motion atlas preserves history. The host works in pixels of the model's
+        // picture (64x64 here), so the scale for the 48x40 motion region is enlarged by the ratio of the two.
         frame.guides.motion = { 4, 8, 48, 40 };
         frame.mvScaleX = -64.0f;
         frame.mvScaleY = 32.0f;
         evaluate();
         assert(lastPass.motion && lastPass.motion != &motion && !lastPass.reset);
         assert(lastPass.motion->GetDesc().Width == 48 && lastPass.motion->GetDesc().Height == 40);
-        assert(lastPass.mvScaleX == -64.0f && lastPass.mvScaleY == 32.0f);
+        assert(lastPass.mvScaleX == -64.0f * 64.0f / 48.0f && lastPass.mvScaleY == 32.0f * 64.0f / 40.0f);
         const auto cropped = lastPass.motion;
         frame.guides.motion.x = 8;
         evaluate();

@@ -130,8 +130,8 @@ struct FinishedVk::Impl
         if (Config::Instance()->DlssNrRunBeforeSr.value_or_default() ||
             Config::Instance()->DlssNrDeferredDlss.value_or_default())
         {
-            Say("Native Vulkan finished-picture NR runs at presentation; disable Generate model before upscale and "
-                "Generate before SR, apply after SR.");
+            Say("Native Vulkan finished-picture NR runs at presentation; under \"Where NR runs\" choose \"On the "
+                "finished picture\".");
             return;
         }
         if (!depth.ImageView || !motion.ImageView)

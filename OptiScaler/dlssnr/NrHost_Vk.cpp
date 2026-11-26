@@ -48,6 +48,53 @@ struct Launch : LaunchFields
 };
 } // namespace
 
+VulkanMemory AllocateVulkanMemory(VkPhysicalDevice physical, VkDevice device, uint64_t bytes, bool mapped)
+{
+    auto bufferAddress =
+        reinterpret_cast<PFN_vkGetBufferDeviceAddressKHR>(vkGetDeviceProcAddr(device, "vkGetBufferDeviceAddressKHR"));
+    const bool legacyAddress = !bufferAddress;
+    if (legacyAddress)
+        bufferAddress = Proc<PFN_vkGetBufferDeviceAddressEXT>(device, "vkGetBufferDeviceAddressEXT");
+    auto storage = std::make_shared<Allocation>(device);
+    VkBufferCreateInfo ci { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    ci.size = bytes;
+    ci.usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    Check(vkCreateBuffer(device, &ci, nullptr, &storage->buffer), "create Vulkan model buffer");
+    VkMemoryRequirements req;
+    vkGetBufferMemoryRequirements(device, storage->buffer, &req);
+    VkMemoryAllocateFlagsInfo flags { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO };
+    flags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+    VkMemoryAllocateInfo ai { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, legacyAddress ? nullptr : &flags };
+    ai.allocationSize = req.size;
+    VkMemoryPropertyFlags host = mapped ? VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT : 0;
+    ai.memoryTypeIndex = FindVkMemoryType(physical, req.memoryTypeBits, host | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    auto resultCode = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    if (ai.memoryTypeIndex != UINT32_MAX)
+        resultCode = vkAllocateMemory(device, &ai, nullptr, &storage->memory);
+    // GPUs with a small CPU-visible VRAM heap may need system memory for mapped weights.
+    if (mapped && resultCode == VK_ERROR_OUT_OF_DEVICE_MEMORY)
+    {
+        const auto remainingTypes = ai.memoryTypeIndex == UINT32_MAX ? req.memoryTypeBits
+                                                                     : req.memoryTypeBits & ~(1u << ai.memoryTypeIndex);
+        ai.memoryTypeIndex = FindVkMemoryType(physical, remainingTypes, host);
+        if (ai.memoryTypeIndex != UINT32_MAX)
+            resultCode = vkAllocateMemory(device, &ai, nullptr, &storage->memory);
+    }
+    Check(resultCode, "allocate Vulkan model memory");
+    Check(vkBindBufferMemory(device, storage->buffer, storage->memory, 0), "bind Vulkan model buffer");
+    VkBufferDeviceAddressInfo bi { VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO };
+    bi.buffer = storage->buffer;
+    VulkanMemory result { storage, bufferAddress(device, &bi) };
+    if (!result.address)
+        Fail("Vulkan buffer device address is unavailable");
+    if (mapped)
+    {
+        Check(vkMapMemory(device, storage->memory, 0, bytes, 0, &result.mapped), "map Vulkan model memory");
+        storage->mapped = true;
+    }
+    return result;
+}
+
 struct VulkanHost::Impl : NrLayer::Context
 {
     VkPhysicalDevice physical;
@@ -103,46 +150,8 @@ struct VulkanHost::Impl : NrLayer::Context
 
     NrLayer::Memory Allocate(uint64_t bytes, bool mapped)
     {
-        auto storage = std::make_shared<Allocation>(device);
-        VkBufferCreateInfo ci { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-        ci.size = bytes;
-        ci.usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-        Check(vkCreateBuffer(device, &ci, nullptr, &storage->buffer), "create Vulkan model buffer");
-        VkMemoryRequirements req;
-        vkGetBufferMemoryRequirements(device, storage->buffer, &req);
-        VkMemoryAllocateFlagsInfo flags { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO };
-        flags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
-        VkMemoryAllocateInfo ai { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, legacyAddress ? nullptr : &flags };
-        ai.allocationSize = req.size;
-        VkMemoryPropertyFlags host =
-            mapped ? VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT : 0;
-        ai.memoryTypeIndex = FindVkMemoryType(physical, req.memoryTypeBits, host | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        auto resultCode = VK_ERROR_OUT_OF_DEVICE_MEMORY;
-        if (ai.memoryTypeIndex != UINT32_MAX)
-            resultCode = vkAllocateMemory(device, &ai, nullptr, &storage->memory);
-        // GPUs with a small CPU-visible VRAM heap may need system memory for mapped weights.
-        if (mapped && resultCode == VK_ERROR_OUT_OF_DEVICE_MEMORY)
-        {
-            const auto remainingTypes = ai.memoryTypeIndex == UINT32_MAX
-                                            ? req.memoryTypeBits
-                                            : req.memoryTypeBits & ~(1u << ai.memoryTypeIndex);
-            ai.memoryTypeIndex = FindVkMemoryType(physical, remainingTypes, host);
-            if (ai.memoryTypeIndex != UINT32_MAX)
-                resultCode = vkAllocateMemory(device, &ai, nullptr, &storage->memory);
-        }
-        Check(resultCode, "allocate Vulkan model memory");
-        Check(vkBindBufferMemory(device, storage->buffer, storage->memory, 0), "bind Vulkan model buffer");
-        VkBufferDeviceAddressInfo bi { VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO };
-        bi.buffer = storage->buffer;
-        NrLayer::Memory result { storage, bufferAddress(device, &bi) };
-        if (!result.address)
-            Fail("Vulkan buffer device address is unavailable");
-        if (mapped)
-        {
-            Check(vkMapMemory(device, storage->memory, 0, bytes, 0, &result.mapped), "map Vulkan model memory");
-            storage->mapped = true;
-        }
-        return result;
+        auto memory = AllocateVulkanMemory(physical, device, bytes, mapped);
+        return { std::move(memory.owner), memory.address, memory.mapped };
     }
     NrLayer::Memory AllocateMemory(uint64_t bytes, bool upload) override
     {

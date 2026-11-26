@@ -54,11 +54,14 @@ WorkingScale=1.0
 
 ## Placement and resolution
 
-| Setting | Behaviour |
+| **Where NR runs** | Behaviour |
 | --- | --- |
-| Generate model before upscale | Edit the active input before SR or RR+SR. Off runs NR afterward. |
-| Generate before upscale, apply after upscale | Upscale NR's edit separately; the game reconstructs its clean input. |
-| Apply NR to the finished picture | Apply after effects/HUD. With early generation enabled, carry the edit to presentation. |
+| After the upscaler | NR edits the upscaled picture, before effects/HUD. |
+| Before the upscaler | Edit the active input before SR or RR+SR. |
+| Before the upscaler, edit added after it | Upscale NR's edit separately; the game reconstructs its clean input. |
+| On the finished picture | Apply after effects/HUD. |
+| Before the upscaler, edit added to the finished picture | Run on the input and carry the edit to presentation. |
+| Denoise first, then NR, then upscale | Run the game's upscaler once more at render resolution so NR sees a clean picture (native D3D12). |
 
 Model resolution is relative to the image at the selected stage. At 1440p input/4K output, 100% means 1440p before SR and 4K afterward. Lower percentages reduce NR work without changing the game's upscaler preset. See [pipeline controls](docs/NR-PIPELINE-UI.md) and [enlargement](docs/NR-DLSS-ENLARGEMENT.md).
 
@@ -82,7 +85,7 @@ Follow [upstream OptiFG guidance](https://github.com/optiscaler/OptiScaler/wiki/
 
 ## NR model selection
 
-Under **DLSS Neural Rendering -> Model -> Edit pass**, **NR model** selects the model
+Under **DLSS Neural Rendering -> Look**, **NR model** selects the model
 inside the installed `nvngx_dlssnr.dll`, independently of Style:
 
 - **Automatic (0):** use the installed runtime's default.

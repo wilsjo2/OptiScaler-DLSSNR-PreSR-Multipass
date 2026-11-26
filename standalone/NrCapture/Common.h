@@ -73,8 +73,10 @@ struct Settings {
     // INT8 models: Model A with INT8 weights of its own and INT8 kernels of ours, run wholly on the own pass host
     // (nvfp4/NrHost.h; RTX 30, 40 and 50 series, no NVIDIA NR runtime launch). Original - INT8 (set 1): the look of
     // Model A. INT8 2xPass-in-one (set 2): one Cinematic pass at intensity, tone and structure 1 with the look of
-    // two. Files: nvfp4/int8.
-    static constexpr unsigned ModelAInt8 = 25, ModelAInt8TwoDouble = 26, ModelLast = 26;
+    // two. The two "Alternate training" entries (sets 3 and 4): the same two models with other weights.
+    // Files: nvfp4/int8.
+    static constexpr unsigned ModelAInt8 = 25, ModelAInt8TwoDouble = 26, ModelAInt8Alternate = 27,
+                              ModelAInt8TwoDoubleAlternate = 28, ModelLast = 28;
     // One version of each model. The numbers 15..20 were earlier weights of the four pass-in-one models: a saved one
     // means the model as it is now (21..24).
     static constexpr unsigned CurrentModel(unsigned preset) { return DlssNr::Nvfp4::Current(preset); }

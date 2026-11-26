@@ -253,7 +253,7 @@ void App::FinishCalibration() {
     SetWindowTextW(Control(CalibrateNote), result->text.c_str());
     if (!result->success) return;
     // The best values go onto the settings as they are now (other controls may have been changed meanwhile).
-    value = Calibration::Applied(value, result->pass, result->values, result->skin);
+    value = Calibration::Applied(value, result->pass, result->values, result->skin, result->regions);
     SaveSettings(value);
     { std::lock_guard lock(mutex); settings = value; }
     ShowSettings();

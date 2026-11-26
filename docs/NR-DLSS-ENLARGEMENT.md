@@ -3,7 +3,7 @@
 Choose this Enlargement mode below 100% model resolution for ordinary post-upscale or finished-picture NR. Keep both early-generation options off. INI: `Transfer=2`; spatial Matched residual remains the default (`1`). At 100%, ordinary full-resolution NR replaces the private context.
 
 The private upscaler selector now also chooses the backend used by temporal enlargement (DLSS, FSR 2.2,
-FidelityFX or XeSS, subject to the selected backend being available). **Edit pass → Resolution and
+FidelityFX or XeSS, subject to the selected backend being available). A pass's **Resolution and
 upscaling** can override model scale, enlargement and backend for each pass. Each stage reconstructs its
 encoded answer; overall HDR, strength and skin composition runs once after the chain. Native Vulkan
 continues to reject temporal enlargement explicitly. See [per-pass controls and validation](../OptiScaler/dlssnr/README.md#independent-resolution-and-upscaling-per-pass).
@@ -20,7 +20,7 @@ These modes are opt-in. Values 0, 1 and 2 retain their previous algorithms, and 
 
 ## Optional halo and history filters
 
-Under **Apply NR edit**, **Halo suppression (experimental)** lifts narrow dark rims in the model answer. The two strengths cover dark rims beside bright objects and beside dark objects. Both default to zero. `HaloSuppression` and `HaloBrightSuppression` accept 0–1; `HaloRadius` accepts 1–4 NR working pixels (default 2). It runs once after the final model pass, before enlargement or HDR composition, on DX12 and native Vulkan. It reuses the multipass working image, or allocates one at NR resolution for a single pass. Broad shading is retained, but it can still lighten real shadows.
+Under **Artifact fixes (experimental)**, halo suppression lifts narrow dark rims in the model answer. The two strengths cover dark rims beside bright objects and beside dark objects. Both default to zero. `HaloSuppression` and `HaloBrightSuppression` accept 0–1; `HaloRadius` accepts 1–4 NR working pixels (default 2). It runs once after the final model pass, before enlargement or HDR composition, on DX12 and native Vulkan. It reuses the multipass working image, or allocates one at NR resolution for a single pass. Broad shading is retained, but it can still lighten real shadows.
 
 For **ResidualAcrossRR**, **Reject stale history** (`HistoryRejection=true`) clips old edits to the current 3x3 neighbourhood and rejects them when the underlying input brightness changes. It reuses the history buffer's alpha channel and adjusts for game pre-exposure. Resets and invalid motion use the current edit immediately. This only affects the existing DX12 RR residual path and bridges using it; it does not add temporal filtering to ordinary/native Vulkan NR. The default is false.
 

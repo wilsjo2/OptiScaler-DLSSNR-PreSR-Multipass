@@ -157,6 +157,9 @@ bool Context::Impl::UpdateTuning(const ModelSettings& settings)
     {
         state.settings = settings;
         state.reset = true;
+        // (An NGX feature logs its tuning when it is created; the host keeps running, so say it here.)
+        LOG_INFO("DLSS-NR: native model {} tuning: style={}, intensity={:.2f}, structure={:.2f}, tone={:.2f}",
+                 settings.requested, settings.style, settings.intensity, settings.localStructure, settings.localTone);
     }
     else
         RetireState();
@@ -203,8 +206,10 @@ unsigned int Context::Impl::Prepare(ID3D12GraphicsCommandList* cmdList, ID3D12De
             state.creationEpoch = submissionEpoch;
             state.creationReady = true;
             if (state.host)
-                LOG_INFO("DLSS-NR: native model {} set up at {}x{} on the own pass host", settings.requested, width,
-                         height);
+                LOG_INFO("DLSS-NR: native model {} set up at {}x{} on the own pass host: style={}, intensity={:.2f}, "
+                         "structure={:.2f}, tone={:.2f}",
+                         settings.requested, width, height, settings.style, settings.intensity,
+                         settings.localStructure, settings.localTone);
         }
         *ready = true;
         return (unsigned int) NVSDK_NGX_Result_Success;
@@ -411,8 +416,11 @@ unsigned int Context::Run(ID3D12GraphicsCommandList* cmdList, ID3D12Device* devi
         pass.tone = settings.localTone;
         pass.skin = settings.skinStructure;
         pass.autoMask = settings.autoMask;
-        pass.mvScaleX = frame.mvScaleX;
-        pass.mvScaleY = frame.mvScaleY;
+        // The scale turns the game's vectors into texels of the motion texture (what the NGX model is given). The
+        // host works in pixels of the model's picture: with the model after the upscaler the motion texture is the
+        // smaller render size, and the vectors would come out too short by that ratio.
+        pass.mvScaleX = frame.mvScaleX * float(frame.size.width) / float(region.width);
+        pass.mvScaleY = frame.mvScaleY * float(frame.size.height) / float(region.height);
         pass.reset = frame.reset || state.reset;
         lifetime.Record(cmdList);
         if (!state.hostFailed && DlssNr::Nvfp4::RunHost(state.host, cmdList, pass))

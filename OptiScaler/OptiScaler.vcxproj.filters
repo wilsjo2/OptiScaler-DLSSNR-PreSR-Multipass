@@ -2003,9 +2003,6 @@
     <ClInclude Include="dlssnr\DlssNr_Status.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="dlssnr\DlssNr_PipelineUi.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="dlssnr\DlssNr_Proxy.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -2061,6 +2058,7 @@
     <ClInclude Include="dlssnr\DlssNrFeature_Vk.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="dlssnr\DlssNrFeature_Vk_Internal.h"><Filter>Header Files</Filter></ClInclude>
     <ClCompile Include="dlssnr\DlssNrFeature_Vk_Model.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="dlssnr\NrFp8_Vk.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClInclude Include="dlssnr\PassProfiles.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="dlssnr\DlssNr_ModelParameters.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="shaders\dlssnr\DlssNr_ActiveColor.h"><Filter>Header Files</Filter></ClInclude>

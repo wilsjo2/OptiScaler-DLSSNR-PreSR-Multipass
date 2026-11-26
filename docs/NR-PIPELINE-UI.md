@@ -1,25 +1,41 @@
-# NR pipeline controls
+# NR menu
 
-Click a chart box to open its settings. Linear routes use one column; a separate edit branches and rejoins where applied. Muted boxes show game stages. The chart shows configuration; runtime status reports execution or fallback. **Inspect NR** is collapsible below the chart.
+The Neural Rendering section is one list. The controls used to set a look are always shown; everything set once per game or used now and then is in collapsed sections below them.
 
-| Controls | Purpose |
+| Part | Controls |
 | --- | --- |
-| Enable NR / Apply model | Stop NR work / hide its edit while still evaluating |
-| Generate model before upscale | Run on the active input before SR or RR+SR |
-| Generate before upscale, apply after upscale | Process a separate edit; forces early generation |
-| Apply NR to the finished picture | Apply after game effects/HUD, directly or using the early edit |
-| Prepare NR input | Model resolution, scaling filters, enlargement, HDR mapping and exposure |
-| Exposure calibration | Scan candidate, white-point anchors, inversion and trim |
-| NR model | Pass count and per-pass style, intensity, local structure/tone, skin structure and auto mask |
-| Apply NR edit | Detail/colour strength, highlight guard, optional skin/environment and halo filters; stale-history rejection on the RR residual path |
-| Inspect NR | Hold, comparisons, wipe/zoom, labels and debug views |
+| Top | **Enable Neural Rendering** stops NR work; **Apply model** hides the edit while the model still runs. The status line gives NR's GPU time against the frame time. **Preset** loads a saved preset. |
+| Look | **Model passes**; per pass (a tab each when there are two or more): **NR model**, **Style**, **Intensity**, **Local structure**, **Local tone**. For all passes: **Detail strength**, **Colour strength**, **Highlight guard**. |
+| Skin and environment | The pass's **Skin structure** and **Auto skin mask**, and the separate skin / environment strengths of the final edit with the mask preview. |
+| Resolution and upscaling | The pass's model resolution, peripheral compression and enlargement. The label shows the resolution in use. |
+| Faster later passes | Re-apply and borrow options for pass 2 and later (shown with two or more passes). |
+| Where NR runs | One choice of six placements, with the options of the chosen one. The header names the placement in use. |
+| HDR and exposure | HDR mapping, white point source, exposure trim and paper white. |
+| Artifact fixes | Halo suppression; stale-history rejection on the RR residual path; HDR brightness matching for early edits on the finished picture. |
+| Compare and inspect | Hold, comparisons (with the original picture or another model), wipe/zoom, labels and debug views. |
+| Presets and calibration | Save, overwrite, rename and delete presets; calibrate the sliders to a preset. |
 
-Ordinary routes run prepare → model → compose together before or after SR/RR. Finished-picture mode puts them after effects/HUD. Separate-edit routes leave the game input clean and join after SR/RR or at presentation. Depth/motion are guides, not colour stages; the chart does not configure FG.
+## Where NR runs
 
-The pass selector shows **1** in muted green and **2** in muted red, scaled with HDR text brightness. Later passes inherit pass 1 except local tone (default zero); reset clears overrides. Sliders commit on release. Preset hints remain advanced because their effect is unverified.
+| Choice | Behaviour |
+| --- | --- |
+| After the upscaler | NR edits the upscaled picture, before effects/HUD. |
+| Before the upscaler | NR edits the active input before SR or RR+SR. |
+| Before the upscaler, edit added after it | The game reconstructs its clean input; NR's edit is upscaled separately and joins after SR/RR. |
+| On the finished picture | NR edits the final picture, after effects/HUD. |
+| Before the upscaler, edit added to the finished picture | As the separate edit, joined at presentation. |
+| Denoise first, then NR, then upscale | The game's upscaler runs once more at render resolution so NR sees a clean picture. Native D3D12. |
 
-The model node is green. Timing shows measured NR GPU elapsed time plus estimated remaining frame time, using real DXGI frames rather than generated frames. Overlap can make NR time exceed the frame interval; the bar then reports overlap. It is not an additive workload measurement.
+Depth/motion are guides, not colour stages; the placement does not configure FG.
+
+Later passes inherit pass 1 except local tone (default zero); reset clears overrides. Model sliders commit on release. The pass tabs list the active passes.
+
+Timing shows measured NR GPU elapsed time against the time between real DXGI frames rather than generated frames. Overlap can make NR time exceed the frame interval. It is not an additive workload measurement.
 
 Hold freezes input and guides for early/deferred processing; early-to-finished mode also holds one clean final image across presentation slots. It does not pause the game. See [hold limits](../OptiScaler/dlssnr/design/frame-hold.md), [bridges](NR-FINISHED-BRIDGES.md) and [enlargement](NR-DLSS-ENLARGEMENT.md).
 
-Offscreen ImGui/WARP checks covered all routes, selection, wrapped labels, forced controls and timing overlap. GPU/proxy checks covered held inputs, rotating resources and restoration after failure. [Live results](NR-UPSTREAM-REVIEW.md) describe the narrower game coverage.
+## Calibration
+
+**Calibrate to a preset** holds the frame, renders the preset to match, and searches the chosen pass's Intensity, Local structure and Local tone and the Detail and Colour strength for the closest picture. With **Also set skin, environment and highlight guard** it reads the composition's own skin mask and compares skin and environment separately, each counting the same whatever its share of the frame; a frame with under 0.5 % skin leaves the four skin / environment sliders as they are. After a model slider changes, pictures are read until they stop changing before one is measured. D3D12 only.
+
+GPU/proxy checks covered held inputs, rotating resources and restoration after failure. [Live results](NR-UPSTREAM-REVIEW.md) describe the narrower game coverage.

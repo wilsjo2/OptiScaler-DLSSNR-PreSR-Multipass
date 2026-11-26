@@ -1,7 +1,7 @@
 # Run after a Release x64 build from an x64 Visual Studio developer shell.
 param(
     [Parameter(Mandatory)][string]$Assets,
-    [ValidateSet(4, 21, 22, 25, 26)][int[]]$Preset = @(25, 26)
+    [ValidateSet(4, 21, 22, 25, 26, 27, 28)][int[]]$Preset = @(25, 26)
 )
 $ErrorActionPreference = 'Stop'
 $modelFolder = (Resolve-Path -LiteralPath $Assets).Path

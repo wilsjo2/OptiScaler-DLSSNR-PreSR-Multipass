@@ -483,7 +483,10 @@ inline void FrameParameters(LaunchFields& l, const Geometry& geo, const Grades& 
         if (name == "stylecode") return bits(float(s.style) / 128.f);
         if (name == "skin") return bits(s.autoMask ? (s.skin >= 0 ? s.skin : s.structure) : -1.f);
         if (name == "other") return bits(s.autoMask ? s.structure : -1.f);
-        if (name == "automask") return s.autoMask ? 1u : 0u;
+        // NVIDIA's runtime sends 1 here whatever Auto skin mask is (traced with the mask on and off, Skin structure
+        // automatic and 0.5): the switch reaches the model only through skin and other (-1 when off). A 0 here made
+        // the kernel give the model 0 for both, and the edit lost about a third of its strength.
+        if (name == "automask") return 1u;
         if (name == "depthinv") return 0u;
         if (name == "intensity") return bits(s.intensity);
         if (name.rfind("grade", 0) == 0) {

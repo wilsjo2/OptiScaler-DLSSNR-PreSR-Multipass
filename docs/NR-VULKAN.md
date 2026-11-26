@@ -15,7 +15,9 @@ Keep the packaged `OptiScaler/nvfp4` folder beside the proxy DLL. Set `Enabled=t
 | Preset | Model | Target GPUs |
 | --- | --- | --- |
 | 25 | INT8 Original | RTX 30, 40, 50 |
+| 27 | INT8 Original - Alternate training | RTX 30, 40, 50 |
 | 26 | INT8 2xPass-in-one | RTX 30, 40, 50 |
+| 28 | INT8 2xPass-in-one - Alternate training | RTX 30, 40, 50 |
 | 4 | NVFP4 Original | RTX 50 |
 | 21 | NVFP4 2xPass-in-one | RTX 50 |
 | 22 | NVFP4 3xPass-in-one | RTX 50 |
@@ -32,6 +34,8 @@ Passes=1
 WorkingScale=1.0
 ```
 
-The NR status and log identify a model that cannot run on the current device. The custom FP8 pass-in-one presets require the signed-kernel D3D12 path.
+The NR status and log identify a model that cannot run on the current device.
+
+FP8 2xPass-in-one (23) and FP8 3xPass-in-one (24) run on RTX 40 and 50 series GPUs through NVIDIA's NR runtime with the packaged `OptiScaler/nvfp4/fp8` weights, so they also need `nvngx_dlssnr.dll` beside the game executable. On native Vulkan they need `Enabled=true` before the game starts as well.
 
 On Windows with an RTX 5090, all five independent presets produced byte-identical RGBA16F output to the D3D12 host on three 321×193 test frames per preset, covering reset, temporal history and Cinematic grading. Gameplay, Proton and RTX 30/40 hardware remain unverified.

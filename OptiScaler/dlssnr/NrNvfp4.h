@@ -13,6 +13,8 @@
 //   25 Original - INT8, 26 INT8 2xPass-in-one: Model A with INT8 weights and INT8 kernels of ours,
 //      run wholly on the own pass host (standalone/NrCapture/nvfp4/NrHost: RTX 30, 40 and 50 series; no launch of the
 //      NR runtime at all, so such a pass creates no NGX feature). Files OptiScaler/nvfp4/int8.
+//   27 INT8 Original - Alternate training, 28 INT8 2xPass-in-one - Alternate training: as 25 and 26 with other
+//      weights (int8_set3.*, int8_set4.*), each listed beside its model.
 // Any other value from 4 up (5..14 were models that have been removed) is refused, never run as another model.
 // Game FP8 selects signed Model A and substitutes the selected FP8 weight records.
 // Assets: <OptiScaler.dll's folder>/OptiScaler/nvfp4, laid out as the Display Filter package's nvfp4 folder.
@@ -41,8 +43,10 @@ inline constexpr unsigned ModelTwoDouble4k = 21, // NVFP4 2xPass-in-one with its
                           ModelFp8Double4k = 23, // FP8 2xPass-in-one with its 4K weights
                           ModelFp8Triple4k = 24; // FP8 3xPass-in-one with its 4K weights
 inline constexpr unsigned ModelInt8 = 25,       // Model A as INT8 kernels and weights of ours
-                          ModelInt8Double = 26; // INT8: one pass with the look of two
-constexpr bool IsInt8(unsigned preset) { return preset >= ModelInt8 && preset <= ModelInt8Double; }
+                          ModelInt8Double = 26, // INT8: one pass with the look of two
+                          ModelInt8Alternate = 27, // INT8 Original with its alternate weights
+                          ModelInt8DoubleAlternate = 28; // INT8 2xPass-in-one with its alternate weights
+constexpr bool IsInt8(unsigned preset) { return preset >= ModelInt8 && preset <= ModelInt8DoubleAlternate; }
 constexpr unsigned Int8Set(unsigned preset) { return IsInt8(preset) ? preset - (ModelInt8 - 1) : 0; } // int8/int8_set<n>
 constexpr bool IsPassInOne(unsigned preset)
 {
@@ -90,8 +94,10 @@ inline constexpr ModelEntry kModels[] = {
     { ModelFp8Double4k, "FP8 2xPass-in-one" },
     { ModelFp8Triple4k, "FP8 3xPass-in-one" },
     { ModelInt8, "INT8 Original" },
+    { ModelInt8Alternate, "INT8 Original - Alternate training" },
     { ModelInt8Double, "INT8 2xPass-in-one" },
-    { ModelANvfp4, "NVFP4 Original (4-bit kernels)" },
+    { ModelInt8DoubleAlternate, "INT8 2xPass-in-one - Alternate training" },
+    { ModelANvfp4, "NVFP4 Original" },
     { ModelTwoDouble4k, "NVFP4 2xPass-in-one" },
     { ModelTwoTriple4k, "NVFP4 3xPass-in-one" },
 };

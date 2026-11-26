@@ -341,7 +341,7 @@ int main()
     // ... and a 4-bit pass after them runs its kernels without the FP8 records.
     CHECK(Pass(ModelTwoDouble) && Mock::fp8.used == 4 && Mock::swin.set == 13);
     // Numbers between and beyond the models are refused, never run as another model.
-    CHECK(!Pass(14) && !Pass(27) && IsKnown(24) && !IsKnown(27));
+    CHECK(!Pass(14) && !Pass(29) && IsKnown(24) && !IsKnown(29));
     // An FP8 evaluation that did not run wholly on our records is refused at once, with its reason.
     Mock::fp8.faultNext = true;
     CHECK(!Pass(ModelFp8Double) && !Running() && Contains(Problem(), "launch 57"));
@@ -378,8 +378,13 @@ int main()
 
     // The INT8 models run on the own pass host: no layer takes part, and the pass is judged by whether the host ran.
     {
-        CHECK(IsKnown(ModelInt8) && IsNvfp4(ModelInt8Double) && !IsInt8(24) && !IsInt8(27));
-        CHECK(Int8Set(ModelInt8) == 1 && Int8Set(ModelInt8Double) == 2);
+        CHECK(IsKnown(ModelInt8) && IsNvfp4(ModelInt8Double) && !IsInt8(24) && !IsInt8(29));
+        CHECK(Int8Set(ModelInt8) == 1 && Int8Set(ModelInt8Double) == 2 && Int8Set(ModelInt8Alternate) == 3 &&
+              Int8Set(ModelInt8DoubleAlternate) == 4);
+        CHECK(IsKnown(ModelInt8DoubleAlternate) && std::string(ModelName(ModelInt8DoubleAlternate)) ==
+                                                       "INT8 2xPass-in-one - Alternate training");
+        CHECK(IsKnown(ModelInt8Alternate) && !IsPassInOne(ModelInt8Alternate) &&
+              std::string(ModelName(ModelInt8Alternate)) == "INT8 Original - Alternate training");
         SetDriverQuery(device);
         CHECK(Mock::host.query == device);
         const auto createdBefore = Mock::host.created, evaluatedBefore = Mock::host.evaluated;

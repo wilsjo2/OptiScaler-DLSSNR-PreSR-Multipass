@@ -228,9 +228,8 @@ static void RenderResolution(Config* config, bool presentationControls)
     }
 }
 
-void RenderInput(Config* config)
+void RenderHdr(Config* config)
 {
-    RenderResolution(config, true);
     static const char* reversibleNames[] = { "Off (soft knee)", "Neutwo proxy + composed", "Neutwo proxy + replace",
                                              "Hybrid proxy + composed", "Hybrid proxy + replace" };
     int reversible = (int) config->DlssNrReversibleMode.value_or_default();
@@ -348,7 +347,8 @@ template <typename Option> static void NrModelCombo(Option* opt, bool allowInher
                "FP8 2xPass-in-one, FP8 3xPass-in-one: the look of two or three passes in one, as FP8 models for\n"
                "RTX 40 and 50 series GPUs (NVIDIA's own FP8 kernels with weights of ours; files in\n"
                "OptiScaler/nvfp4/fp8).\n"
-               "INT8 Original, INT8 2xPass-in-one: INT8 models for RTX 30, 40 and 50 series GPUs (Vulkan and D3D12;\n"
+               "INT8 Original, INT8 2xPass-in-one: INT8 models for RTX 30, 40 and 50 series GPUs. Each also has an\n"
+               "\"Alternate training\" entry: the same model with other weights (Vulkan and D3D12;\n"
                "files in OptiScaler/nvfp4/int8). They run wholly on kernels of ours and need no NR runtime.\n"
                "NVFP4 Original, NVFP4 2xPass-in-one, NVFP4 3xPass-in-one: 4-bit models for RTX 50 series GPUs\n"
                "(Vulkan and D3D12). Keep the packaged OptiScaler/nvfp4 folder beside the proxy.\n"
@@ -377,15 +377,22 @@ template <typename Option> static void NrModelCombo(Option* opt, bool allowInher
     }
 }
 
-static void RenderPassResolution(Config* config, unsigned int selectedPass)
+// The pass's model resolution, peripheral compression and enlargement. The label carries the size in use, so the
+// node need not be opened to see it.
+static void RenderPassResolution(Config* config, unsigned int selectedPass, bool severalPasses)
 {
-    if (!ImGui::TreeNode("Resolution and upscaling"))
+    const int percent = (int) lroundf(Profiles::PassResolutionSettings(*config, selectedPass).workingScale * 100.0f);
+    const auto label = severalPasses
+                           ? std::format("Pass {} resolution and upscaling ({}%)###resolution", selectedPass + 1, percent)
+                           : std::format("Resolution and upscaling ({}%)###resolution", percent);
+    if (!ImGui::TreeNode(label.c_str()))
         return;
 
     if (selectedPass == 0)
     {
-        ImGui::TextDisabled("Pass 1 also supplies defaults for later passes.");
-        RenderResolution(config, false);
+        if (severalPasses)
+            ImGui::TextDisabled("Later passes use pass 1's sizing unless they set their own.");
+        RenderResolution(config, true);
     }
     else
     {
@@ -485,7 +492,9 @@ static void RenderPassReuse(Config* config, unsigned int selectedPass)
     ImGui::TextDisabled("%s", status);
 }
 
-void RenderModel(Config* config)
+// The look, in one place: the passes, each pass's model and tuning, how strongly the result goes into the picture, and
+// the skin controls. The pass tabs choose the pass that the per-pass controls (and the calibrator) work on.
+void RenderLook(Config* config)
 {
     bool unlockPasses = config->DlssNrUnlockPasses.value_or_default();
     const int menuPassLimit = unlockPasses ? 10 : 2;
@@ -497,71 +506,63 @@ void RenderModel(Config* config)
     editingPasses = ImGui::IsItemActive();
     if (ImGui::IsItemDeactivatedAfterEdit())
         config->DlssNrPasses = (uint32_t) std::clamp(passes, 1, menuPassLimit);
-    if (ImGui::Checkbox("Unlock up to 10 passes", &unlockPasses))
+    ImGui::SameLine();
+    if (ImGui::Checkbox("Up to 10", &unlockPasses))
     {
         config->DlssNrUnlockPasses = unlockPasses;
         config->DlssNrPasses = std::clamp(config->DlssNrPasses.value_or_default(), 1u, unlockPasses ? 10u : 2u);
     }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Allow up to 10 passes. Every pass that runs the model costs its full GPU time.");
 
-    // Pass shortcuts sit right under the pass count so they are visible without picking a pass to edit.
     const unsigned activePasses = std::clamp(config->DlssNrPasses.value_or_default(), 1u, (unsigned) menuPassLimit);
-    if (activePasses >= 2)
-    {
-        ImGui::SeparatorText("Later-pass shortcuts (re-apply / borrow)");
-        for (unsigned shortcutPass = 1; shortcutPass < activePasses; ++shortcutPass)
-        {
-            ImGui::PushID(1000 + (int) shortcutPass);
-            if (activePasses > 2)
-                ImGui::TextDisabled("Pass %u", shortcutPass + 1);
-            RenderPassReuse(config, shortcutPass);
-            ImGui::PopID();
-        }
-        ImGui::Separator();
-    }
-    else
-    {
-        ImGui::TextDisabled("Set 2 or more passes for the re-apply and borrow options.");
-    }
-
+    const bool several = activePasses >= 2;
     unsigned& selectedPass = EditPass();
-    const auto selectedLabel = std::format("Pass {}", selectedPass + 1);
-    if (ImGui::BeginCombo("Edit pass", selectedLabel.c_str()))
+    if (several)
     {
-        for (unsigned pass = 0; pass <= std::size(config->DlssNrPassOverrides); ++pass)
+        // Kept beside the pass count, where they are found without choosing a pass first.
+        if (ImGui::TreeNode("Faster later passes (re-apply / borrow)"))
         {
-            const auto label = std::format("Pass {}", pass + 1);
-            if (ImGui::Selectable(label.c_str(), selectedPass == pass))
-                selectedPass = pass;
-            if (selectedPass == pass)
-                ImGui::SetItemDefaultFocus();
+            for (unsigned shortcutPass = 1; shortcutPass < activePasses; ++shortcutPass)
+            {
+                ImGui::PushID(1000 + (int) shortcutPass);
+                if (activePasses > 2)
+                    ImGui::TextDisabled("Pass %u", shortcutPass + 1);
+                RenderPassReuse(config, shortcutPass);
+                ImGui::PopID();
+            }
+            ImGui::TreePop();
         }
-        ImGui::EndCombo();
+        if (ImGui::BeginTabBar("NR passes", ImGuiTabBarFlags_FittingPolicyScroll))
+        {
+            for (unsigned pass = 0; pass < activePasses; ++pass)
+            {
+                const auto label = std::format("Pass {}", pass + 1);
+                if (ImGui::BeginTabItem(label.c_str()))
+                {
+                    selectedPass = pass;
+                    ImGui::EndTabItem();
+                }
+            }
+            ImGui::EndTabBar();
+        }
     }
-    if (selectedPass >= config->DlssNrPasses.value_or_default())
-        ImGui::TextDisabled("Inactive pass. Settings apply when this pass is enabled.");
+    selectedPass = std::min(selectedPass, activePasses - 1);
 
     // Distinct widget IDs keep uncommitted slider edits with their selected pass.
     ImGui::PushID((int) selectedPass);
     const bool inherited = selectedPass != 0;
-    const auto tuning = [&](auto& intensity, auto& structure, auto& tone, auto& skin, auto& autoMask)
+    // The selected pass's own values: pass 1's are the settings later passes inherit, theirs are overrides.
+    const auto withPass = [&](auto&& use)
     {
-        DeferredSlider("Intensity", &intensity, 0.0f, 2.0f,
-                       inherited ? config->DlssNrIntensity.value_or_default() : 1.0f, inherited);
-        DeferredSlider("Local structure", &structure, 0.0f, 2.0f,
-                       inherited ? config->DlssNrLocalStructure.value_or_default() : 1.0f, inherited);
-        DeferredSlider("Local tone", &tone, 0.0f, 2.0f, inherited ? 0.0f : 1.0f, inherited);
-        DeferredSlider("Skin structure", &skin, -1.0f, 2.0f,
-                       inherited ? config->DlssNrSkinStructure.value_or_default() : -1.0f, inherited);
-        bool mask = autoMask.value_or(inherited ? config->DlssNrAutoMask.value_or_default() : true);
-        if (ImGui::Checkbox("Auto skin mask", &mask))
-            autoMask = mask;
-        if (inherited)
+        if (selectedPass == 0)
+            use(config->DlssNrIntensity, config->DlssNrLocalStructure, config->DlssNrLocalTone,
+                config->DlssNrSkinStructure, config->DlssNrAutoMask);
+        else
         {
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Reset##mask"))
-                autoMask = std::optional<bool> {};
+            auto& pass = config->DlssNrPassOverrides[selectedPass - 1];
+            use(pass.intensity, pass.structure, pass.tone, pass.skin, pass.autoMask);
         }
-        HelpMarker("Model-based skin selection.");
     };
     static const char* styles[] = { "Standard", "Natural", "Cinematic" };
     static const char* inheritedStyles[] = { "Auto", "Standard", "Natural", "Cinematic" };
@@ -571,8 +572,6 @@ void RenderModel(Config* config)
         int style = (int) std::min(config->DlssNrStyle.value_or_default(), 2u);
         if (ImGui::Combo("Style", &style, styles, IM_ARRAYSIZE(styles)))
             config->DlssNrStyle = (uint32_t) style;
-        tuning(config->DlssNrIntensity, config->DlssNrLocalStructure, config->DlssNrLocalTone,
-               config->DlssNrSkinStructure, config->DlssNrAutoMask);
     }
     else
     {
@@ -584,50 +583,50 @@ void RenderModel(Config* config)
         int style = pass.style.has_value() ? std::clamp((int) pass.style.value(), 0, 2) + 1 : 0;
         if (ImGui::Combo("Style", &style, inheritedStyles, IM_ARRAYSIZE(inheritedStyles)))
             pass.style = style ? std::optional<uint32_t>(style - 1) : std::nullopt;
-        tuning(pass.intensity, pass.structure, pass.tone, pass.skin, pass.autoMask);
     }
-    RenderPassResolution(config, selectedPass);
-    ImGui::PopID();
-}
+    withPass([&](auto& intensity, auto& structure, auto& tone, auto&, auto&)
+             {
+                 DeferredSlider("Intensity", &intensity, 0.0f, 2.0f,
+                                inherited ? config->DlssNrIntensity.value_or_default() : 1.0f, inherited);
+                 DeferredSlider("Local structure", &structure, 0.0f, 2.0f,
+                                inherited ? config->DlssNrLocalStructure.value_or_default() : 1.0f, inherited);
+                 DeferredSlider("Local tone", &tone, 0.0f, 2.0f, inherited ? 0.0f : 1.0f, inherited);
+             });
 
-void RenderBlend(Config* config)
-{
-    if (config->DlssNrResidualAcrossRr.value_or_default())
-    {
-        Checkbox("Reject stale history", config->DlssNrHistoryRejection);
-        HelpMarker("RR residual path: reject old edits when the input changes and limit them to nearby current edits. "
-                   "Can reduce trails. Off keeps the original history filter.");
-        Slider("History confidence threshold", config->DlssNrResidualConfidenceSensitivity, 0.0f, 2.0f, "%.3f", 0.0f);
-    }
-    if (ImGui::TreeNode("Halo suppression (experimental)"))
-    {
-        Slider("Dark rims near bright objects", config->DlssNrHaloSuppression, 0.0f, 1.0f, "%.2f", 0.0f);
-        Slider("Dark rims near dark objects", config->DlssNrHaloBrightSuppression, 0.0f, 1.0f, "%.2f", 0.0f);
-        Slider("Halo radius (NR pixels)", config->DlssNrHaloRadius, 1.0f, 4.0f, "%.0f", 2.0f);
-        HelpMarker("Lifts fine dark rims while keeping broad lighting. Both strengths at zero disable the pass. "
-                   "May lighten real shadows; compare the result before keeping it on.");
-        ImGui::TreePop();
-    }
-    if (config->DlssNrFinishedPicture.value_or_default() &&
-        (config->DlssNrRunBeforeSr.value_or_default() || config->DlssNrDeferredDlss.value_or_default()))
-    {
-        const auto feature = State::Instance().currentFeature;
-        ImGui::BeginDisabled(State::Instance().swapchainApi == API::Vulkan ||
-                             (feature && feature->GetUpscalerType() == Upscaler::DLSSD));
-        Checkbox("Match HDR brightness response (experimental)", config->DlssNrHdrTransfer);
-        ImGui::EndDisabled();
-        HelpMarker(
-            "Match early NR brightness changes to the finished HDR image. Adds GPU work; unreliable fits fall back.");
-    }
+    // How the passes' result goes into the picture. One set of values, whatever the number of passes.
+    if (several)
+        ImGui::SeparatorText("All passes");
     Slider("Detail strength", config->DlssNrTransferStrength, 0.0f, 2.0f, "%.2f", 1.0f);
-    HelpMarker("0 = no detail change. 1 = normal.");
-
+    HelpMarker("How much of the model's detail and lighting reaches the picture. 0 = none. 1 = normal.");
     Slider("Colour strength", config->DlssNrColourStrength, 0.0f, 4.0f, "%.2f", 1.0f);
     HelpMarker("0 = game colours. 1 = model colours. Above 1 boosts saturation.");
+    Slider("Highlight guard", config->DlssNrMaxRatio, 1.0f, 8.0f, "%.1fx", 2.0f);
+    HelpMarker("The most a pixel may be brightened or darkened.");
 
-    if (ImGui::TreeNode("Skin and environment (final edit)"))
+    if (ImGui::TreeNode("Skin and environment"))
     {
+        if (several)
+            ImGui::TextDisabled("Pass %u model", selectedPass + 1);
+        withPass([&](auto&, auto&, auto&, auto& skin, auto& autoMask)
+                 {
+                     DeferredSlider("Skin structure", &skin, -1.0f, 2.0f,
+                                    inherited ? config->DlssNrSkinStructure.value_or_default() : -1.0f, inherited);
+                     bool mask = autoMask.value_or(inherited ? config->DlssNrAutoMask.value_or_default() : true);
+                     if (ImGui::Checkbox("Auto skin mask", &mask))
+                         autoMask = mask;
+                     if (inherited)
+                     {
+                         ImGui::SameLine();
+                         if (ImGui::SmallButton("Reset##mask"))
+                             autoMask = std::optional<bool> {};
+                     }
+                     HelpMarker("Model-based skin selection.");
+                 });
+        if (several)
+            ImGui::TextDisabled("Final edit, all passes");
         Checkbox("Separate skin / environment controls", config->DlssNrSkinProtection);
+        HelpMarker("Scale the finished edit separately on skin and on everything else. Skin is found by colour: check "
+                   "it with the preview below.");
         ImGui::BeginDisabled(!config->DlssNrSkinProtection.value_or_default());
         const auto slider = [](const char* label, auto& option)
         {
@@ -642,9 +641,36 @@ void RenderBlend(Config* config)
         ImGui::EndDisabled();
         ImGui::TreePop();
     }
+    RenderPassResolution(config, selectedPass, several);
+    ImGui::PopID();
+}
 
-    Slider("Highlight guard", config->DlssNrMaxRatio, 1.0f, 8.0f, "%.1fx", 2.0f);
-    HelpMarker("Limit pixel brightening and darkening.");
+// Optional corrections applied with the edit.
+void RenderFixes(Config* config)
+{
+    Slider("Dark rims near bright objects", config->DlssNrHaloSuppression, 0.0f, 1.0f, "%.2f", 0.0f);
+    Slider("Dark rims near dark objects", config->DlssNrHaloBrightSuppression, 0.0f, 1.0f, "%.2f", 0.0f);
+    Slider("Halo radius (NR pixels)", config->DlssNrHaloRadius, 1.0f, 4.0f, "%.0f", 2.0f);
+    HelpMarker("Halo suppression lifts fine dark rims while keeping broad lighting. Both strengths at zero switch it "
+               "off. May lighten real shadows; compare the result before keeping it on.");
+    if (config->DlssNrResidualAcrossRr.value_or_default())
+    {
+        Checkbox("Reject stale history", config->DlssNrHistoryRejection);
+        HelpMarker("RR residual path: reject old edits when the input changes and limit them to nearby current edits. "
+                   "Can reduce trails. Off keeps the original history filter.");
+        Slider("History confidence threshold", config->DlssNrResidualConfidenceSensitivity, 0.0f, 2.0f, "%.3f", 0.0f);
+    }
+    if (config->DlssNrFinishedPicture.value_or_default() &&
+        (config->DlssNrRunBeforeSr.value_or_default() || config->DlssNrDeferredDlss.value_or_default()))
+    {
+        const auto feature = State::Instance().currentFeature;
+        ImGui::BeginDisabled(State::Instance().swapchainApi == API::Vulkan ||
+                             (feature && feature->GetUpscalerType() == Upscaler::DLSSD));
+        Checkbox("Match HDR brightness response", config->DlssNrHdrTransfer);
+        ImGui::EndDisabled();
+        HelpMarker(
+            "Match early NR brightness changes to the finished HDR image. Adds GPU work; unreliable fits fall back.");
+    }
 }
 
 void RenderInspect(Config* config)

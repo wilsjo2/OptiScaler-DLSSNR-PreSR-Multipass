@@ -2,7 +2,7 @@
 
 This captures ordinary native DX12 pre-upscale NR without changing NR/RR settings or histories.
 
-1. Enable NR and **Generate model before upscale**. Disable separate early-generation/late-application, finished-picture, hold and comparison/debug views. Keep graphics/model/exposure settings fixed.
+1. Enable NR and set **Where NR runs** to **Before the upscaler**. Disable hold and comparison/debug views. Keep graphics/model/exposure settings fixed.
 2. Where gameplay loses the effect, press **Ctrl+F8** and wait at least five seconds.
 3. Enter live photo mode with similar framing. When the effect appears, press **Ctrl+F9** and wait five seconds.
 4. Exit normally; inspect `nr-pipeline-captures` beside the executable (`bin/x64` in Cyberpunk) and `OptiScaler.log`.

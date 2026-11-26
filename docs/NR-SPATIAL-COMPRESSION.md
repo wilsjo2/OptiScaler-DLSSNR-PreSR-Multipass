@@ -27,7 +27,7 @@ Settings live under `[DlssNr]`:
 
 `WorkingScale` keeps its existing meaning and range. The packaged INI uses `auto` for these defaults.
 
-For independent layouts, select **Edit pass → Resolution and upscaling** and enable that pass's resolution
+For independent layouts, open the pass's tab, then **Resolution and upscaling**, and enable that pass's resolution
 override. The same spatial keys accept a `Pass2`…`Pass30` prefix, and absent fields inherit pass 1. Each
 stage packs and unpacks its own layout before handing a native-size encoded answer to the next stage.
 Final scene composition occurs once. Status reports each pass's dimensions and spatial fallback;

@@ -10,6 +10,7 @@
 #include <State.h>
 #include <Util.h>
 #include "DlssNr_VkExtensions.h"
+#include "NrFp8_Vk.h"
 #include <proxies/NVNGX_Proxy.h>
 
 #include <shaders/dlssnr/DlssNr_Vk.h>
@@ -105,9 +106,24 @@ bool ModelVk::Impl::CreateModel(VkCommandBuffer commandBuffer, unsigned int pass
             return false;
         }
     }
-    if (Nvfp4::IsNvfp4(preset))
+    unsigned fp8Set = 0;
+    if (Nvfp4::IsFp8(preset))
     {
-        Fail("This preset has no independent Vulkan host. Signed-kernel FP8 models require the D3D12 path.");
+        // NVIDIA's Model A with weight records of ours: the runtime's feature, its launches redirected (NrFp8_Vk.h).
+        std::string why;
+        fp8Set = Nvfp4::Fp8Set(preset);
+        if (!VkExt::HostDeviceReady(state.device) ||
+            !Fp8Vk::Ready(state.device, fp8Set, Util::DllPath().parent_path() / L"OptiScaler" / L"nvfp4" / L"fp8", why))
+        {
+            Fail(why.empty() ? "Enable NR before Vulkan device creation. FP8 pass-in-one models need binary import "
+                               "and buffer device addresses."
+                             : why.c_str());
+            return false;
+        }
+    }
+    else if (Nvfp4::IsNvfp4(preset))
+    {
+        Fail("This NR model is not available in this build.");
         return false;
     }
     if (!InitDriver(state.instance, state.physicalDevice, state.device))
@@ -157,6 +173,9 @@ bool ModelVk::Impl::CreateModel(VkCommandBuffer commandBuffer, unsigned int pass
         Fail("the NVIDIA NGX driver could not create an independent Neural Rendering feature");
         return false;
     }
+    model.fp8Set = fp8Set;
+    if (fp8Set)
+        LOG_INFO("DLSS-NR Vulkan: pass {} uses {} (FP8 set {})", passIndex + 1, Nvfp4::ModelName(preset), fp8Set);
     return true;
 }
 
@@ -202,7 +221,31 @@ NVSDK_NGX_Result ModelVk::Impl::EvaluateModel(VkCommandBuffer commandBuffer, uns
     parameters->Set("DLSSNR.MVecScaleY", mvY);
     SetModelTuning(parameters, Profiles::PassSettings(config, passIndex));
     parameters->Set("DLSSNR.ControlMask", static_cast<void*>(nullptr));
-    return NVNGXProxy::VULKAN_EvaluateFeature()(commandBuffer, model.feature, parameters, nullptr);
+    if (!model.fp8Set)
+        return NVNGXProxy::VULKAN_EvaluateFeature()(commandBuffer, model.feature, parameters, nullptr);
+
+    // An FP8 pass-in-one model: the evaluation's launches are checked and given our records while it is recorded.
+    // Its picture is discarded unless every weight record was ours (there is no fallback to NVIDIA's weights).
+    try
+    {
+        Fp8Vk::Begin(commandBuffer, state.device, model.fp8Set);
+    }
+    catch (const std::exception& e)
+    {
+        Fail(e.what());
+        return NVSDK_NGX_Result_Fail;
+    }
+    const auto result = NVNGXProxy::VULKAN_EvaluateFeature()(commandBuffer, model.feature, parameters, nullptr);
+    std::string why;
+    const bool ours = Fp8Vk::End(commandBuffer, why);
+    if (result != NVSDK_NGX_Result_Success)
+        return result;
+    if (!ours)
+    {
+        Fail(why.c_str());
+        return NVSDK_NGX_Result_Fail;
+    }
+    return result;
 }
 
 bool ModelVk::Impl::FormatCanHoldLinearHdr(VkFormat format)

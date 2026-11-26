@@ -4,7 +4,7 @@
 
 `AutoMask` requests NVIDIA's automatic mask. An explicit `DLSSNR.ControlMask` overrides it, so reusable parameter tables clear stale entries. See the [independent mask probes](https://github.com/kibblerz/DLSS5-Reshade-AIO/blob/main/lab/PRIVATE-CONTRACT-FINDINGS.md#controlmask). `SkinStructure=-1` follows `LocalStructure`; setting it to 0 does not disable every skin lighting/colour change.
 
-**Skin and environment (final edit)** is a separate, opt-in colour filter, applied once after all model passes on DX12/Vulkan. Its four strengths default to 1. It adds no model pass and does not expose NVIDIA's semantic mask. The preview shows selection in white: warm materials can match, while coloured lighting can hide skin.
+The final-edit controls under **Skin and environment** are a separate, opt-in colour filter, applied once after all model passes on DX12/Vulkan. Its four strengths default to 1. It adds no model pass and does not expose NVIDIA's semantic mask. The preview shows selection in white: warm materials can match, while coloured lighting can hide skin.
 
 Colour off preserves hue/chroma in fully selected pixels; lighting can still change brightness. Set detail/lighting to 0 too to restore those pixels completely. Soft edges blend skin/environment settings. `tests/nr_skin_shader_smoke.cpp` checks identity, bypass, separation, preview and colour preservation on WARP; it does not validate NVIDIA's mask.
 
@@ -24,7 +24,7 @@ The shared pipeline now preserves the table's supported access type when redirec
 
 ## Experimental HDR brightness transfer
 
-With early generation and finished-picture application enabled, select **Apply NR edit → Match HDR brightness response (experimental)**. `[DlssNr] HdrTransfer=false` defaults off. It supports scene-linear input with HDR10/scRGB output on DX12 and the DX11 bridge. SDR/nonlinear input uses the existing transfer; native Vulkan lacks this early-to-finished route.
+With early generation and finished-picture application enabled, select **Artifact fixes → Match HDR brightness response**. `[DlssNr] HdrTransfer=false` defaults off. It supports scene-linear input with HDR10/scRGB output on DX12 and the DX11 bridge. SDR/nonlinear input uses the existing transfer; native Vulkan lacks this early-to-finished route.
 
 At presentation, compare 1,024 samples against a fence-protected clean SR reference, normalized by pre-exposure. Local regression and outlier rejection fit 48 half-stop luminance bins over −12..12 stops. Consistent curves are smoothed; resets, resize, stale slots and major exposure/colour changes invalidate history.
 

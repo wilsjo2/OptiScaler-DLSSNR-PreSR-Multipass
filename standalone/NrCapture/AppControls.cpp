@@ -361,7 +361,7 @@ void App::CreateControls() {
     Add(L"BUTTON", L"Calibrate", WS_TABSTOP, 506, 294, 200, 28, CalibrateStart);
     Add(L"BUTTON", L"Cancel", WS_TABSTOP, 716, 294, 100, 28, CalibrateCancel);
     EnableWindow(Control(CalibrateCancel), FALSE);
-    Add(L"BUTTON", L"Enable skin settings optimisation", BS_AUTOCHECKBOX | WS_TABSTOP, 506, 330, 410, 24, CalibrateSkin);
+    Add(L"BUTTON", L"Also set skin, environment and highlight guard", BS_AUTOCHECKBOX | WS_TABSTOP, 506, 330, 410, 24, CalibrateSkin);
     Add(L"STATIC", L"", 0, 506, 360, 410, 118, CalibrateNote);
     Add(L"STATIC", L"Holds the current frame and renders the preset to match on it (all of its passes). Then it tries values of Model intensity, Local structure and Local tone of the pass chosen under \"Edit pass\", and of Detail and Colour strength, until the picture is as close to that preset's as it gets, and leaves the best values in the controls. Skin settings optimisation adds the four skin / environment sliders (switched on) and Highlight guard.\r\n\r\nOther enabled passes keep running as set. Capture must be running.", 0, 506, 482, 410, 134, 0);
     buildingPage = 10;

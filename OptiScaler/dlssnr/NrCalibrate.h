@@ -86,6 +86,100 @@ inline double Difference(const Picture& a, const Picture& b)
 // The same difference as a likeness in decibels (higher = more alike; +6 dB = half the error).
 inline double Decibels(double difference) { return -10.0 * std::log10(std::max(difference, 1e-12)); }
 
+// How much each pixel of a Picture counts as skin (0 = none, 1 = skin), read from the app's own skin mask picture
+// (Reader::ReadMask). With it the skin part and the rest (the environment) are compared separately: skin is a small
+// part of most pictures, so in a difference over the whole picture the skin sliders hardly count.
+struct SkinMask
+{
+    unsigned width = 0, height = 0;
+    std::vector<float> skin; // one value a pixel
+    double share = 0;        // the part of the picture that is skin (the mean of `skin`)
+    bool Fits(const Picture& picture) const
+    {
+        return !skin.empty() && width == picture.width && height == picture.height &&
+               picture.values.size() == skin.size() * 3;
+    }
+    // Enough of both parts to judge each on its own.
+    bool Usable() const { return !skin.empty() && share >= 0.005 && share <= 0.995; }
+};
+
+// Mean squared difference of two pictures over the skin part and over the environment, each weighted by the mask.
+struct Regions
+{
+    double skin = -1, environment = -1;
+    bool Valid() const { return skin >= 0 && environment >= 0; }
+    // What the search lowers: both parts count the same, whatever their size.
+    double Balanced() const { return 0.5 * (skin + environment); }
+};
+
+inline Regions Difference(const Picture& a, const Picture& b, const SkinMask& mask)
+{
+    if (a.Empty() || a.width != b.width || a.height != b.height || a.values.size() != b.values.size() || !mask.Fits(a))
+        return {};
+    double skin = 0, environment = 0, skinWeight = 0, environmentWeight = 0;
+    for (size_t pixel = 0; pixel < mask.skin.size(); ++pixel)
+    {
+        double sum = 0;
+        for (size_t c = 0; c < 3; ++c)
+        {
+            const double d = double(a.values[pixel * 3 + c]) - double(b.values[pixel * 3 + c]);
+            sum += d * d;
+        }
+        const double w = mask.skin[pixel];
+        skin += w * sum;
+        environment += (1.0 - w) * sum;
+        skinWeight += w;
+        environmentWeight += 1.0 - w;
+    }
+    if (skinWeight <= 0 || environmentWeight <= 0)
+        return {};
+    return { skin / (3.0 * skinWeight), environment / (3.0 * environmentWeight) };
+}
+
+// A change of a model slider restarts the model's history, and on a held frame the picture then keeps changing for
+// some frames. Measured too early, such a picture is judged against one in another state; the error is small, but so
+// is what the skin sliders change. Give every picture read since the change: Add() says when one can be measured.
+class Settling
+{
+  public:
+    // `most`: pictures at most; the last one is then taken as it is.
+    void Begin(unsigned most = 8)
+    {
+        previous = {};
+        last = -1;
+        count = 0;
+        limit = std::max(most, 1u);
+    }
+    // `scale`: the difference this picture is about to be judged by (its difference from the goal). True when
+    //   the picture differs from the one before by less than 1/2000 of that (what is left of the change then moves the
+    //   result by about a percent at most),
+    //   the change between pictures has stopped shrinking (what is left is noise, not settling), or
+    //   `most` pictures were read.
+    bool Add(const Picture& picture, double scale)
+    {
+        ++count;
+        const double change = previous.Empty() ? -1.0 : Difference(previous, picture);
+        const double before = last;
+        previous = picture;
+        last = change;
+        if (count >= limit)
+            return true;
+        if (change < 0)
+            return false; // the first picture, or one of another size
+        if (change <= scale / 2000.0)
+            return true;
+        return before >= 0 && change > before * 0.5;
+    }
+    // The difference of the last two pictures; negative when fewer than two were read.
+    double Change() const { return last; }
+    unsigned Pictures() const { return count; }
+
+  private:
+    Picture previous;
+    double last = -1;
+    unsigned count = 0, limit = 8;
+};
+
 // Turns the rows of a texture read back from the GPU into a Picture. Integer formats are display-encoded already and
 // are taken as they are. Float formats hold linear light, of one of two kinds (`sceneLight`, set before the first
 // picture is read):
@@ -177,6 +271,36 @@ class Reader
                       values[i + 1] = g;
                       values[i + 2] = b;
                   });
+        return true;
+    }
+
+    // The app's skin mask picture (white where the composition treats a pixel as skin), thinned exactly as Read()
+    // thins a picture. The mask is drawn at the picture's white level, which is not known here: the brightest pixel
+    // is taken as 1. A picture without any skin gives a mask of zeros.
+    static bool ReadMask(SkinMask& out, DXGI_FORMAT format, const void* data, unsigned width, unsigned height,
+                         unsigned rowPitch)
+    {
+        if (!Readable(format) || !data || !width || !height)
+            return false;
+        const unsigned step =
+            std::max(1u, unsigned(std::ceil(std::sqrt(double(width) * double(height) / 600000.0))));
+        out.width = (width + step - 1) / step;
+        out.height = (height + step - 1) / step;
+        out.skin.assign(size_t(out.width) * out.height, 0.0f);
+        float peak = 0;
+        Visit(format, data, width, height, rowPitch, step, [&](size_t i, float r, float, float)
+              {
+                  const float value = std::isfinite(r) && r > 0 ? r : 0.0f;
+                  out.skin[i / 3] = value;
+                  peak = std::max(peak, value);
+              });
+        double sum = 0;
+        for (auto& value : out.skin)
+        {
+            value = peak > 1e-6f ? std::min(value / peak, 1.0f) : 0.0f;
+            sum += value;
+        }
+        out.share = sum / double(out.skin.size());
         return true;
     }
 
@@ -691,15 +815,28 @@ class Solver
         if (done)
             return;
         ++trials;
-        if (first || loss < bestLoss)
-        {
-            bestLoss = loss;
-            best = inner.Trial();
-        }
+        const Point measured = inner.Trial();
         if (first)
             firstLoss = loss;
-        first = false;
         inner.Report(loss);
+        // The model stage keeps the best of everything it measured. The stages after it start by measuring those
+        // values again and move only to what measures better than that: their own search holds the answer. A loss of
+        // an earlier stage is not compared with theirs, because the pictures of the model stage are read soon after
+        // a restart of the model's history and those of the later stages long after one.
+        if (stage == Stage::Model)
+        {
+            if (first || loss < bestLoss)
+            {
+                bestLoss = loss;
+                best = measured;
+            }
+        }
+        else
+        {
+            best = inner.Best();
+            bestLoss = inner.BestLoss();
+        }
+        first = false;
         if (!inner.Done() && trials < options.budget)
             return;
         if (stage == Stage::Polish || trials >= options.budget)

@@ -58,7 +58,7 @@ foreach ($name in @('amd_fidelityfx_loader_dx12.dll', 'amd_fidelityfx_upscaler_d
 $files['OptiScaler/D3D12_OptiScaler/D3D12Core.dll'] = Join-Path $root 'external/directx_agility_sdk/lib/D3D12Core.dll'
 # The 4-bit (NVFP4) kernels and the two pass-in-one weight sets (Original - NVFP4, NVFP4 2xPass-in-one, NVFP4 3xPass-in-one),
 # and the FP8 records of FP8 2xPass-in-one and FP8 3xPass-in-one (fp8/).
-foreach ($required in 'host4/modelA_fp8.plan', 'host4/fused_manifest.txt', 'int8/int8_set2.bin', 'fp8/fp8_set5.bin') {
+foreach ($required in 'host4/modelA_fp8.plan', 'host4/fused_manifest.txt', 'int8/int8_set2.bin', 'int8/int8_set3.bin', 'int8/int8_set4.bin', 'fp8/fp8_set5.bin') {
     if (!(Test-Path -LiteralPath (Join-Path $Nvfp4Assets $required) -PathType Leaf)) {
         throw "Missing $required in the model pack. Supply the v0.97 model folder with -Nvfp4Assets."
     }

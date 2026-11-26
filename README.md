@@ -53,7 +53,7 @@ FP8 students require a separately supplied `nvngx_dlssnr.dll`.
 
 Optional [peripheral spatial compression](docs/NR-SPATIAL-COMPRESSION.md) reduces NR work near the screen edges while retaining more centre detail. It supports DX12 and native Vulkan and combines with Model resolution.
 
-**Edit pass → Resolution and upscaling** adds optional independent scale, reconstruction, private upscaler
+A pass's **Resolution and upscaling** (under its pass tab) adds optional independent scale, reconstruction, private upscaler
 and peripheral-compression settings for each NR pass. Unset profiles inherit pass 1; final HDR/strength/skin
 composition still runs once. See [per-pass controls and validation limits](OptiScaler/dlssnr/README.md#independent-resolution-and-upscaling-per-pass).
 

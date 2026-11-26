@@ -84,7 +84,6 @@ Reference: official master `5ee53e38`. Each group states why its changed files a
 - `OptiScaler/dlssnr/DlssNr_MenuOverlay.h`
 - `OptiScaler/dlssnr/DlssNr_MenuSections.h`
 - `OptiScaler/dlssnr/DlssNr_PipelineCapture.h`
-- `OptiScaler/dlssnr/DlssNr_PipelineUi.h`
 - `OptiScaler/dlssnr/DlssNr_Pipeline_Dx12.cpp`
 - `OptiScaler/dlssnr/DlssNr_Pipeline_Dx12.h`
 - `OptiScaler/dlssnr/DlssNr_Placement.h`

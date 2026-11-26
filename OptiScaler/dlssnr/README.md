@@ -25,7 +25,7 @@ Paths are relative to `OptiScaler/dlssnr` unless prefixed with `shaders/`, which
 | --- | --- |
 | `DlssNr_Pipeline_Dx12.*`, `DlssNrPipeline_Vk.h` | Upscaler adapters |
 | `DlssNrFeature_Vk*`, `DlssNrFinished_Vk*` | Native Vulkan model/resources/presentation |
-| `DlssNr_Menu.cpp`, `DlssNr_MenuControls.cpp`, `DlssNr_MenuOverlay.*`, `DlssNr_PipelineUi.h` | Menu routing/status, controls, comparison tags and chart |
+| `DlssNr_Menu.cpp`, `DlssNr_MenuControls.cpp`, `DlssNr_MenuPresets.cpp`, `DlssNr_MenuOverlay.*` | Menu layout, status and placement; controls; presets and calibration; comparison tags |
 | `shaders/dlssnr/DlssNr_Dx12_Run.cpp` | Encoding, model execution and composition |
 | `shaders/dlssnr/DlssNr_Dx12_{Models,Resources,State,ModelState}*` | Model/resource ownership |
 | `shaders/dlssnr/DlssNr_Dx12_{DeferredSr,Enlarge}*`, `shaders/dlssnr/DlssNr_Upscaler_Dx12*` | Private upscaling |
@@ -36,7 +36,7 @@ Paths are relative to `OptiScaler/dlssnr` unless prefixed with `shaders/`, which
 D3D12 completion markers protect retirement; CPU frame counts only pair logical frames. Replaced owners stay registered until recordings and GPU work finish. Unresolved teardown work remains alive for process exit. Vulkan drains before resource replacement and separates creation/evaluation with events. See [GPU lifetime](../../docs/NR-GPU-RETIREMENT.md).
 
 
-The model menu's **Edit pass** selector exposes all 30 profiles, independently of the active pass count.
+The menu's pass tabs show the active passes; the profiles of inactive passes are kept and remain editable in `OptiScaler.ini`.
 Inactive profiles can be prepared in advance; later passes inherit pass 1 except for Local tone, which defaults to zero.
 
 ## Re-applying and borrowing later passes
@@ -59,7 +59,7 @@ and native Vulkan never borrow.
 
 ## Independent resolution and upscaling per pass
 
-Choose **Edit pass**, open **Resolution and upscaling**, and enable **Independent resolution and upscaling** for
+Choose the pass's tab, open **Resolution and upscaling**, and enable **Independent resolution and upscaling** for
 that pass. Each pass can use its own model scale (25–200%), supersample downsampler, enlargement method,
 private upscaler backend, and peripheral compression layout. Model tuning and resolution inheritance are
 separate. Disabling the resolution override restores inheritance without discarding model tuning.
