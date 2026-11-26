@@ -376,6 +376,12 @@ bool ModelVk::Impl::Evaluate(VkCommandBuffer cmdBuffer, const VkImageInfo& colou
         return false;
     }
 
+    if (!passConfig && Profiles::CompareModel(cfg))
+    {
+        PublishStatus(this, Backend::Vulkan, { false, "Native Vulkan comparison supports the original picture as the other side." });
+        return false;
+    }
+
     struct ReportStatus
     {
         Impl* owner;
@@ -396,7 +402,7 @@ bool ModelVk::Impl::Evaluate(VkCommandBuffer cmdBuffer, const VkImageInfo& colou
                 return;
             }
             const auto& state = owner->state;
-            StatusSnapshot snapshot { state.models[0].feature != nullptr && !state.failed, state.reason,
+            StatusSnapshot snapshot { state.models[0].Ready() && state.frames && !state.failed, state.reason,
                                       state.lastGpuTime, state.frames };
             snapshot.spatialStatus = state.spatialStatus;
             snapshot.spatialActive = state.spatialRan;
@@ -783,9 +789,18 @@ bool ModelVk::Impl::Evaluate(VkCommandBuffer cmdBuffer, const VkImageInfo& colou
     // and describe them as a full zero-origin region. The vectors keep the game's units; the scale
     // below converts them. Mirrors DlssNr_Dx12_Run.cpp.
     bool matchedGuides = false;
-    if (reduced && workWidth < width && cfg.DlssNrMatchGuides.value_or_default() && state.depthSmall.Valid() &&
-        state.motionSmall.Valid())
+    const bool croppedMotion = !spatial.active && (guides.motion.x || guides.motion.y ||
+        guides.motion.width != motionInfo.Width || guides.motion.height != motionInfo.Height);
+    const bool hostNeedsCrop = croppedMotion && std::any_of(state.models, state.models + passes,
+                                                             [](const auto& model) { return bool(model.host); });
+    if (hostNeedsCrop || (reduced && workWidth < width && cfg.DlssNrMatchGuides.value_or_default()))
     {
+        if (!state.depthSmall.Ensure(device, physicalDevice, workWidth, workHeight, VK_FORMAT_R32_SFLOAT) ||
+            !state.motionSmall.Ensure(device, physicalDevice, workWidth, workHeight, VK_FORMAT_R32G32B32A32_SFLOAT))
+        {
+            Fail("could not allocate Vulkan model guide images");
+            return false;
+        }
         DlssNrConstants resize {};
         resize.Mode = DlssNrMode_ResizePrivateGuides;
         resize.Width = workWidth;
@@ -934,7 +949,8 @@ bool ModelVk::Impl::Evaluate(VkCommandBuffer cmdBuffer, const VkImageInfo& colou
             state.reset = true;
             return false;
         }
-        Fail("the model refused to evaluate");
+        if (!state.failed)
+            Fail("the model refused to evaluate");
         return false;
     }
 
@@ -1100,16 +1116,6 @@ bool ModelVk::Evaluate(VkCommandBuffer cmd, const VkImageInfo& colour, const VkI
                        const VkImageInfo& motion, const VkImageInfo& output, const DlssNrFrameInfo_Vk& frame,
                        VkInstance instance, VkPhysicalDevice physicalDevice, VkDevice device, VkImageLayout inputLayout)
 {
-    // The 4-bit models exist on the D3D12 path only, and there is no fallback to the runtime's own model.
-    {
-        const auto& cfg = *Config::Instance();
-        const unsigned int passes = std::clamp(cfg.DlssNrPasses.value_or_default(), 1u, DlssNr::MaxPassCount);
-        if (Profiles::WantsNvfp4(cfg, passes))
-        {
-            Nvfp4::Refuse("the 4-bit models need the D3D12 processing path (this game runs NR on Vulkan)");
-            return false;
-        }
-    }
     return _impl->Evaluate(cmd, colour, depth, motion, output, frame, instance, physicalDevice, device, inputLayout);
 }
 } // namespace DlssNr

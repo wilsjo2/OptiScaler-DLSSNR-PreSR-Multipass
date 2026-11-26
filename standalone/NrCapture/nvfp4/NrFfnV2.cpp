@@ -11,7 +11,7 @@
 //
 // The runtime's kernels wait for their predecessors without a time limit. So the one thing this layer must never do
 // is launch a runtime kernel whose predecessor it swallowed: see the failure handling in Launch().
-#include "NrWeightUpload.h"
+#include "NrLayerDevice.h"
 #include "NrFourBitPlan.h"
 #include <windows.h>
 #include <bcrypt.h>
@@ -76,11 +76,7 @@ std::vector<unsigned char> ReadAsset(const fs::path& path) {
 }
 
 
-struct Buffer {
-    ComPtr<ID3D12Resource> resource;
-    uint64_t bytes = 0;
-    uint64_t Address() const { return resource->GetGPUVirtualAddress(); }
-};
+using Buffer = NrLayer::Buffer;
 
 ComPtr<ID3D12Resource> CreateBuffer(ID3D12Device* device, uint64_t bytes, D3D12_HEAP_TYPE heap, D3D12_RESOURCE_STATES state) {
     D3D12_RESOURCE_DESC desc{};
@@ -96,6 +92,7 @@ ComPtr<ID3D12Resource> CreateBuffer(ID3D12Device* device, uint64_t bytes, D3D12_
 }
 Buffer Allocate(ID3D12Device* device, uint64_t bytes) {
     bytes = (std::max<uint64_t>(bytes, 256) + 255) / 256 * 256;
+    if (NrLayer::active) return {{}, bytes, NrLayer::active->AllocateMemory(bytes, false)};
     return {CreateBuffer(device, bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS), bytes};
 }
 
@@ -197,7 +194,11 @@ NvAPI_Status Submit(State& state, ID3D12GraphicsCommandList* list, const NVAPI_C
     return NrFourBitPlan::current ? NrFourBitPlan::Submit(list, kernels, count) : state.launch(list, kernels, count);
 }
 
-State& S() { static State* state = new State; return *state; }
+State& S() {
+    if (NrLayer::active) return NrLayer::State<State>(NrLayer::active->ffn);
+    static State* state = new State;
+    return *state;
+}
 
 void Report(State& s, const std::string& text) {
     const std::string line = "NVFP4 feed-forward: " + text;
@@ -230,6 +231,7 @@ void Notice(State& s, const std::string& text) noexcept {
 bool RuntimeCarries(State&, int) { return NrFourBitPlan::current || GetModuleHandleW(L"nvngx_dlssnr.dll") != nullptr; }
 
 void Barrier(ID3D12GraphicsCommandList* commands) {
+    if (NrLayer::active) return NrLayer::active->Barrier();
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     commands->ResourceBarrier(1, &barrier);
@@ -344,13 +346,9 @@ void LoadWeights(ModelWeights& m, ID3D12Device* device, const fs::path& root) {
         }
 
         // Upload the weights on a queue of our own and wait: this runs once, while the model's first pass is recorded.
-        m.weights = Allocate(device, blob.size());
-        auto upload = CreateBuffer(device, blob.size(), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
-        void* mapped = nullptr;
-        Check(upload->Map(0, nullptr, &mapped), "NVFP4 upload map");
-        memcpy(mapped, blob.data(), blob.size());
-        upload->Unmap(0, nullptr);
-        NrWeightUpload::Copy(device, m.weights.resource.Get(), upload.Get(), blob.size());
+        m.weights = NrLayer::Upload(device, blob.size(), CreateBuffer, [&](void* mapped) {
+            memcpy(mapped, blob.data(), blob.size());
+        });
         m.trained = second;
         m.setAt = setAt;
         if (m.smallSplit || m.smallDirect) {
@@ -377,7 +375,7 @@ void LoadWeights(ModelWeights& m, ID3D12Device* device, const fs::path& root) {
 
 Session& SessionFor(ID3D12Device* device, uint64_t tokens) {
     auto& session = S().sessions[{device, tokens}];
-    if (!session.flags.resource) {
+    if (!session.flags) {
         try {
             const uint64_t tiles = (tokens + 127) / 128;
             for (auto& block : session.blocks) {
@@ -457,7 +455,7 @@ int RecordExpand(ID3D12GraphicsCommandList* commands, ID3D12Device* device, cons
     // Validate records and reserve scratch before submitting the first kernel of the pair.
     if (SmallContract(weights, tokens, opt) && weights.smallSplit) {
         const uint64_t bytes = uint64_t(weights.smallSplit) * (8 * tiles) * 256 * 64 * sizeof(float);
-        if (!buffers.partial.resource) buffers.partial = Allocate(device, bytes);
+        if (!buffers.partial) buffers.partial = Allocate(device, bytes);
         else if (buffers.partial.bytes < bytes) throw std::runtime_error("small FFN scratch shape changed in a live session");
     }
     if (++s.generation <= 0) s.generation = 1;

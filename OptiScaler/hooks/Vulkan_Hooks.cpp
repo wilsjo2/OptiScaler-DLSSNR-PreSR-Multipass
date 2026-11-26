@@ -684,6 +684,7 @@ static void hkvkDestroyDevice(VkDevice device, const VkAllocationCallbacks* pAll
         ReflexHooks::deviceDestroyed(device);
         InputCommon::vk_device_destroyed(device);
         NVNGXVkDeviceDestroyed(device);
+        DlssNr::VkExt::RecordHostDevice(device, false);
         FfxApiVkDeviceDestroyed(device);
         FSR2VkDeviceDestroyed(device);
         XeSSVkDeviceDestroyed(device);
@@ -693,6 +694,68 @@ static void hkvkDestroyDevice(VkDevice device, const VkAllocationCallbacks* pAll
     }
 
     o_vkDestroyDevice(device, pAllocator);
+}
+
+// Whether the device about to be created can run the independent NR runtimes on the game's own command
+// buffers: kernels are loaded with VK_NVX_binary_import, images are passed as 64-bit handles and buffers by
+// device address. Reads the final create info, so it runs after spoofing has settled the extension list and
+// the feature chain. Supplies the address feature itself only where nothing in the chain does, and never
+// overrides a choice the chain already carries.
+static bool PrepareNrHostDevice(VkPhysicalDevice physicalDevice, VkDeviceCreateInfo& createInfo,
+                                PFN_vkGetPhysicalDeviceFeatures2 getFeatures2,
+                                const std::vector<VkExtensionProperties>& supported,
+                                VkPhysicalDeviceBufferDeviceAddressFeatures& addresses,
+                                VkPhysicalDeviceBufferDeviceAddressFeaturesEXT& legacyAddresses)
+{
+    const auto enabled = [&](const char* name)
+    { return DlssNr::VkExt::ListHas(createInfo.ppEnabledExtensionNames, createInfo.enabledExtensionCount, name); };
+
+    const bool legacy = enabled(VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
+
+    if (getFeatures2 == nullptr || (!legacy && !enabled(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME)) ||
+        !enabled(VK_NVX_BINARY_IMPORT_EXTENSION_NAME) || !enabled(VK_NVX_IMAGE_VIEW_HANDLE_EXTENSION_NAME) ||
+        !DlssNr::VkExt::Contains(supported, VK_NVX_BINARY_IMPORT_EXTENSION_NAME, 2) ||
+        !DlssNr::VkExt::Contains(supported, VK_NVX_IMAGE_VIEW_HANDLE_EXTENSION_NAME, 3) ||
+        !DlssNr::VkExt::Contains(supported, "VK_NV_cuda_kernel_launch"))
+        return false;
+
+    void* feature = legacy ? static_cast<void*>(&legacyAddresses) : static_cast<void*>(&addresses);
+    VkPhysicalDeviceFeatures2 support { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, feature };
+    getFeatures2(physicalDevice, &support);
+
+    bool ready = (legacy ? legacyAddresses.bufferDeviceAddress : addresses.bufferDeviceAddress) != 0;
+    bool supplied = false;
+
+    for (auto* node = static_cast<const VkBaseInStructure*>(createInfo.pNext); node; node = node->pNext)
+    {
+        if (!legacy && node->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES)
+        {
+            supplied = true;
+            ready &= reinterpret_cast<const VkPhysicalDeviceVulkan12Features*>(node)->bufferDeviceAddress != 0;
+        }
+        else if (node->sType == addresses.sType)
+        {
+            supplied = true;
+            ready &= reinterpret_cast<const VkPhysicalDeviceBufferDeviceAddressFeatures*>(node)->bufferDeviceAddress !=
+                     0;
+        }
+        else if (node->sType == legacyAddresses.sType)
+        {
+            supplied = true;
+            ready &=
+                reinterpret_cast<const VkPhysicalDeviceBufferDeviceAddressFeaturesEXT*>(node)->bufferDeviceAddress != 0;
+        }
+    }
+
+    if (ready && !supplied)
+    {
+        addresses.bufferDeviceAddressCaptureReplay = addresses.bufferDeviceAddressMultiDevice = VK_FALSE;
+        legacyAddresses.bufferDeviceAddressCaptureReplay = legacyAddresses.bufferDeviceAddressMultiDevice = VK_FALSE;
+        addresses.pNext = legacyAddresses.pNext = const_cast<void*>(createInfo.pNext);
+        createInfo.pNext = feature;
+    }
+
+    return ready;
 }
 
 VALIDATE_HOOK(hkvkCreateDevice, PFN_vkCreateDevice)
@@ -749,14 +812,26 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
     // offers -- asking for an extension a driver does not have makes vkCreateDevice fail and the game
     // not start.
     DlssNr::VkExt::Merged nrExtensions;
+    std::vector<VkExtensionProperties> nrSupported;
+    // Outlive vkCreateDevice: one of them joins the feature chain when nothing else supplies the feature.
+    VkPhysicalDeviceBufferDeviceAddressFeatures addresses {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES
+    };
+    VkPhysicalDeviceBufferDeviceAddressFeaturesEXT legacyAddresses {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_EXT
+    };
+    bool hostReady = false;
 
     if (Config::Instance()->DlssNrEnabled.value_or_default())
     {
-        const auto supported = DlssNr::VkExt::SupportedDeviceExtensions(
-            o_vkGetInstanceProcAddr, State::Instance().VulkanInstance, physicalDevice);
+        nrSupported = DlssNr::VkExt::SupportedDeviceExtensions(o_vkGetInstanceProcAddr,
+                                                               State::Instance().VulkanInstance, physicalDevice);
+        const auto& supported = nrSupported;
 
-        nrExtensions.names.assign(localCreateInfo.ppEnabledExtensionNames,
-                                  localCreateInfo.ppEnabledExtensionNames + localCreateInfo.enabledExtensionCount);
+        if (localCreateInfo.enabledExtensionCount)
+            nrExtensions.names.assign(localCreateInfo.ppEnabledExtensionNames,
+                                      localCreateInfo.ppEnabledExtensionNames +
+                                          localCreateInfo.enabledExtensionCount);
 
         std::string present, added, missing;
 
@@ -765,6 +840,11 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
             const bool already = DlssNr::VkExt::ListHas(localCreateInfo.ppEnabledExtensionNames,
                                                         localCreateInfo.enabledExtensionCount, want);
 
+            // The legacy and KHR address extensions cannot be enabled together: keep the game's.
+            if (!strcmp(want, VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME) &&
+                DlssNr::VkExt::ListHas(localCreateInfo.ppEnabledExtensionNames, localCreateInfo.enabledExtensionCount,
+                                       VK_EXT_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME))
+                continue;
             if (already)
                 present += std::string(present.empty() ? "" : ", ") + want;
             else if (!DlssNr::VkExt::Contains(supported, want))
@@ -791,7 +871,6 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
             localCreateInfo.enabledExtensionCount = (uint32_t) nrExtensions.names.size();
         }
     }
-
 
     // Before spoofing, which drops the extensions it only pretends to have
     if (!State::Instance().vulkanSkipHooks && !State::Instance().creatingD3DDevice &&
@@ -823,6 +902,11 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
 
         timelineSemaphoresEnabled = TimelineSemaphoresEnabled(&localCreateInfo);
 
+        // After spoofing: it settles the extension list and the feature chain this reads.
+        if (Config::Instance()->DlssNrEnabled.value_or_default() && !State::Instance().creatingD3DDevice)
+            hostReady = PrepareNrHostDevice(physicalDevice, localCreateInfo, getPhysicalDeviceFeatures2,
+                                            nrSupported, addresses, legacyAddresses);
+
         result = o_vkCreateDevice(physicalDevice, &localCreateInfo, pAllocator, pDevice);
     }
 
@@ -836,6 +920,9 @@ static VkResult hkvkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevice
     {
         _fifoLatestReadyDevice = *pDevice;
     }
+
+    if (result == VK_SUCCESS)
+        DlssNr::VkExt::RecordHostDevice(*pDevice, hostReady);
 
     if (result == VK_SUCCESS)
     {

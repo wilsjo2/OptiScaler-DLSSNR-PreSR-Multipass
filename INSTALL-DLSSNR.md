@@ -8,7 +8,7 @@ The optional [RTX 40 MFG unlock](docs/RTX40-MFG.md) requires an explicitly enabl
 
 - A 64-bit game using an OptiScaler D3D12 path, a supported D3D11/Vulkan bridge, or native Vulkan NR.
 - The complete OptiScaler package and an NVIDIA driver. Keep the bundled `OptiScaler/nvfp4` folder with its model files.
-- The D3D12 pass host runs INT8 on RTX 30, 40 and 50 series and NVFP4 on RTX 50 series. Hardware validation for this release used an RTX 5090.
+- The independent D3D12 and native Vulkan runtimes target INT8 on RTX 30, 40 and 50 series and NVFP4 on RTX 50 series. Hardware validation used an RTX 5090. See the [Vulkan preset numbers and setup](docs/NR-VULKAN.md).
 - NVIDIA models and in-game FP8 students require a separately supplied `nvngx_dlssnr.dll` and driver support for NGX feature 18.
 
 NR runs inside OptiScaler. No NR helper DLL is required; remove the obsolete `nvngx.dll_dlssnr.dll` when upgrading. Keep the package's ordinary backend dependencies.

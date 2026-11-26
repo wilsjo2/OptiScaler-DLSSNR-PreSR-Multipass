@@ -6,7 +6,7 @@
 // We launch nr_swin4 instead, with the same grid and block shape, the runtime's own buffers and flags, and our weight
 // record. The runtime's neighbours wait for a block's flags without a time limit, so a kernel of ours must publish
 // every window's flag exactly as the runtime's does; it does so unconditionally at its end.
-#include "NrWeightUpload.h"
+#include "NrLayerDevice.h"
 #include "NrFourBitPlan.h"
 #include <windows.h>
 #include <bcrypt.h>
@@ -102,11 +102,7 @@ Kind KindOf(const char* name) {
     return k;
 }
 
-struct Buffer {
-    ComPtr<ID3D12Resource> resource;
-    uint64_t bytes = 0;
-    uint64_t Address() const { return resource->GetGPUVirtualAddress(); }
-};
+using Buffer = NrLayer::Buffer;
 ComPtr<ID3D12Resource> CreateBuffer(ID3D12Device* device, uint64_t bytes, D3D12_HEAP_TYPE heap, D3D12_RESOURCE_STATES state) {
     D3D12_RESOURCE_DESC desc{};
     desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -249,7 +245,11 @@ NvAPI_Status Submit(State& state, ID3D12GraphicsCommandList* list, const NVAPI_C
     return NrFourBitPlan::current ? NrFfnV2::SubmitNative(list, kernels, count) : state.launch(list, kernels, count);
 }
 
-State& S() { static State* state = new State; return *state; }
+State& S() {
+    if (NrLayer::active) return NrLayer::State<State>(NrLayer::active->swin);
+    static State* state = new State;
+    return *state;
+}
 
 void Report(State& s, const std::string& text) {
     const std::string line = "NVFP4 fused blocks: " + text;
@@ -268,6 +268,7 @@ void Notice(State& s, const std::string& text) noexcept {
 unsigned Log2(unsigned heads) { return heads == 1 ? 0 : heads == 2 ? 1 : heads == 4 ? 2 : 3; }
 
 void UavBarrier(ID3D12GraphicsCommandList* commands) noexcept {
+    if (NrLayer::active) return NrLayer::active->Barrier();
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     commands->ResourceBarrier(1, &barrier);
@@ -530,23 +531,19 @@ void LoadWeights(State& s, Device& d, ID3D12Device* device) {
         }
         cursor = (cursor + 511) / 512 * 512; d.blendAt = cursor; cursor += 512;
         const uint64_t bytes = (cursor + 4096 + 255) / 256 * 256;           // a kernel reads 16 bytes at a time
-        d.weights = {CreateBuffer(device, bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS), bytes};
-        auto upload = CreateBuffer(device, bytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
-        void* mapped = nullptr;
-        Check(upload->Map(0, nullptr, &mapped), "NVFP4 upload map");
-        memset(mapped, 0, size_t(bytes));
-        memcpy(mapped, blob.data(), blob.size());
-        for (unsigned n = 1; n < kMaxSets; ++n) {
-            const auto& set = s.manifest.sets[n];
-            if (!set.blob.empty()) memcpy(static_cast<unsigned char*>(mapped) + d.setBase[n], set.blob.data(), set.blob.size());
-            if (!set.fp8.empty()) memcpy(static_cast<unsigned char*>(mapped) + d.fp8Base[n], set.fp8.data(), set.fp8.size());
-            if (!set.levelBlob.empty()) memcpy(static_cast<unsigned char*>(mapped) + d.levelBase[n], set.levelBlob.data(), set.levelBlob.size());
-            if (!set.postBlob.empty()) memcpy(static_cast<unsigned char*>(mapped) + d.postBase[n], set.postBlob.data(), set.postBlob.size());
-            if (!set.preBlob.empty()) memcpy(static_cast<unsigned char*>(mapped) + d.preBase[n], set.preBlob.data(), set.preBlob.size());
-        }
-        memcpy(static_cast<unsigned char*>(mapped) + d.blendAt, &kBlendWeight, 2);
-        upload->Unmap(0, nullptr);
-        NrWeightUpload::Copy(device, d.weights.resource.Get(), upload.Get(), bytes);
+        d.weights = NrLayer::Upload(device, bytes, CreateBuffer, [&](void* mapped) {
+            memset(mapped, 0, size_t(bytes));
+            memcpy(mapped, blob.data(), blob.size());
+            for (unsigned n = 1; n < kMaxSets; ++n) {
+                const auto& set = s.manifest.sets[n];
+                if (!set.blob.empty()) memcpy(static_cast<unsigned char*>(mapped) + d.setBase[n], set.blob.data(), set.blob.size());
+                if (!set.fp8.empty()) memcpy(static_cast<unsigned char*>(mapped) + d.fp8Base[n], set.fp8.data(), set.fp8.size());
+                if (!set.levelBlob.empty()) memcpy(static_cast<unsigned char*>(mapped) + d.levelBase[n], set.levelBlob.data(), set.levelBlob.size());
+                if (!set.postBlob.empty()) memcpy(static_cast<unsigned char*>(mapped) + d.postBase[n], set.postBlob.data(), set.postBlob.size());
+                if (!set.preBlob.empty()) memcpy(static_cast<unsigned char*>(mapped) + d.preBase[n], set.preBlob.data(), set.preBlob.size());
+            }
+            memcpy(static_cast<unsigned char*>(mapped) + d.blendAt, &kBlendWeight, 2);
+        });
         d.weightsReady = true;
     } catch (const std::exception& error) {
         d.weights = {};

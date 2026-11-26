@@ -320,13 +320,21 @@ template <typename Option> static void NrModelCombo(Option* opt, bool allowInher
 
     if (ImGui::BeginCombo("NR model", preview))
     {
-        if (allowInherit && ImGui::Selectable("Inherit pass 1", inherited))
+        if (allowInherit && ImGui::Selectable("Inherit pass 1", inherited) && !inherited)
+        {
             *opt = std::optional<uint32_t> {};
+            if (!ReadStatus(Backend::Vulkan).failureReason.empty())
+                RetryAfterFailure();
+        }
         for (const auto& model : DlssNr::Nvfp4::kModels)
         {
             const bool selected = !inherited && preset == model.preset;
-            if (ImGui::Selectable(model.name, selected))
+            if (ImGui::Selectable(model.name, selected) && !selected)
+            {
                 *opt = (uint32_t) model.preset;
+                if (!ReadStatus(Backend::Vulkan).failureReason.empty())
+                    RetryAfterFailure();
+            }
             if (selected)
                 ImGui::SetItemDefaultFocus();
         }
@@ -340,12 +348,10 @@ template <typename Option> static void NrModelCombo(Option* opt, bool allowInher
                "FP8 2xPass-in-one, FP8 3xPass-in-one: the look of two or three passes in one, as FP8 models for\n"
                "RTX 40 and 50 series GPUs (NVIDIA's own FP8 kernels with weights of ours; files in\n"
                "OptiScaler/nvfp4/fp8).\n"
-               "INT8 Original, INT8 2xPass-in-one: INT8 models for RTX 30, 40 and 50 series GPUs (D3D12 path;\n"
+               "INT8 Original, INT8 2xPass-in-one: INT8 models for RTX 30, 40 and 50 series GPUs (Vulkan and D3D12;\n"
                "files in OptiScaler/nvfp4/int8). They run wholly on kernels of ours and need no NR runtime.\n"
                "NVFP4 Original, NVFP4 2xPass-in-one, NVFP4 3xPass-in-one: 4-bit models for RTX 50 series GPUs\n"
-               "(D3D12 path; files in OptiScaler/nvfp4). They carry all their own weights and use none of the\n"
-               "runtime's, so any NR runtime that offers the original model (preset 1) works, such as 310.8.0\n"
-               "or 310.9.16.0.\n"
+               "(Vulkan and D3D12). Keep the packaged OptiScaler/nvfp4 folder beside the proxy.\n"
                "There is no fallback: if a model of ours cannot run, NR is not applied and the reason is shown\n"
                "here in red.\n"
                "Run a pass-in-one model as ONE pass: Cinematic, intensity, tone and structure at 1.\n"
@@ -353,13 +359,18 @@ template <typename Option> static void NrModelCombo(Option* opt, bool allowInher
     if (!inherited && DlssNr::Nvfp4::IsNvfp4(preset))
     {
         const char* kind = DlssNr::Nvfp4::IsInt8(preset) ? "INT8" : DlssNr::Nvfp4::IsFp8(preset) ? "FP8" : "4-bit";
-        if (const auto problem = DlssNr::Nvfp4::Problem(); !problem.empty())
+        const auto feature = State::Instance().currentFeature;
+        const bool nativeVk = feature ? feature->Api() == API::Vulkan && !feature->IsWithDx12()
+                                      : State::Instance().swapchainApi == API::Vulkan;
+        const auto status = nativeVk ? ReadStatus(Backend::Vulkan) : StatusSnapshot{};
+        const auto problem = nativeVk ? status.failureReason : DlssNr::Nvfp4::Problem();
+        if (!problem.empty())
         {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.35f, 0.3f, 1.0f));
             ImGui::TextWrapped("%s model is NOT running, NR is not applied: %s", kind, problem.c_str());
             ImGui::PopStyleColor();
         }
-        else if (DlssNr::Nvfp4::Running())
+        else if (nativeVk ? status.running : DlssNr::Nvfp4::Running())
             ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1.0f), "%s model running", kind);
         else
             ImGui::TextDisabled("%s model starting...", kind);

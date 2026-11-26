@@ -8,6 +8,8 @@
 
 #include <Config.h>
 #include <State.h>
+#include <Util.h>
+#include "DlssNr_VkExtensions.h"
 #include <proxies/NVNGX_Proxy.h>
 
 #include <shaders/dlssnr/DlssNr_Vk.h>
@@ -80,8 +82,36 @@ bool ModelVk::Impl::CreateModel(VkCommandBuffer commandBuffer, unsigned int pass
                                 unsigned int height, const Config& config)
 {
     auto& model = state.models[passIndex];
-    if (model.feature)
+    if (model.Ready())
         return true;
+    const auto preset = Profiles::RequestedPreset(config, passIndex);
+    if (Nvfp4::UsesNativeHost(preset))
+    {
+        if (!VkExt::HostDeviceReady(state.device))
+        {
+            Fail("Enable NR before Vulkan device creation. The native host needs binary import, 64-bit image handles and buffer device addresses.");
+            return false;
+        }
+        try
+        {
+            model.host = VulkanHost::Create(state.physicalDevice, state.device,
+                Util::DllPath().parent_path() / L"OptiScaler" / L"nvfp4", preset, width, height);
+            LOG_INFO("DLSS-NR Vulkan: pass {} uses the independent {} runtime", passIndex + 1, Nvfp4::ModelName(preset));
+            return true;
+        }
+        catch (const std::exception& e)
+        {
+            Fail(e.what());
+            return false;
+        }
+    }
+    if (Nvfp4::IsNvfp4(preset))
+    {
+        Fail("This preset has no independent Vulkan host. Signed-kernel FP8 models require the D3D12 path.");
+        return false;
+    }
+    if (!InitDriver(state.instance, state.physicalDevice, state.device))
+        return false;
     if (!model.parameters)
     {
         const auto result = NVNGXProxy::VULKAN_GetCapabilityParameters()(&model.parameters);
@@ -137,6 +167,25 @@ NVSDK_NGX_Result ModelVk::Impl::EvaluateModel(VkCommandBuffer commandBuffer, uns
                                               bool depthInverted, float mvX, float mvY, const Config& config)
 {
     auto& model = state.models[passIndex];
+    if (model.host)
+    {
+        try
+        {
+            const auto& mv = motion->Resource.ImageViewInfo;
+            // The host samples the whole motion view. Discard history for a cropped guide until it is resampled.
+            const bool full = !guides.motion.x && !guides.motion.y && guides.motion.width == mv.Width &&
+                              guides.motion.height == mv.Height;
+            model.host->Evaluate(commandBuffer, colour->Resource.ImageViewInfo.ImageView, full ? mv.ImageView : VK_NULL_HANDLE,
+                                 output->Resource.ImageViewInfo.ImageView, Profiles::PassSettings(config, passIndex),
+                                 mvX, mvY, state.reset);
+            return NVSDK_NGX_Result_Success;
+        }
+        catch (const std::exception& e)
+        {
+            Fail(e.what());
+            return NVSDK_NGX_Result_Fail;
+        }
+    }
     auto* parameters = model.parameters;
     // The Vulkan SDK stores pointers to NVSDK_NGX_Resource_VK through the void-pointer overload.
     parameters->Set("DLSSNR.Color", static_cast<void*>(colour));
@@ -240,14 +289,11 @@ bool ModelVk::Impl::PrepareModels(VkCommandBuffer cmdBuffer, const DlssNrFrameIn
                                   uint32_t height, uint32_t workWidth, uint32_t workHeight, float workScale,
                                   unsigned int passes, const Spatial::Layout& spatial, const Config& cfg)
 {
-    const auto instance = state.instance;
     const auto physicalDevice = state.physicalDevice;
     const auto device = state.device;
     const bool beforeSr = frame.BeforeUpscale;
     const bool rayReconstruction = frame.RayReconstruction;
     const bool reduced = !spatial.active && (workWidth != width || workHeight != height);
-    if (!InitDriver(instance, physicalDevice, device))
-        return false;
 
     // A GPU event separates creation uploads from model evaluation.
     if (state.creationPending)
@@ -393,7 +439,7 @@ bool ModelVk::Impl::PrepareModels(VkCommandBuffer cmdBuffer, const DlssNrFrameIn
     bool created = false;
     for (unsigned int pass = 0; pass < passes; ++pass)
     {
-        if (state.models[pass].feature || Profiles::PassReapplies(cfg, pass))
+        if (state.models[pass].Ready() || Profiles::PassReapplies(cfg, pass))
             continue;
         if (!CreateModel(cmdBuffer, pass, workWidth, workHeight, cfg))
         {
@@ -409,7 +455,7 @@ bool ModelVk::Impl::PrepareModels(VkCommandBuffer cmdBuffer, const DlssNrFrameIn
 
         LOG_INFO("DLSS-NR Vulkan: pass {} built at {}x{} (frame {}x{}, {} SR)", pass + 1, workWidth, workHeight, width,
                  height, beforeSr ? "before" : "after");
-        created = true;
+        created |= state.models[pass].feature != nullptr;
         state.reset = true;
     }
     // NGX creation may record GPU uploads. Do not evaluate until a subsequent submission,
