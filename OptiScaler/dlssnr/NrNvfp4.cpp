@@ -270,7 +270,15 @@ bool BeginEvaluation(unsigned requestedPreset, ID3D12GraphicsCommandList* comman
         // NVIDIA's kernels with our records: no 4-bit kernel runs.
         gSetMissing = Fp8AssetProblem(model.weights);
         if (!gSetMissing.empty()) return false;
-        NrPassRuntime::Activate(model, commands);
+        try
+        {
+            NrPassRuntime::Activate(model, commands);
+        }
+        catch (const std::exception& e)
+        {
+            gSetMissing = e.what();
+            return false;
+        }
         gFp8Faults = NrFp8::Faults();
         gFp8Completed = NrFp8::Completed();
         return true;

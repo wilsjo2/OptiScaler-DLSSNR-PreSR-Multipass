@@ -409,7 +409,7 @@ void Processor::Evaluate(ID3D12Resource* colour, ID3D12Resource* depthGuide, ID3
         if (complete && nvfp4Applied.load() > 0) complete = NrFfnV2::SetComplete(selected, &missing);
         if (!complete) throw std::runtime_error(std::format("NR pass {}: model {} unavailable: {}.", pass + 1, chosen, missing));
     }
-    NrPassRuntime::Activate(model, c, chosen == 2);
+    NrPassRuntime::EnableFourBit(false, chosen == 2);
     const auto evaluate = [&](auto&& run) {
         if (borrowEvaluation < 0) { run(); return; }
         const unsigned evaluation = unsigned(borrowEvaluation++);
@@ -421,6 +421,7 @@ void Processor::Evaluate(ID3D12Resource* colour, ID3D12Resource* depthGuide, ID3
     };
     const bool isInt8 = Settings::IsInt8(chosen);
     if (NrPassRuntime::UsesHost(model)) {
+        NrFp8::UseSet(0, c);
         if (borrowEvaluation >= 0 && model.backend != NrPassRuntime::Backend::Nvfp4) throw std::runtime_error(std::format("NR pass {}: pass borrowing does not work with {}. Nothing was shown.", pass + 1, isInt8 ? "an INT8 model" : "the own pass host (NR_HOST=1)"));
         NrAmpere::UseSet(0);
         const size_t slot = std::min<size_t>(pass, hosts.size() - 1);

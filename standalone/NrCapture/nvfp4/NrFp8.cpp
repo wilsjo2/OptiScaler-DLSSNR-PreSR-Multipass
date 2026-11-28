@@ -97,7 +97,7 @@ Weights& LoadWeights(State& s, Device& d, ID3D12Device* device, unsigned n) {
         D3D12_HEAP_PROPERTIES heap{};
         heap.Type = D3D12_HEAP_TYPE_DEFAULT;
         desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-        Check(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&w.buffer)), "FP8 weight buffer");
+        Check(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&w.buffer)), "FP8 weight buffer");
         ComPtr<ID3D12Resource> upload;
         heap.Type = D3D12_HEAP_TYPE_UPLOAD;
         desc.Flags = D3D12_RESOURCE_FLAG_NONE;
@@ -108,7 +108,7 @@ Weights& LoadWeights(State& s, Device& d, ID3D12Device* device, unsigned n) {
         memcpy(mapped, blob.data(), blob.size());
         memcpy(static_cast<unsigned char*>(mapped) + w.blendAt, &kBlendWeight, 2);
         upload->Unmap(0, nullptr);
-        NrWeightUpload::Copy(device, w.buffer.Get(), upload.Get(), bytes);
+        NrWeightUpload::Copy(device, w.buffer.Get(), upload.Get(), bytes, D3D12_RESOURCE_STATE_COMMON);
         w.ready = true;
         Report(s, "set " + std::to_string(n) + " loaded (" + std::to_string(blob.size() >> 20) + " MB)");
         return w;
@@ -172,9 +172,10 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
     ListState& l = found->second;
     if (function && function->name == "cc_cb_clear") {
         Finish(s, l);
+        const auto device = l.device;
         const unsigned set = l.set;
         l = {};
-        l.device = function->device;
+        l.device = device;
         l.set = set;
         l.index = 1;
         return s.launch(commands, kernels, count);
@@ -202,7 +203,7 @@ NvAPI_Status __cdecl Launch(ID3D12GraphicsCommandList* commands, const NVAPI_CU_
         if (!at) throw std::runtime_error("launch " + std::to_string(first) + " " + why);
         if (!kernels->pParams)
             throw std::runtime_error("launch " + std::to_string(first) + " (" + name + ") has no parameter block");
-        const Weights& w = LoadWeights(s, s.devices[l.device], l.device, l.set);
+        const Weights& w = s.devices.at(l.device).sets[l.set];
         unsigned char edited[kMaxParams];
         memcpy(edited, kernels->pParams, kernels->paramSize);
         const uint64_t address = w.buffer->GetGPUVirtualAddress();
@@ -297,7 +298,15 @@ void UseSet(unsigned set, ID3D12GraphicsCommandList* commands) {
         s.lists.erase(found);
     }
     if (set >= kMaxSets) { ++s.faults; s.problem = "FP8 set " + std::to_string(set) + " does not exist"; }
-    else if (commands && set && s.enabled && s.sets[set].present) s.lists[commands].set = set;
+    else if (commands && set && s.enabled && s.sets[set].present) {
+        // Finish the transfer before entering the runtime's first kernel callback.
+        ComPtr<ID3D12Device> device;
+        Check(commands->GetDevice(IID_PPV_ARGS(&device)), "FP8 command list device");
+        LoadWeights(s, s.devices[device.Get()], device.Get(), set);
+        auto& list = s.lists[commands];
+        list.device = device.Get();
+        list.set = set;
+    }
 }
 
 bool SetComplete(unsigned set, std::string* missing) {

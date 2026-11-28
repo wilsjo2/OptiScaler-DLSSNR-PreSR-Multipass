@@ -53,6 +53,7 @@ struct Fp8
     unsigned set = 0, used = 0, missingSet = 0;
     unsigned long long completed = 0, faults = 0;
     bool faultNext = false; // the next evaluation with a set does not match
+    bool failUpload = false;
     unsigned released = 0;
 } fp8;
 std::vector<std::string> log;
@@ -156,7 +157,10 @@ void Enable(const Options&)
 }
 void Disable() { Mock::fp8.enabled = false; }
 bool Enabled() { return Mock::fp8.enabled; }
-void UseSet(unsigned set, ID3D12GraphicsCommandList*) { Mock::fp8.set = set; }
+void UseSet(unsigned set, ID3D12GraphicsCommandList*) {
+    if (set && Mock::fp8.failUpload) throw std::runtime_error("test weight upload failed");
+    Mock::fp8.set = set;
+}
 bool SetComplete(unsigned set, std::string* missing)
 {
     const bool complete = Mock::fp8.enabled && set && set != Mock::fp8.missingSet;
@@ -356,6 +360,10 @@ int main()
     CHECK(!Pass(ModelFp8Triple) && Contains(Problem(), "fp8/fp8_set2"));
     CHECK(Pass(ModelFp8Double));
     Mock::fp8.missingSet = 0;
+    Mock::fp8.failUpload = true;
+    CHECK(!BeginEvaluation(ModelFp8Double, nullptr));
+    CHECK(!OursRan(true) && Contains(Problem(), "weight upload failed") && Mock::fp8.set == 0);
+    Mock::fp8.failUpload = false;
 
     // A model number this build does not have is refused, never run as another model.
     CHECK(!Pass(9) && Contains(Problem(), "removed from this build"));

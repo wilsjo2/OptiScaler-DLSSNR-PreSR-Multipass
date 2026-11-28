@@ -90,7 +90,8 @@ inline void Copy(ID3D12Device* device, ID3D12Resource* target, ID3D12Resource* s
     transfer->source = source;
     transfer->target = target;
     D3D12_COMMAND_QUEUE_DESC queueDesc {};
-    queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    // A COMMON buffer can be uploaded on the copy engine without allocating a graphics queue.
+    queueDesc.Type = state == D3D12_RESOURCE_STATE_COMMON ? D3D12_COMMAND_LIST_TYPE_COPY : D3D12_COMMAND_LIST_TYPE_DIRECT;
     detail::Check(device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&transfer->queue)), "queue creation");
     detail::Check(device->CreateCommandAllocator(queueDesc.Type, IID_PPV_ARGS(&transfer->allocator)), "allocator creation");
     detail::Check(device->CreateCommandList(0, queueDesc.Type, transfer->allocator.Get(), nullptr, IID_PPV_ARGS(&transfer->list)), "list creation");

@@ -3787,11 +3787,9 @@ void MenuCommon::RenderMainMenuHeaderMessages(RenderMenuContext& ctx)
 
 void MenuCommon::RenderUpscalerStateMessage(RenderMenuContext& ctx)
 {
-    auto& state = ctx.state;
     auto config = ctx.config;
     auto& currentFeature = ctx.currentFeature;
     auto& menuResScale = ctx.menuResScale;
-    auto& primaryGpu = *ctx.primaryGpu;
 
     // No active upscaler message
     if (currentFeature == nullptr || !currentFeature->IsInited())
@@ -3803,62 +3801,20 @@ void MenuCommon::RenderUpscalerStateMessage(RenderMenuContext& ctx)
         else
             ImGui::SetWindowFontScale(menuResScale * 2.0f);
 
-        if (state.nvngxExists || state.nvngxReplacement.has_value() ||
-            (state.libxessExists || XeSSProxy::Module() != nullptr))
-        {
-            ImGui::Spacing();
-            ImGui::TextLinkOpenURL("Check game compatibility and setup",
-                                   "https://github.com/optiscaler/OptiScaler/wiki/Compatibility-List");
-            ImGui::Spacing();
+        ImGui::TextWrapped("Waiting for the game to submit an upscaler frame. "
+                           "If the game offers DLSS, FSR or XeSS, enable it and enter gameplay. "
+                           "Games without a compatible input need an upscaler mod or a feeder.");
 
-            std::vector<std::string> upscalers;
-
-            if (state.fsrHooks)
-                upscalers.push_back("FSR");
-
-            if (state.nvngxExists || state.nvngxReplacement.has_value() || primaryGpu.dlssCapable)
-                upscalers.push_back("DLSS");
-
-            if (state.libxessExists || XeSSProxy::Module() != nullptr)
-                upscalers.push_back("XeSS");
-
-            auto joined = upscalers | std::views::join_with(std::string { " or " });
-
-            std::string joinedUpscalers(joined.begin(), joined.end());
-
-            ImGui::PushTextWrapPos(0.0f);
-            ImGui::Text("Waiting for a compatible upscaler input.\n"
-                        "If offered in the game options, select %s.\n"
-                        "Load a save to activate it. Some games need an upscaler mod.",
-                        joinedUpscalers.c_str());
-            ImGui::PopTextWrapPos();
-
-            if (config->UseHQFont.value_or_default())
-                ImGui::PopFontSize();
-            else
-                ImGui::SetWindowFontScale(menuResScale);
-
-            ImGui::Spacing();
-
-            RenderDetectedCard(ctx);
-
-            ImGui::Spacing();
-        }
+        if (config->UseHQFont.value_or_default())
+            ImGui::PopFontSize();
         else
-        {
-            ImGui::Spacing();
-            ImGui::PushTextWrapPos(0.0f);
-            ImGui::Text("Can't find nvngx.dll and libxess.dll and FSR inputs\nUpscaling support will NOT work.");
-            ImGui::PopTextWrapPos();
-            ImGui::Spacing();
+            ImGui::SetWindowFontScale(menuResScale);
 
-            if (config->UseHQFont.value_or_default())
-                ImGui::PopFont();
-            else
-                ImGui::SetWindowFontScale(menuResScale);
-
-            RenderDetectedCard(ctx);
-        }
+        ImGui::Spacing();
+        ImGui::TextLinkOpenURL("Check game compatibility and setup",
+                               "https://github.com/optiscaler/OptiScaler/wiki/Compatibility-List");
+        ImGui::Spacing();
+        RenderDetectedCard(ctx);
     }
     else if (currentFeature->IsFrozen())
     {

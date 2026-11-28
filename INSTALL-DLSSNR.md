@@ -52,6 +52,14 @@ Passes=1
 WorkingScale=1.0
 ```
 
+### Games without a built-in upscaler
+
+The in-game path needs frames from a compatible upscaler. In Elden Ring, an upscaling mod such as ERSS supplies that input. Installing OptiScaler alone can display the overlay while it waits for frames.
+
+DLSS5-Feeder can supply the input in other games. Feeder 2.0 has its own OptiScaler fork, so check which DLL its installer selected. To use this build with the 64-bit helper, put the standard package in `host64`, rename `OptiScaler.dll` to `winmm.dll`, and keep `OptiScaler.ini` and the `OptiScaler` directory beside it. Set `[Inputs] EnableDlssInputs=true`, `[Hooks] HookOriginalNvngxOnly=false`, `[Upscalers] Dx12Upscaler=dlss` and `[DlssNr] Enabled=true`. Supply `nvngx_dlss.dll` for DLSS and the matching `nvngx_dlssnr.dll` for NVIDIA or FP8 models. Run `dlss5-feed-host64.exe --test` there and check `dlss5-feed-host.log` for NGX routing and completed evaluations. For an in-process install, use the game executable's directory. [Feeder 2.0 setup](https://github.com/jlrouzies-fr/DLSS5-Feeder/tree/v2.0.0#readme)
+
+The standalone [Display Filter](standalone/NrCapture/README.md) can also process a captured game window without a game upscaler or Feeder.
+
 ## Placement and resolution
 
 | **Where NR runs** | Behaviour |

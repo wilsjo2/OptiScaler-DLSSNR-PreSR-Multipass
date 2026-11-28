@@ -34,6 +34,7 @@ void Disable();
 bool Enabled();
 // The set of the evaluations that follow (0: none, the runtime's own records, nothing is counted). Call it between
 // evaluations only.
+// Uploads the records on first use and throws on upload failure, before arming the command list.
 // Only the specified command list may use these records. Other evaluations keep their own model.
 void UseSet(unsigned set, ID3D12GraphicsCommandList* commands);
 // Whether `set` was read (on false, *missing names the files).
